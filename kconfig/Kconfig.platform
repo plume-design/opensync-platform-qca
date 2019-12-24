@@ -1,0 +1,27 @@
+menuconfig PLATFORM_IS_QCA
+    bool "Qualcomm"
+    help
+        Support for Qualcomm QSDK, various versions
+
+if PLATFORM_IS_QCA
+
+config QCA_SDK_PATH
+    string "Qualcomm SDK PATH"
+
+choice
+    prompt "QSDK Version"
+    config PLATFORM_QCA_QSDK52
+        bool "QSDK 5.2"
+        select QSDK
+
+    config PLATFORM_QCA_QSDK53
+        bool "QSDK 5.3"
+endchoice
+
+config QSDK_VERSION
+    hex
+    default 0x0502 if PLATFORM_QCA_QSDK52
+    default 0x0503 if PLATFORM_QCA_QSDK53
+    default 0
+
+endif

@@ -1,0 +1,36 @@
+#!/bin/sh
+# designed to be called from within Makefile, not standalone.
+#
+# unset env variables which were defined in previous Makefile(s).
+# due to the fact that openwrt is a build system on it's own and
+# don't want to use these environment variables while building it.
+#
+if [ $# -lt 1 ];
+then
+    echo "Usage: `basename $0` <sdk-path> [make params]"
+    exit 1
+fi
+
+if [ "${V}" = "1" ]
+then
+VERBOSE_OUTPUT="V=s"
+else
+VERBOSE_OUTPUT=""
+fi
+
+SDK_DIR=$1
+shift
+
+unset MAKELEVEL
+unset CC
+unset CXX
+unset STAGING_DIR
+unset MFLAGS
+unset LIBS
+unset CFLAGS
+unset MAKEFLAGS
+unset TARGET
+
+export PKG_SKIP_CCACHE=1
+eval  make -j1 --no-print-directory -C ${SDK_DIR} $* ${VERBOSE_OUTPUT}
+
