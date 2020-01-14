@@ -5884,7 +5884,7 @@ static bool
 util_ping_cmd(const char *ipstr)
 {
     char cmd[256];
-    bool rc;
+    int rc;
 
     snprintf(cmd, sizeof(cmd), "ping %s -s %d -c %d -w %d >/dev/null 2>&1",
              ipstr, DEFAULT_PING_PACKET_SIZE, DEFAULT_PING_PACKET_CNT,
@@ -5892,34 +5892,29 @@ util_ping_cmd(const char *ipstr)
 
     rc = target_device_execute(cmd);
     LOGD("Ping %s result %d (cmd=%s)", ipstr, rc, cmd);
-    if (!rc)
-        LOGI("Ping %s failed (cmd=%s)", ipstr, cmd);
 
     return rc;
 }
 
-static void
-util_arpping_cmd(const char *ipstr)
+static bool
+util_arping_cmd(const char *ipstr)
 {
     char cmd[256];
+    bool ret;
 
-    /* ARP traffic tends to be treated differently, i.e.
-     * it lands on different TID in Wi-Fi driver.
-     * There's a chance its choking up on default TID0
-     * but works fine on TID7 which handles ARP/DHCP.
-     * It's nice to detect that as it helps debugging.
-     */
-    if (strstr(ipstr, "169.254.")) {
-        snprintf(ARRAY_AND_SIZE(cmd),
-                 "arping -I \"$(ip ro get %s"
-                 " | cut -d' ' -f3"
-                 " | sed 1q)\" -c %d -w %d %s",
-                 ipstr,
-                 DEFAULT_PING_PACKET_CNT,
-                 DEFAULT_PING_TIMEOUT,
-                 ipstr);
-        LOGI("Arping %s result %d (cmd=%s)", ipstr, target_device_execute(cmd), cmd);
-    }
+    snprintf(ARRAY_AND_SIZE(cmd),
+             "arping -I \"$(ip ro get %s"
+             " | cut -d' ' -f3"
+             " | sed 1q)\" -c %d -w %d %s",
+             ipstr,
+             DEFAULT_PING_PACKET_CNT,
+             DEFAULT_PING_TIMEOUT,
+             ipstr);
+
+    ret = target_device_execute(cmd);
+
+    LOGD("Arping %s result %d (cmd=%s)", ipstr, ret, cmd);
+    return ret;
 }
 
 static bool
@@ -6047,7 +6042,7 @@ util_connectivity_link_check(const char *ifname)
 
     if (util_get_link_ip(ifname, &link_ip)) {
         if (util_ping_cmd(inet_ntoa(link_ip)) == false) {
-            util_arpping_cmd(inet_ntoa(link_ip));
+            util_arping_cmd(inet_ntoa(link_ip));
             return false;
         }
     }
@@ -6058,17 +6053,19 @@ static bool
 util_connectivity_router_check()
 {
     struct in_addr r_addr;
+    bool           ret;
 
     if (util_get_router_ip(&r_addr) == false) {
         // If we don't have a router, that's considered a failure
         return false;
     }
 
-    if (util_ping_cmd(inet_ntoa(r_addr)) == false) {
-        return false;
+    ret = util_ping_cmd(inet_ntoa(r_addr));
+    if (!ret) {
+        LOGD("Router check: ping failed, arping checking");
+        ret = util_arping_cmd(inet_ntoa(r_addr));
     }
-
-    return true;
+    return ret;
 }
 
 static bool
