@@ -22,40 +22,4 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-##############################################################################
-#
-# IOCTL 80211 abstraction layer - lib
-#
-##############################################################################
-UNIT_NAME := ioctl80211
-
-#
-# Static library type
-#
-UNIT_TYPE := LIB
-
-#
-# IOCTL files
-#
-UNIT_SRC += ioctl80211.c
-UNIT_SRC += ioctl80211_survey.c
-UNIT_SRC += ioctl80211_scan.c
-UNIT_SRC += ioctl80211_client.c
-UNIT_SRC += ioctl80211_radio.c
-UNIT_SRC += ioctl80211_device.c
-ifeq ($(CONFIG_SM_CAPACITY_QUEUE_STATS),y)
-UNIT_SRC += ioctl80211_capacity.c
-endif
-UNIT_SRC += ioctl80211_priv.c
-
-UNIT_CFLAGS := -I$(UNIT_PATH)/inc
-UNIT_CFLAGS += -Isrc/lib/datapipeline/inc
-
-UNIT_EXPORT_CFLAGS := $(UNIT_CFLAGS)
-
-UNIT_DEPS := src/lib/ds
-UNIT_DEPS := src/lib/common
-UNIT_DEPS += src/lib/evsched
-UNIT_DEPS += src/lib/schema
-UNIT_DEPS += src/lib/const
-
+UNIT_SRC_TOP += $(if $(CONFIG_OSP_L2SWITCH_SWCONFIG),$(OVERRIDE_DIR)/src/osp_l2switch_swconfig.c)

@@ -47,10 +47,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <unistd.h>
 #include <getopt.h>
 #include <stdarg.h>
-#include <pthread.h>
 #include <linux/types.h>
 #include <linux/netlink.h>
 #include <linux/wireless.h>
+#include <linux/rtnetlink.h>
 
 #include <asm/byteorder.h>
 #if defined(__LITTLE_ENDIAN)
@@ -99,10 +99,12 @@ typedef enum {
 
 static bsal_event_cb_t      _bsal_event_cb      = NULL;
 static int                  _bsal_netlink_fd    = -1;
+static int                  _bsal_rt_netlink_fd = -1;
 static int                  _bsal_ioctl_fd      = -1;
 
 static struct ev_loop       *_ev_loop           = NULL;
 static struct ev_io         _evio;
+static struct ev_io         _rt_evio;
 
 static c_item_t map_disc_source[] = {
     C_ITEM_VAL(BSTEERING_SOURCE_LOCAL,          BSAL_DISC_SOURCE_LOCAL),
@@ -123,6 +125,8 @@ static c_item_t map_rssi_xing[] = {
 /***************************************************************************************/
 
 static void qca_bsal_event_process();
+static int qca_bsal_rt_netlink_init(void);
+static void qca_bsal_rt_netlink_cleanup(void);
 
 /***************************************************************************************/
 
@@ -135,6 +139,159 @@ static void qca_bsal_events_evio_cb(struct ev_loop *loop, struct ev_io *evio, in
     }
 
     return;
+}
+
+#define util_nl_each_msg(buf, hdr, len) \
+    for (hdr = buf; NLMSG_OK(hdr, len); hdr = NLMSG_NEXT(hdr, len))
+
+#define util_nl_each_msg_type(buf, hdr, len, type) \
+    util_nl_each_msg(buf, hdr, len) \
+        if (hdr->nlmsg_type == type)
+
+#define util_nl_each_attr(hdr, attr, attrlen) \
+    for (attr = NLMSG_DATA(hdr) + NLMSG_ALIGN(sizeof(struct ifinfomsg)), \
+         attrlen = NLMSG_PAYLOAD(hdr, sizeof(struct ifinfomsg)); \
+         RTA_OK(attr, attrlen); \
+         attr = RTA_NEXT(attr, attrlen))
+
+#define util_nl_each_attr_type(hdr, attr, attrlen, type) \
+    util_nl_each_attr(hdr, attr, attrlen) \
+        if (attr->rta_type == type)
+
+#define util_nl_iwe_data(iwe) \
+    ((void *)(iwe) + IW_EV_LCP_LEN)
+
+#define util_nl_iwe_payload(iwe) \
+    ((iwe)->len - IW_EV_POINT_LEN)
+
+#define util_nl_iwe_next(iwe, iwelen) \
+    ( (iwelen) -= (iwe)->len, (void *)(iwe) + (iwe)->len )
+
+#define util_nl_iwe_ok(iwe, iwelen) \
+    ((iwelen) >= (iwe)->len && (iwelen) > 0)
+
+#define util_nl_each_iwe(attr, iwe, iwelen) \
+    for (iwe = RTA_DATA(attr), \
+         iwelen = RTA_PAYLOAD(attr); \
+         util_nl_iwe_ok(iwe, iwelen); \
+         iwe = util_nl_iwe_next(iwe, iwelen))
+
+#define util_nl_each_iwe_type(attr, iwe, iwelen, type) \
+    util_nl_each_iwe(attr, iwe, iwelen) \
+        if (iwe->cmd == type)
+
+static void util_nl_parse_iwevcustom(
+        const char *ifname,
+        const void *data,
+        int len)
+{
+    #define MGMT_FRAM_TAG_SIZE 30  /* hardcoded in driver */
+
+    const struct iw_point *iwp;
+    const char *custom;
+    bsal_event_t event;
+    unsigned int length, i;
+
+    iwp = data - IW_EV_POINT_OFF;
+    data += IW_EV_POINT_LEN - IW_EV_POINT_OFF;
+
+    LOGT("%s: parsing %p, flags=%d length=%d (total=%d)",
+         ifname, data, iwp->flags, iwp->length, len);
+
+    if (iwp->length > len) {
+        LOGI("%s: failed to parse iwevcustom, too long", ifname);
+        return;
+    }
+
+    if (iwp->flags)
+        return;
+
+    memset(&event, 0, sizeof(event));
+    custom = data;
+    if (strncmp(custom, "Manage.action ", 14) == 0) {
+        length = atoi(custom + 14);
+        custom += MGMT_FRAM_TAG_SIZE;
+
+        LOGT("%s action length %d", ifname, length);
+
+        if (length + MGMT_FRAM_TAG_SIZE > iwp->length) {
+            LOGI("%s action frame length incorrect %d %d",
+                 ifname, length + MGMT_FRAM_TAG_SIZE, iwp->length);
+            return;
+        }
+
+        if (length > sizeof(event.data.action_frame.data)) {
+            LOGI("%s action frame length exceed buffer size %d (%d)",
+                 ifname, sizeof(event.data.action_frame.data), length);
+            return;
+        }
+
+        for (i = 0; i < length; i+=8) {
+            LOGT("%02x %02x %02x %02x %02x %02x %02x %02x",
+                 custom[i], custom[i+1], custom[i+2], custom[i+3],
+                 custom[i+4], custom[i+5], custom[i+6], custom[i+7]);
+        }
+
+        event.type = BSAL_EVENT_ACTION_FRAME;
+        STRSCPY(event.ifname, ifname);
+        memcpy(event.data.action_frame.data, custom, length);
+        event.data.action_frame.data_len = length;
+
+        _bsal_event_cb(&event);
+    }
+}
+
+static void util_nl_parse(const void *buf, unsigned int len)
+{
+    const struct iw_event *iwe;
+    const struct nlmsghdr *hdr;
+    const struct rtattr *attr;
+    char ifname[32];
+    int attrlen;
+    int iwelen;
+
+    util_nl_each_msg_type(buf, hdr, len, RTM_NEWLINK) {
+        memset(ifname, 0, sizeof(ifname));
+
+        util_nl_each_attr_type(hdr, attr, attrlen, IFLA_IFNAME)
+            memcpy(ifname, RTA_DATA(attr), RTA_PAYLOAD(attr));
+
+        if (strlen(ifname) == 0)
+            continue;
+
+        util_nl_each_attr_type(hdr, attr, attrlen, IFLA_WIRELESS)
+            util_nl_each_iwe_type(attr, iwe, iwelen, IWEVASSOCREQIE)
+                util_nl_parse_iwevcustom(ifname,
+                                         util_nl_iwe_data(iwe),
+                                         util_nl_iwe_payload(iwe));
+    }
+}
+
+static void qca_bsal_events_rt_evio_cb(struct ev_loop *loop, struct ev_io *evio, int revents)
+{
+    char buf[4096];
+    int len;
+
+    len = recvfrom(_bsal_rt_netlink_fd, buf, sizeof(buf), MSG_DONTWAIT, NULL, 0);
+    if (len < 0) {
+        if (errno == EAGAIN) {
+            return;
+        }
+
+        if (errno == ENOBUFS) {
+            LOGW("rt netlink overrun");
+            return;
+        }
+
+        LOGW("failed to recvfrom(): %d (%s), restarting listening for rt netlink",
+             errno, strerror(errno));
+        qca_bsal_rt_netlink_cleanup();
+        qca_bsal_rt_netlink_init();
+        return;
+    }
+
+    LOGT("%s: received %d bytes", __func__, len);
+    util_nl_parse(buf, len);
 }
 
 static int qca_bsal_ioctl_init(void)
@@ -150,6 +307,16 @@ static int qca_bsal_ioctl_init(void)
     _bsal_ioctl_fd = fd;
 
     return 0;
+}
+
+static void qca_bsal_ioctl_cleanup(void)
+{
+    if (_bsal_ioctl_fd == -1) {
+        return;
+    }
+
+    close(_bsal_ioctl_fd);
+    _bsal_ioctl_fd = -1;
 }
 
 static int qca_bsal_netlink_init(void)
@@ -179,9 +346,77 @@ static int qca_bsal_netlink_init(void)
     }
 
     _bsal_netlink_fd = fd;
+    ev_io_init(&_evio, qca_bsal_events_evio_cb, fd, EV_READ);
+    ev_io_start(_ev_loop, &_evio);
 
     LOGN("Netlink events enabled");
     return _bsal_netlink_fd;
+}
+
+static void qca_bsal_netlink_cleanup(void)
+{
+    if (_bsal_netlink_fd == -1) {
+        return;
+    }
+
+    ev_io_stop(_ev_loop, &_evio);
+    close(_bsal_netlink_fd);
+    _bsal_netlink_fd = -1;
+}
+
+static int qca_bsal_rt_netlink_init(void)
+{
+    struct sockaddr_nl  addr;
+    int                 ret;
+    int                 fd;
+
+    /*
+     * Perfectly we should also enable/register here, what kind
+     * of events (PROBE/ACTION) we would like to get via this
+     * RT Netlink socket. But today hostapd already do that and
+     * we rely on that.
+     */
+    if (_bsal_rt_netlink_fd != -1) {
+        return 0;
+    }
+
+    /* Create netlink socket */
+    fd = socket(PF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
+    if (fd < 0) {
+        LOGE("Failed to create rt netlink socket, errno = %d", errno);
+        return -1;
+    }
+
+    /* Bind netlink socket */
+    memset(&addr, 0, sizeof(addr));
+    addr.nl_family      = AF_NETLINK;
+    addr.nl_groups      = RTMGRP_LINK;
+
+    ret = bind(fd, (const struct sockaddr *)&addr, sizeof(addr));
+    if (ret < 0) {
+        close(fd);
+        LOGE("Failed to bind rt netlink socket, errno = %d", errno);
+        return -1;
+    }
+
+    _bsal_rt_netlink_fd = fd;
+
+    ev_io_init(&_rt_evio, qca_bsal_events_rt_evio_cb, fd, EV_READ);
+    ev_io_start(_ev_loop, &_rt_evio);
+
+    LOGN("rt netlink events enabled");
+    return 0;
+}
+
+static void qca_bsal_rt_netlink_cleanup(void)
+{
+    if (_bsal_rt_netlink_fd == -1) {
+        return;
+    }
+
+    ev_io_stop(_ev_loop, &_rt_evio);
+    close(_bsal_rt_netlink_fd);
+    _bsal_rt_netlink_fd = -1;
 }
 
 static int qca_bsal_if_netlink_init(const bsal_ifconfig_t *ifcfg, bool enable)
@@ -281,7 +516,7 @@ static void qca_bsal_event_process(void)
         return;
     }
 
-    strncpy(event->ifname, ifname, BSAL_IFNAME_LEN);
+    STRSCPY(event->ifname, ifname);
 
     switch (bsev->type) {
 
@@ -496,7 +731,7 @@ static int qca_bsal_bs_enable(
     athdbg.data.bsteering_enable = enable;
 
     memset(&iwreq, 0, sizeof(iwreq));
-    strncpy(iwreq.ifr_name, ifname, sizeof(iwreq.ifr_name) - 1);
+    STRSCPY(iwreq.ifr_name, ifname);
     iwreq.u.data.pointer = (void *)&athdbg;
     iwreq.u.data.length  = sizeof(athdbg);
 
@@ -513,7 +748,7 @@ static int qca_bsal_bs_enable(
     athdbg.data.bsteering_enable = enable;
 
     memset(&iwreq, 0, sizeof(iwreq));
-    strncpy(iwreq.ifr_name, ifname, sizeof(iwreq.ifr_name) - 1);
+    STRSCPY(iwreq.ifr_name, ifname);
     iwreq.u.data.pointer = (void *)&athdbg;
     iwreq.u.data.length  = sizeof(athdbg);
 
@@ -563,7 +798,7 @@ static int qca_bsal_bs_config(
     athdbg.data.bsteering_param.high_tx_rate_crossing_threshold  = 1;
 
     memset(&iwreq, 0, sizeof(iwreq));
-    strncpy(iwreq.ifr_name, ifcfg->ifname, sizeof(iwreq.ifr_name) - 1);
+    STRSCPY(iwreq.ifr_name, ifcfg->ifname);
     iwreq.u.data.pointer = (void *)&athdbg;
     iwreq.u.data.length  = sizeof(athdbg);
 
@@ -581,7 +816,7 @@ static int qca_bsal_bs_config(
     athdbg.data.bsteering_dbg_param.raw_rssi_log_enable         = ifcfg->debug.raw_rssi;
 
     memset(&iwreq, 0, sizeof(iwreq));
-    strncpy(iwreq.ifr_name, ifcfg->ifname, sizeof(iwreq.ifr_name) - 1);
+    STRSCPY(iwreq.ifr_name, ifcfg->ifname);
     iwreq.u.data.pointer = (void *)&athdbg;
     iwreq.u.data.length  = sizeof(athdbg);
 
@@ -593,6 +828,41 @@ static int qca_bsal_bs_config(
     }
 
     return qca_bsal_bs_enable(fd, ifcfg->ifname, true);
+}
+
+static int qca_bsal_client_get_datarate_info(
+        const char *ifname,
+        const uint8_t *mac_addr,
+        bsal_datarate_info_t *datarate)
+{
+    struct ieee80211req_athdbg      athdbg;
+    struct iwreq                    iwreq;
+    int                             result;
+
+    memset(&athdbg, 0, sizeof(athdbg));
+    athdbg.cmd = IEEE80211_DBGREQ_BSTEERING_GET_DATARATE_INFO;
+    memcpy(&athdbg.dstmac, mac_addr, sizeof(athdbg.dstmac));
+
+    memset(&iwreq, 0, sizeof(iwreq));
+    STRSCPY(iwreq.ifr_name, ifname);
+    iwreq.u.data.pointer = (void *)&athdbg;
+    iwreq.u.data.length  = sizeof(athdbg);
+
+    result =  ioctl(_bsal_ioctl_fd, IEEE80211_IOCTL_DBGREQ, &iwreq);
+
+    if (result < 0) {
+        return result;
+    }
+
+    datarate->max_chwidth = athdbg.data.bsteering_datarate_info.max_chwidth;
+    datarate->max_streams = athdbg.data.bsteering_datarate_info.num_streams;
+    datarate->phy_mode = athdbg.data.bsteering_datarate_info.phymode;
+    datarate->max_MCS = athdbg.data.bsteering_datarate_info.max_MCS;
+    datarate->max_txpower = athdbg.data.bsteering_datarate_info.max_txpower;
+    datarate->is_static_smps = athdbg.data.bsteering_datarate_info.is_static_smps;
+    datarate->is_mu_mimo_supported = athdbg.data.bsteering_datarate_info.is_mu_mimo_supported;
+
+    return result;
 }
 
 int qca_bsal_iface_add(const bsal_ifconfig_t *ifcfg)
@@ -644,7 +914,7 @@ static int qca_bsal_acl_mac(
     memcpy(&saddr.sa_data, mac_addr, BSAL_MAC_ADDR_LEN);
 
     memset(&iwreq, 0, sizeof(iwreq));
-    strncpy(iwreq.ifr_name, ifname, sizeof(iwreq.ifr_name) - 1);
+    STRSCPY(iwreq.ifr_name, ifname);
     memcpy(iwreq.u.name, &saddr, sizeof(saddr));
 
     if (ioctl(fd, ino, &iwreq) < 0) {
@@ -683,7 +953,7 @@ static int qca_bsal_bs_client_config(
     athdbg.data.bsteering_cli_param.low_rate_rssi_xing   = conf->rssi_high_xing;
 
     memset (&iwreq, 0, sizeof(iwreq));
-    strncpy(iwreq.ifr_name, ifname, sizeof(iwreq.ifr_name) - 1);
+    STRSCPY(iwreq.ifr_name, ifname);
     iwreq.u.data.pointer = (void *)&athdbg;
     iwreq.u.data.length  = sizeof(athdbg);
 
@@ -739,7 +1009,7 @@ int qca_bsal_client_measure(
     athdbg.data.bsteering_rssi_num_samples = num_samples;
 
     memset(&iwreq, 0, sizeof(iwreq));
-    strncpy(iwreq.ifr_name, ifname, sizeof(iwreq.ifr_name) - 1);
+    STRSCPY(iwreq.ifr_name, ifname);
     iwreq.u.data.pointer = (void *)&athdbg;
     iwreq.u.data.length  = sizeof(athdbg);
 
@@ -787,6 +1057,34 @@ static void qca_bsal_fill_sta_info(
                                 ((sta->isi_htcap & IEEE80211_HTCAP_C_SM_MASK) == IEEE80211_HTCAP_C_SMPOWERSAVE_STATIC);
     info->datarate_info.is_mu_mimo_supported =
                                 (sta->isi_vhtcap & IEEE80211_VHTCAP_MU_BFORMEE);
+    info->snr = sta->isi_rssi;
+}
+
+static int
+qca_bsal_client_stats(
+        const char *ifname,
+        const uint8_t *mac_addr,
+        bsal_client_info_t *info)
+{
+    struct iwreq iwr;
+    struct ieee80211req_sta_stats stats = {0};
+    const struct ieee80211_nodestats *ns = &stats.is_stats;
+
+    memset(&iwr, 0, sizeof(iwr));
+    STRSCPY(iwr.ifr_name, ifname);
+    iwr.u.data.pointer = (void *)&stats;
+    iwr.u.data.length = sizeof(stats);
+    memcpy(stats.is_u.macaddr, mac_addr, IEEE80211_ADDR_LEN);
+
+    if (ioctl(_bsal_ioctl_fd, IEEE80211_IOCTL_STA_STATS, &iwr) < 0) {
+        LOGE("%s IEEE80211_IOCTL_STA_STATS", ifname);
+        return -1;
+    }
+
+    info->tx_bytes = ns->ns_tx_bytes;
+    info->rx_bytes = ns->ns_rx_bytes;
+
+    return 0;
 }
 
 int qca_bsal_client_info(
@@ -812,7 +1110,7 @@ int qca_bsal_client_info(
     }
 
     memset(&iwreq, 0, sizeof(iwreq));
-    strncpy(iwreq.ifr_name, ifname, sizeof(iwreq.ifr_name) - 1);
+    STRSCPY(iwreq.ifr_name, ifname);
     iwreq.u.data.pointer = (void *)buf;
     iwreq.u.data.length  = len;
     iwreq.u.data.flags   = 0;
@@ -834,7 +1132,7 @@ int qca_bsal_client_info(
         }
 
         memset(&iwreq, 0, sizeof(iwreq));
-        strncpy(iwreq.ifr_name, ifname, sizeof(iwreq.ifr_name) - 1);
+        STRSCPY(iwreq.ifr_name, ifname);
         iwreq.u.data.pointer = (void *)buf;
         iwreq.u.data.length  = len;
         iwreq.u.data.flags   = 0;
@@ -867,6 +1165,7 @@ int qca_bsal_client_info(
     if (found) {
         /* fill station info */
         qca_bsal_fill_sta_info(info, sta);
+        qca_bsal_client_get_datarate_info(ifname, mac_addr, &info->datarate_info);
         info->connected = true;
 
         assoc_ies_len = sta->isi_len - sizeof(*sta);
@@ -880,6 +1179,9 @@ int qca_bsal_client_info(
     }
 
     free(buf);
+
+    if (info->connected)
+        qca_bsal_client_stats(ifname, mac_addr, info);
 
     return 0;
 }
@@ -1095,86 +1397,82 @@ int qca_bsal_rrm_remove_neighbor(
     return 0;
 }
 
-void* qca_bsal_event_init(void *arg)
+int qca_bsal_send_action(
+        const char *ifname,
+        const uint8_t *mac_addr,
+        const uint8_t *data,
+        unsigned int data_len)
 {
-    (void)arg;
-    int fd;
+    struct iwreq iwr;
+    int ret;
 
-    // Initialize EVSCHED
-    if (evsched_init(_ev_loop) == false) {
-        LOGE("Failed to initialize EVSCHED");
-        pthread_exit(NULL);
+    if (_bsal_ioctl_fd == -1) {
+        return -1;
     }
 
-    // Create fd to issue ioctl's
-    if ((fd = qca_bsal_ioctl_init()) < 0) {
-        LOGE("Failed to create socket");
-        pthread_exit(NULL);
-    }
+    memset(&iwr, 0, sizeof(iwr));
+    STRSCPY(iwr.ifr_name, ifname);
 
-    // Create netlink socket to receive steering events from driver
-    if ((fd = qca_bsal_netlink_init()) < 0) {
-        LOGE("Failed to initialize BSAL events");
-        pthread_exit(NULL);
-    }
+    iwr.u.data.pointer = (void *) data;
+    iwr.u.data.length = data_len;
+    iwr.u.data.flags = IEEE80211_IOC_P2P_SEND_ACTION;
 
-    // Set up event loop for events on the netlink fd
-    ev_io_init(&_evio, qca_bsal_events_evio_cb, fd, EV_READ);
-    ev_io_start(_ev_loop, &_evio);
-
-    // Run main loop
-    ev_run(_ev_loop, 0);
-
-    // Cleanup and Exit
-    pthread_exit(NULL);
-
-    return NULL;
-}
-
-int qca_bsal_init(bsal_event_cb_t event_cb)
-{
-    pthread_t   thread;
-    int         ret;
-
-    if (_ev_loop) {
-        LOGE("BSAL event loop already initialized");
-        return 0;
-    }
-
-    // Create the BSAL 
-    _ev_loop = ev_loop_new(EVFLAG_AUTO);
-
-    _bsal_event_cb = event_cb;
-
-    ret = pthread_create(&thread, NULL, qca_bsal_event_init, NULL);
-    if (ret) {
-        LOGEM("BSAL thread creation failed, errno = %d", errno);
+    ret = ioctl(_bsal_ioctl_fd, IEEE80211_IOCTL_P2P_BIG_PARAM, &iwr);
+    if (ret < 0) {
+        LOGW("%s send action frame failed %d", ifname, ret);
         return -1;
     }
 
     return 0;
 }
 
-int qca_bsal_cleanup(void)
+int qca_bsal_init(
+        bsal_event_cb_t event_cb,
+        struct ev_loop *loop)
 {
-    if ((_bsal_netlink_fd < 0) || (_bsal_ioctl_fd < 0)) {
-        return -1;
+    if (_ev_loop) {
+        LOGE("BSAL event loop already initialized");
+        return 0;
     }
 
+    _ev_loop = loop;
+    _bsal_event_cb = event_cb;
+
+    // Create fd to issue ioctl's
+    if (qca_bsal_ioctl_init() < 0) {
+        LOGE("Failed to create socket");
+        goto error;
+    }
+
+    // Create netlink socket to receive steering events from driver
+    if (qca_bsal_netlink_init() < 0) {
+        LOGE("Failed to initialize BSAL events");
+        goto error;
+    }
+
+    /* Netlink socket to receive action frames */
+    if (qca_bsal_rt_netlink_init() < 0) {
+        LOGD("Failed to initialize rt netlink event");
+        goto error;
+    }
+
+    return 0;
+
+error:
+    qca_bsal_cleanup();
+    return -1;
+}
+
+int qca_bsal_cleanup(void)
+{
     LOGI("BSAL cleaning up");
 
-    ev_io_stop(_ev_loop, &_evio);
+    qca_bsal_rt_netlink_cleanup();
+    qca_bsal_netlink_cleanup();
+    qca_bsal_ioctl_cleanup();
 
-    evsched_cleanup();
-    ev_loop_destroy(_ev_loop);
-
-    close(_bsal_ioctl_fd);
-    close(_bsal_netlink_fd);
-
-    _bsal_ioctl_fd   = -1; 
-    _bsal_netlink_fd = -1;
-
-    _bsal_event_cb   = NULL;
+    _ev_loop = NULL;
+    _bsal_event_cb = NULL;
 
     return 0;
 }

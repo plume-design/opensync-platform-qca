@@ -45,8 +45,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <stdlib.h>
 #include <math.h>
 
+#include "const.h"
 #include "log.h"
 #include "os.h"
+#include "kconfig.h"
 
 #include "ioctl80211.h"
 #include "ioctl80211_client.h"
@@ -67,6 +69,67 @@ typedef struct
     int32_t                             padding[3]; /* Apparently driver adds 12 Bytes!!!*/
 } ieee80211req_sta_info_t;
 
+struct weight_avg {
+    uint64_t sum;
+    uint64_t cnt;
+};
+
+static inline void weight_avg_add(struct weight_avg *avg,
+                                  uint64_t value,
+                                  uint64_t count)
+{
+    value *= count;
+    avg->sum += value;
+    avg->cnt += count;
+}
+
+static inline uint64_t weight_avg_get(const struct weight_avg *avg)
+{
+    return avg->cnt > 0 ? avg->sum / avg->cnt : 0;
+}
+
+static uint32_t mcs_to_mbps(const int mcs, const int bw, const int nss)
+{
+    /* The following table is precomputed from:
+     *
+     * bpsk -> 1bit
+     * qpsk -> 2bit
+     * 16-qam -> 4bit
+     * 64-qam -> 6bit
+     * 256-qam -> 8bit
+     *
+     * 20mhz -> 52 tones
+     * 40mhz -> 108 tones
+     * 80mhz -> 234 tones
+     * 160mhz -> 486 tones
+     *
+     * Once divided by 4 will get an long GI phyrate in mbps.
+     */
+    static const unsigned short bps[10][4] = {
+        /* 20mhz 40mhz 80mhz  160mhz */
+        {  26,   54,   117,   234   }, /* BPSK 1/2 */
+        {  52,   108,  234,   468   }, /* QPSK 1/2 */
+        {  78,   162,  351,   702   }, /* QPSK 3/4 */
+        {  104,  216,  468,   936   }, /* 16-QAM 1/2 */
+        {  156,  324,  702,   1404  }, /* 16-QAM 3/4 */
+        {  208,  432,  936,   1248  }, /* 16-QAM 2/3 */
+        {  234,  486,  1053,  2106  }, /* 64-QAM 3/4 */
+        {  260,  540,  1170,  2340  }, /* 64-QAM 5/6 */
+        {  312,  648,  1404,  2808  }, /* 256-QAM 3/4 */
+        {  346,  720,  1560,  3120  }, /* 256-QAM 5/6 */
+    };
+    static const unsigned short legacy[] = {
+        6, 9, 12, 18, 24, 36, 48, 54, /* OFDM */
+        1, 2, 5, 11, 2, 5, 11, /* CCK */
+    };
+    const int i = mcs < 10 ? mcs : 9;
+    const int j = bw < 4 ? bw : 3;
+    if (nss == 0)
+        return mcs < (int)ARRAY_SIZE(legacy) ? legacy[mcs] : legacy[0];
+    else
+        return (bps[i][j] * nss) / 4; /* hopefully compiler makes a bitshift */
+}
+
 static
 ioctl_status_t ioctl80211_client_stats_rx_calculate(
         radio_entry_t              *radio_cfg,
@@ -77,6 +140,7 @@ ioctl_status_t ioctl80211_client_stats_rx_calculate(
     struct ps_uapi_ioctl           *new_stats_rx = NULL;
     struct ps_uapi_ioctl           *old_stats_rx = NULL;
     dpp_client_stats_rx_t          *client_stats_rx = NULL;
+    struct weight_avg               avgmbps = { .sum = 0, .cnt = 0 };
 
     uint32_t                        mcs;
     uint32_t                        nss;
@@ -154,6 +218,17 @@ ioctl_status_t ioctl80211_client_stats_rx_calculate(
             bw  = ((stats_index - PS_MAX_LEGACY) / (PS_MAX_MCS * PS_MAX_NSS));
             nss = (((stats_index - PS_MAX_LEGACY) / PS_MAX_MCS) % PS_MAX_NSS) + 1;
             mcs = (stats_index - PS_MAX_LEGACY) % PS_MAX_MCS;
+        }
+
+        if (kconfig_enabled(CONFIG_QCA_RATE_HISTO_TO_EXPECTED_TPUT)) {
+            weight_avg_add(
+                &avgmbps,
+                mcs_to_mbps(mcs, bw, nss),
+                STATS_DELTA(
+                    new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_mpdus,
+                    old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_mpdus));
+
+            continue;
         }
 
         client_stats_rx =
@@ -282,6 +357,20 @@ ioctl_status_t ioctl80211_client_stats_rx_calculate(
         ds_dlist_insert_tail(&client_record->stats_rx, client_stats_rx);
     }
 
+    if (kconfig_enabled(CONFIG_QCA_RATE_HISTO_TO_EXPECTED_TPUT)) {
+        if (avgmbps.cnt) {
+            /* This overrides the "last rx rate" */
+            client_record->stats.rate_rx = weight_avg_get(&avgmbps);
+            LOG(TRACE,
+                 "Calculated %s client delta rx phyrate "MAC_ADDRESS_FORMAT
+                 " mbps=%f mpdus=%llu",
+                 radio_get_name_from_type(radio_type),
+                 MAC_ADDRESS_PRINT(data_new->info.mac),
+                 client_record->stats.rate_rx,
+                 avgmbps.cnt);
+        }
+    }
+
     return IOCTL_STATUS_OK;
 }
 
@@ -378,6 +467,7 @@ ioctl_status_t ioctl80211_client_stats_tx_calculate(
     struct ps_uapi_ioctl           *new_stats_tx = NULL;
     struct ps_uapi_ioctl           *old_stats_tx = NULL;
     dpp_client_stats_tx_t          *client_stats_tx = NULL;
+    struct weight_avg               avgmbps = { .sum = 0, .cnt = 0 };
 
     uint32_t                        mcs;
     uint32_t                        nss;
@@ -447,6 +537,17 @@ ioctl_status_t ioctl80211_client_stats_tx_calculate(
             bw  = ((stats_index - PS_MAX_LEGACY) / (PS_MAX_MCS * PS_MAX_NSS));
             nss = (((stats_index - PS_MAX_LEGACY) / PS_MAX_MCS) % PS_MAX_NSS) + 1;
             mcs = (stats_index - PS_MAX_LEGACY) % PS_MAX_MCS;
+        }
+
+        if (kconfig_enabled(CONFIG_QCA_RATE_HISTO_TO_EXPECTED_TPUT)) {
+            weight_avg_add(
+                    &avgmbps,
+                    mcs_to_mbps(mcs, bw, nss),
+                    STATS_DELTA(
+                        new_stats_tx->u.peer_tx_stats.get.stats[stats_index].ppdus,
+                        old_stats_tx->u.peer_tx_stats.get.stats[stats_index].ppdus));
+
+            continue;
         }
 
         client_stats_tx =
@@ -659,6 +760,20 @@ ioctl_status_t ioctl80211_client_stats_tx_calculate(
 
     ds_dlist_insert_tail(&client_record->tid_record_list, record);
 
+    if (kconfig_enabled(CONFIG_QCA_RATE_HISTO_TO_EXPECTED_TPUT)) {
+        if (avgmbps.cnt) {
+            /* This overrides the "last tx rate" */
+            client_record->stats.rate_tx = weight_avg_get(&avgmbps);
+            LOG(TRACE,
+                 "Calculated %s client delta tx phyrate "MAC_ADDRESS_FORMAT
+                 " mbps=%f ppdus=%llu",
+                 radio_get_name_from_type(radio_type),
+                 MAC_ADDRESS_PRINT(data_new->info.mac),
+                 client_record->stats.rate_tx,
+                 avgmbps.cnt);
+        }
+    }
+
     return IOCTL_STATUS_OK;
 }
 
@@ -747,7 +862,7 @@ ioctl_status_t ioctl80211_client_stats_calculate(
          && (new_stats->frames_rx < old_stats->frames_rx)
         )
     {
-        memset(old_stats, 0, sizeof(ioctl80211_peer_stats_t));
+        memset(old_stats, 0, sizeof(*old_stats));
     }
 
     client_record->stats.bytes_tx =
@@ -834,81 +949,37 @@ ioctl_status_t ioctl80211_client_stats_calculate(
     /* RSSI is value above the noise floor */
     if (new_stats->rssi)
     {
-        /* Sliding window averaging */
-        if (old_stats->rssi)
-        {
-            client_record->stats.rssi =
-                (old_stats->rssi + new_stats->rssi) / 2;
-            LOG(TRACE,
-                "Calculated %s client delta stats for "
-                MAC_ADDRESS_FORMAT" rssi=%d (new=%d-old=%d)",
-                radio_get_name_from_type(radio_type),
-                MAC_ADDRESS_PRINT(data_new->info.mac),
-                client_record->stats.rssi,
-                new_stats->rssi,
-                old_stats->rssi);
-        }
-        else
-        {
-            client_record->stats.rssi = new_stats->rssi;
-        }
+        client_record->stats.rssi = new_stats->rssi;
+        LOG(TRACE,
+            "Calculated %s client delta stats for "
+            MAC_ADDRESS_FORMAT" rssi=%d",
+            radio_get_name_from_type(radio_type),
+            MAC_ADDRESS_PRINT(data_new->info.mac),
+            client_record->stats.rssi);
     }
 
-    uint32_t    rate_tx = 0;
     if (new_stats->rate_tx) {
-        /* Sliding window averaging */
-        if (old_stats->rate_tx) {
-            rate_tx= (old_stats->rate_tx + new_stats->rate_tx) / 2;
-        } else {
-            rate_tx = new_stats->rate_tx;
-        }
-
-
-        char data_rate_tx[IOCTL80211_DATA_RATE_LEN];
-        memset (data_rate_tx, 0, sizeof(data_rate_tx));
-        snprintf(data_rate_tx,
-                sizeof(data_rate_tx),
-                "%u.%01u",
-                rate_tx / 1000,
-                rate_tx % 1000);
-        client_record->stats.rate_tx = atof(data_rate_tx);
+        client_record->stats.rate_tx = new_stats->rate_tx;
+        client_record->stats.rate_tx /= 1000;
 
         LOG(TRACE,
             "Calculated %s client delta stats for "
-            MAC_ADDRESS_FORMAT" rate_tx=%0.2f (new=%u.%01u-old=%u.%01u)",
+            MAC_ADDRESS_FORMAT" rate_tx=%0.2f",
             radio_get_name_from_type(radio_type),
             MAC_ADDRESS_PRINT(data_new->info.mac),
-            client_record->stats.rate_tx,
-            new_stats->rate_tx / 1000, new_stats->rate_tx % 1000,
-            old_stats->rate_tx / 1000, old_stats->rate_tx % 1000);
+            client_record->stats.rate_tx);
     }
 
-    uint32_t    rate_rx = 0;
     if (new_stats->rate_rx) {
-        /* Sliding window averaging */
-        if (old_stats->rate_rx) {
-            rate_rx= (old_stats->rate_rx + new_stats->rate_rx) / 2;
-        } else {
-            rate_rx = new_stats->rate_rx;
-        }
-
-        char data_rate_rx[IOCTL80211_DATA_RATE_LEN];
-        memset (data_rate_rx, 0, sizeof(data_rate_rx));
-        snprintf(data_rate_rx,
-                sizeof(data_rate_rx),
-                "%u.%01u",
-                rate_rx / 1000,
-                rate_rx % 1000);
-        client_record->stats.rate_rx = atof(data_rate_rx);
+        client_record->stats.rate_rx = new_stats->rate_rx;
+        client_record->stats.rate_rx /= 1000;
 
         LOG(TRACE,
             "Calculated %s client delta stats for "
-            MAC_ADDRESS_FORMAT" rate_rx=%0.2f (new=%u.%01u-old=%u.%01u)",
+            MAC_ADDRESS_FORMAT" rate_rx=%0.2f",
             radio_get_name_from_type(radio_type),
             MAC_ADDRESS_PRINT(data_new->info.mac),
-            client_record->stats.rate_rx,
-            new_stats->rate_rx / 1000, new_stats->rate_rx % 1000,
-            old_stats->rate_rx / 1000, old_stats->rate_rx % 1000);
+            client_record->stats.rate_rx);
     }
 
     return IOCTL_STATUS_OK;
@@ -1030,16 +1101,13 @@ ioctl_status_t ioctl80211_peer_stats_calculate(
         /* Sliding window averaging */
         if (old_stats->rssi)
         {
-            client_record->stats.rssi =
-                (old_stats->rssi + new_stats->rssi) / 2;
+            client_record->stats.rssi = new_stats->rssi;
             LOG(TRACE,
                 "Calculated %s peer delta stats for "
-                MAC_ADDRESS_FORMAT" rssi=%d (new=%d-old=%d)",
+                MAC_ADDRESS_FORMAT" rssi=%d",
                 radio_get_name_from_type(radio_type),
                 MAC_ADDRESS_PRINT(data_new->info.mac),
-                client_record->stats.rssi,
-                new_stats->rssi,
-                old_stats->rssi);
+                client_record->stats.rssi);
         }
         else
         {
@@ -1047,60 +1115,30 @@ ioctl_status_t ioctl80211_peer_stats_calculate(
         }
     }
 
-    uint32_t    rate_tx = 0;
     if (new_stats->rate_tx) {
-        /* Sliding window averaging */
-        if (old_stats->rate_tx) {
-            rate_tx= (old_stats->rate_tx + new_stats->rate_tx) / 2;
-        } else {
-            rate_tx = new_stats->rate_tx;
-        }
-
-        char data_rate_tx[IOCTL80211_DATA_RATE_LEN];
-        memset (data_rate_tx, 0, sizeof(data_rate_tx));
-        snprintf(data_rate_tx,
-                sizeof(data_rate_tx),
-                "%u.%01u",
-                rate_tx / 1000,
-                rate_tx % 1000);
-        client_record->stats.rate_tx = atof(data_rate_tx);
+        /* Can be overridden with histogram derived average phyrate */
+        client_record->stats.rate_tx = new_stats->rate_tx;
+        client_record->stats.rate_tx /= 1000;
 
         LOG(TRACE,
             "Calculated %s peer delta stats for "
-            MAC_ADDRESS_FORMAT" rate_tx=%0.2f (new=%u.%01u-old=%u.%01u)",
+            MAC_ADDRESS_FORMAT" rate_tx=%0.2f",
             radio_get_name_from_type(radio_type),
             MAC_ADDRESS_PRINT(data_new->info.mac),
-            client_record->stats.rate_tx,
-            new_stats->rate_tx / 1000, new_stats->rate_tx % 1000,
-            old_stats->rate_tx / 1000, old_stats->rate_tx % 1000);
+            client_record->stats.rate_tx);
     }
 
-    uint32_t    rate_rx = 0;
     if (new_stats->rate_rx) {
-        /* Sliding window averaging */
-        if (old_stats->rate_rx) {
-            rate_rx= (old_stats->rate_rx + new_stats->rate_rx) / 2;
-        } else {
-            rate_rx = new_stats->rate_rx;
-        }
-
-        char data_rate_rx[IOCTL80211_DATA_RATE_LEN];
-        memset (data_rate_rx, 0, sizeof(data_rate_rx));
-        snprintf(data_rate_rx,
-                sizeof(data_rate_rx),
-                "%u.%01u",
-                rate_rx / 1000,
-                rate_rx % 1000);
-        client_record->stats.rate_rx = atof(data_rate_rx);
+        /* Can be overridden with histogram derived average phyrate */
+        client_record->stats.rate_rx = new_stats->rate_rx;
+        client_record->stats.rate_rx /= 1000;
 
         LOG(TRACE,
             "Calculated %s peer delta stats for "
-            MAC_ADDRESS_FORMAT" rate_rx=%0.2f (new=%u.%01u-old=%u.%01u)",
+            MAC_ADDRESS_FORMAT" rate_rx=%0.2f",
             radio_get_name_from_type(radio_type),
             MAC_ADDRESS_PRINT(data_new->info.mac),
-            client_record->stats.rate_rx,
-            new_stats->rate_rx / 1000, new_stats->rate_rx % 1000,
-            old_stats->rate_rx / 1000, old_stats->rate_rx % 1000);
+            client_record->stats.rate_rx);
     }
 
     return IOCTL_STATUS_OK;
@@ -1313,9 +1351,7 @@ ioctl_status_t ioctl80211_clients_list_fetch(
             radio_get_name_from_type(radio_type),
             client_entry->stats.client.rssi);
 
-        strlcpy(client_entry->info.ifname,
-                ifName,
-                sizeof(client_entry->info.ifname));
+        STRSCPY(client_entry->info.ifname, ifName);
         LOG(TRACE,
             "Parsed %s client IFNAME %s",
             radio_get_name_from_type(radio_type),
@@ -1428,7 +1464,7 @@ ioctl_status_t ioctl80211_peer_stats_fetch(
     memset (&vap_stats, 0, sizeof(vap_stats));
 
     memset (&if_req, 0, sizeof(if_req));
-    strncpy(if_req.ifr_name, ifName, sizeof(if_req.ifr_name));
+    STRSCPY(if_req.ifr_name, ifName);
     if_req.ifr_data = (caddr_t) &vap_stats;
 
     /* Initiate Atheros stats fetch */
@@ -1610,9 +1646,7 @@ ioctl_status_t ioctl80211_peer_list_fetch(
         radio_get_name_from_type(radio_type),
         client_entry->stats.peer.rssi);
 
-    strlcpy(client_entry->info.ifname,
-            ifName,
-            sizeof(client_entry->info.ifname));
+    STRSCPY(client_entry->info.ifname, ifName);
 
     LOG(TRACE,
             "Parsed %s peer IFNAME %s",

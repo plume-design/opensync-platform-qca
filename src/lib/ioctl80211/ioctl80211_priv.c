@@ -49,6 +49,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <inttypes.h>
 
 #include "log.h"
+#include "util.h"
 #include "ioctl80211.h"
 #include "ioctl80211_priv.h"
 
@@ -125,7 +126,7 @@ ioctl80211_priv_init(const char *ifname, int fd)
     }
 
     priv_data->fd = fd;
-    strncpy(priv_data->ifname, ifname, sizeof(priv_data->ifname)-1);
+    STRSCPY(priv_data->ifname, ifname);
     priv_data->nargs = 
         ioctl80211_priv_request_send(
                 priv_data->fd,
@@ -225,7 +226,7 @@ ioctl80211_priv_set_int(ioctl80211_priv_t priv, const char *cmd, uint32_t *vals,
     }
 
     // Finish setting up request
-    strncpy(request.ifr_name, priv_data->ifname, IFNAMSIZ);
+    STRSCPY(request.ifr_name, priv_data->ifname);
 
     request.u.data.length = nvals;
     if ((args->set_args & IW_PRIV_SIZE_FIXED) &&
@@ -317,7 +318,7 @@ ioctl80211_priv_get_int(ioctl80211_priv_t priv, const char *cmd, uint32_t *vals,
     }
 
     // Finish setting up request
-    strncpy(request.ifr_name, priv_data->ifname, IFNAMSIZ);
+    STRSCPY(request.ifr_name, priv_data->ifname);
 
     request.u.data.length = 0; // Only getting values
     if ((args->get_args & IW_PRIV_SIZE_FIXED) &&
@@ -416,7 +417,7 @@ ioctl80211_priv_set(ioctl80211_priv_t priv, const char *cmd, void *buf, int len)
     }
 
     // Finish setting up request
-    strncpy(request.ifr_name, priv_data->ifname, IFNAMSIZ);
+    STRSCPY(request.ifr_name, priv_data->ifname);
 
     request.u.data.length = len;
     if ((args->set_args & IW_PRIV_SIZE_FIXED) &&
@@ -505,7 +506,7 @@ ioctl80211_priv_get(ioctl80211_priv_t priv, const char *cmd, void *dest, int *le
     }
 
     // Finish setting up request
-    strncpy(request.ifr_name, priv_data->ifname, IFNAMSIZ);
+    STRSCPY(request.ifr_name, priv_data->ifname);
 
     request.u.data.length = 0; // Only getting values
     if ((args->get_args & IW_PRIV_SIZE_FIXED) &&

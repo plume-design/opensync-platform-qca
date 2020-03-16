@@ -310,7 +310,6 @@ bool target_stats_device_temp_get(radio_entry_t *radio_cfg,
     return true;
 }
 
-#ifdef TARGET_PIRANHA2_QSDK52
 bool target_stats_device_txchainmask_get(
         radio_entry_t              *radio_cfg,
         dpp_device_txchainmask_t   *txchainmask_entry)
@@ -332,7 +331,6 @@ bool target_stats_device_txchainmask_get(
 
     return true;
 }
-#endif
 
 
 /******************************************************************************
@@ -341,7 +339,7 @@ bool target_stats_device_txchainmask_get(
 
 bool target_stats_capacity_enable(radio_entry_t *radio_cfg, bool enabled)
 {
-#if defined USE_CAPACITY_QUEUE_STATS
+#if defined CONFIG_SM_CAPACITY_QUEUE_STATS
     ioctl_status_t rc;
 
     rc = ioctl80211_capacity_enable(radio_cfg, enabled);
@@ -357,7 +355,7 @@ bool target_stats_capacity_enable(radio_entry_t *radio_cfg, bool enabled)
 bool target_stats_capacity_get(radio_entry_t *radio_cfg,
                                target_capacity_data_t *capacity_new)
 {
-#if defined USE_CAPACITY_QUEUE_STATS
+#if defined CONFIG_SM_CAPACITY_QUEUE_STATS
     ioctl_status_t rc;
 
     rc = ioctl80211_capacity_results_get(radio_cfg, capacity_new);
@@ -376,7 +374,7 @@ bool target_stats_capacity_convert(target_capacity_data_t *capacity_new,
                                    target_capacity_data_t *capacity_old,
                                    dpp_capacity_record_t *capacity_entry)
 {
-#if defined USE_CAPACITY_QUEUE_STATS
+#if defined CONFIG_SM_CAPACITY_QUEUE_STATS
     target_capacity_data_t capacity_delta;
     int32_t queue_index = 0;
 

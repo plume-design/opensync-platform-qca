@@ -59,7 +59,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *  PUBLIC definitions
  *****************************************************************************/
 
-int ioctl80211_survey_results_get(
+ioctl_status_t ioctl80211_survey_results_get(
         radio_entry_t              *radio_cfg,
         uint32_t                   *chan_list,
         uint32_t                    chan_num,

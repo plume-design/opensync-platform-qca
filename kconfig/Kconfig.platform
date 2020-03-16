@@ -8,6 +8,18 @@ if PLATFORM_IS_QCA
 config QCA_SDK_PATH
     string "Qualcomm SDK PATH"
 
+config QCA_RATE_HISTO_TO_EXPECTED_TPUT
+    bool "use mcs histograms to compute expected throughput phyrates"
+    default n
+    help
+        This makes sense only for 11ac and older devices which
+        originally were intended to report mcs histograms. Some of
+        them couldn't be updated to deliver (reliable) expected
+        throughput phyrates. Instead mcs histograms can be utilized to
+        esimate them.
+
+        If unsure, say 'y'
+
 choice
     prompt "QSDK Version"
     config PLATFORM_QCA_QSDK52
@@ -16,6 +28,9 @@ choice
 
     config PLATFORM_QCA_QSDK53
         bool "QSDK 5.3"
+
+    config PLATFORM_QCA_QSDK110
+        bool "QSDK 11.0"
 endchoice
 
 config QSDK_VERSION

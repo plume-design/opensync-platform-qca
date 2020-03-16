@@ -1,0 +1,5 @@
+config OSP_L2SWITCH_SWCONFIG
+    bool "swconfig"
+
+    help
+        Use swconfig for L2 switch configuration

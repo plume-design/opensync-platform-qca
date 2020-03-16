@@ -41,7 +41,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *    to let it work in parallel.
  *
  * TODOs:
- *  - use STRLCPY instead of snprintf() etc where possible
  *  - automate errno+strerror() error printing, and handling of if (err) LOGW+return
  *  - clean up process execution: readcmd, forkexec, util_exec_read, E
  *  - use F() for temporary one-shot snprintf() stuff
@@ -87,6 +86,11 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "qca_bsal.h"
 
+#include <linux/un.h>
+#include <opensync-ctrl.h>
+#include <opensync-wpas.h>
+#include <opensync-hapd.h>
+
 #define MODULE_ID LOG_MODULE_ID_TARGET
 
 /******************************************************************************
@@ -121,9 +125,8 @@ enum {
 struct util_wpa_ctrl_watcher {
     ev_io io;
     char sockpath[128];
-    char device_phy_ifname[32];
-    char device_vif_ifname[32];
-    char cloud_vif_ifname[32];
+    char phy[32];
+    char vif[32];
     struct wpa_ctrl *ctrl;
     struct ds_dlist_node list;
 };
@@ -139,52 +142,14 @@ struct fallback_parent {
     char bssid[18];
 };
 
-static ds_dlist_t g_watcher_list = DS_DLIST_INIT(struct util_wpa_ctrl_watcher, list);
 static ds_dlist_t g_kvstore_list = DS_DLIST_INIT(struct kvstore, list);
 static struct target_radio_ops rops;
-static bool g_capab_wpas_conf_disallow_dfs;
 
 /* See target_radio_config_init2() for details */
 static struct schema_Wifi_Radio_Config *g_rconfs;
 static struct schema_Wifi_VIF_Config *g_vconfs;
 static int g_num_rconfs;
 static int g_num_vconfs;
-
-/* NTP CHECK CONFIGURATION */
-// Max number of times to check for NTP before continuing
-#define NTP_CHECK_MAX_COUNT             10  // 10 x 5 = 50 seconds
-// NTP check passes once time is greater then this
-#define TIME_NTP_DEFAULT                1000000
-// File used to disable waiting for NTP
-#define DISABLE_NTP_CHECK               "/opt/tb/cm-disable-ntp-check"
-
-/* CONNECTIVITY CHECK CONFIGURATION */
-#define PROC_NET_ROUTE                  "/proc/net/route"
-#define DEFAULT_PING_PACKET_SIZE        4
-#define DEFAULT_PING_PACKET_CNT         2
-#define DEFAULT_PING_TIMEOUT            4
-
-#if !defined(CONFIG_TARGET_CM_LINUX_SUPPORT_PACKAGE)
-// Internet IP Addresses
-static char *util_connectivity_check_inet_addrs[] = {
-    "198.41.0.4",
-    "192.228.79.201",
-    "192.33.4.12",
-    "199.7.91.13",
-    "192.5.5.241",
-    "198.97.190.53",
-    "192.36.148.17",
-    "192.58.128.30",
-    "193.0.14.129",
-    "199.7.83.42",
-    "202.12.27.33"
-};
-#define TARGET_CONNECTIVITY_CHECK_INET_ADDRS_CNT (sizeof(util_connectivity_check_inet_addrs) / sizeof(*util_connectivity_check_inet_addrs))
-#endif /* !defined(CONFIG_TARGET_CM_LINUX_SUPPORT_PACKAGE) */
-
-/* RESTART MANAGERS DEFINITIONS */
-#define TARGET_DISABLE_FATAL_STATE      "/opt/tb/cm-disable-fatal"
-#define TARGET_MANAGER_RESTART_CMD      "/usr/plume/bin/restart.sh"
 
 
 /******************************************************************************
@@ -195,9 +160,8 @@ static char *util_connectivity_check_inet_addrs[] = {
 #define A(size) alloca(size), size
 #define F(fmt, ...) ({ char *__p = alloca(4096); memset(__p, 0, 4096); snprintf(__p, 4095, fmt, ##__VA_ARGS__); __p; })
 #define E(prog, ...) forkexec(prog, (const char *[]){ prog, __VA_ARGS__, NULL }, NULL, NULL, 0)
+#define R(...) file_geta(__VA_ARGS__)
 #define timeout_arg "timeout", "-s", "KILL", "-t", "3"
-#define target_ifname_cloud2device(x) target_map_ifname(x)
-#define target_ifname_device2cloud(x) target_unmap_ifname(x)
 #define runcmd(...) readcmd(0, 0, 0, ## __VA_ARGS__)
 #define WARN(cond, ...) (cond && (LOGW(__VA_ARGS__), 1))
 #define util_exec_read(xfrm, buf, len, prog, ...) forkexec(prog, (const char *[]){ prog, __VA_ARGS__,  NULL }, xfrm, buf, len)
@@ -207,7 +171,6 @@ static char *util_connectivity_check_inet_addrs[] = {
             int err = util_exec_read(rtrimnl, buf, sizeof(buf), __VA_ARGS__); \
             err || strcmp(str, buf); \
         })
-#define CMD_TIMEOUT(...) "timeout", "-s", "KILL", "-t", "3", ## __VA_ARGS__
 
 void
 rtrimnl(char *str)
@@ -225,15 +188,6 @@ rtrimws(char *str)
     len = strlen(str);
     while (len > 0 && isspace(str[len - 1]))
         str[--len] = 0;
-}
-
-static char *
-removestr(char *s, const char *i)
-{
-    char *p;
-    while ((p = strstr(s, i)))
-        memmove(p, p + strlen(i), strlen(p + strlen(i)) + 1);
-    return s;
 }
 
 static int
@@ -379,25 +333,6 @@ forkexec(const char *file, const char **argv, void (*xfrm)(char *), char *buf, i
 }
 
 static int
-scnprintf(char *buf, size_t len, const char *fmt, ...)
-{
-    va_list ap;
-    size_t n;
-
-    if (len <= 0)
-        return 0;
-
-    va_start(ap, fmt);
-    n = vsnprintf(buf, len, fmt, ap);
-    va_end(ap);
-
-    if (n > len)
-        n = len;
-
-    return n;
-}
-
-static int
 util_file_read(const char *path, char *buf, int len)
 {
     int fd;
@@ -442,69 +377,48 @@ util_file_read_str(const char *path, char *buf, int len)
     return rlen;
 }
 
-static bool
-util_file_update(const char *device_ifname,
-                 const char *confpath,
-                 const char *confnew)
+static int
+util_exec_scripts(const char *vif)
 {
-    char confold[4096];
-    size_t n;
-    FILE *f;
+    int err;
 
-    f = fopen(confpath, "r");
-    if (!f && errno != ENOENT) {
-        LOGW("%s: failed to open conf file (%s) for read: %d (%s)",
-             device_ifname, confpath, errno, strerror(errno));
-        return 0;
+    /* FIXME: target_scripts_dir() points to something
+     *        different than on WM1. This needs to be
+     *        killed fast!
+     */
+    LOGI("%s: running hook scripts", vif);
+    err = runcmd("{ cd %s/wm.d 2>/dev/null || cd %s/../scripts/wm.d 2>/dev/null; } && for i in *.sh; do sh $i %s; done; exit 0",
+                 target_bin_dir(),
+                 target_bin_dir(),
+                 vif);
+    if (err) {
+        LOGW("%s: failed to run command", vif);
+        return err;
     }
 
-    if (f) {
-        n = fread(confold, 1, sizeof(confold), f);
-        fclose(f);
-
-        if (n == strlen(confnew) && !memcmp(confnew, confold, n))
-            return 0;
-    }
-
-    LOGI("%s: config file '%s' changed", device_ifname, confpath);
-
-    f = fopen(confpath, "w");
-    if (!f) {
-        LOGW("%s: failed to open conf file (%s) for write: %d (%s)",
-             device_ifname, confpath, errno, strerror(errno));
-        return 0;
-    }
-
-    n = fwrite(confnew, 1, strlen(confnew), f);
-    fclose(f);
-
-    if (n != strlen(confnew)) {
-        LOGW("%s: failed to write conf file (%s): %d (%s)",
-             device_ifname, confpath, errno, strerror(errno));
-        return 0;
-    }
-
-    return 1;
+    return 0;
 }
 
-static int
-util_ini_get(const char *str, const char *key, char *value, int len)
+static void
+util_ovsdb_wpa_clear(const char* if_name)
 {
-    char arg[32];
-    char *line;
-    char *buf;
+    ovsdb_table_t table_Wifi_VIF_Config;
+    struct schema_Wifi_VIF_Config new_vconf;
+    int ret;
 
-    if (!(buf = strdup(str)))
-        return -1;
+    OVSDB_TABLE_INIT(Wifi_VIF_Config, if_name);
+    memset(&new_vconf, 0, sizeof(new_vconf));
+    new_vconf._partial_update = true;
+    new_vconf.wps_pbc_exists = false;
+    new_vconf.wps_pbc_present = true;
 
-    memset(value, 0, len);
-    snprintf(arg, sizeof(arg), "%s=", key);
-    for (line = strtok(buf, "\n"); line; line = strtok(NULL, "\n"))
-        if (strstr(line, arg) == line)
-            snprintf(value, len, "%s", line + strlen(arg));
+    ret = ovsdb_table_update_simple(&table_Wifi_VIF_Config, strdupa(SCHEMA_COLUMN(Wifi_VIF_Config, if_name)),
+            strdupa(if_name), &new_vconf);
 
-    free(buf);
-    return strlen(value) ? 0 : -1;
+    if (ret)
+        LOGD("wps: Unset Wifi_VIF_Config:wps_pbc on iface: %s after starting WPS session", if_name);
+    else
+        LOGW("wps: Failed to unset Wifi_VIF_Config:wps_pbc on iface: %s", if_name);
 }
 
 /******************************************************************************
@@ -543,13 +457,13 @@ util_kv_set(const char *key, const char *val)
         return;
     }
 
-    STRLCPY(i->key, key);
-    STRLCPY(i->val, val);
+    STRSCPY(i->key, key);
+    STRSCPY(i->val, val);
     LOGT("%s: '%s'='%s'", __func__, key, val);
 }
 
 static int
-util_kv_get_fallback_parents(const char *cphy, struct fallback_parent *parent, int size)
+util_kv_get_fallback_parents(const char *phy, struct fallback_parent *parent, int size)
 {
     const struct kvstore *kv;
     char bssid[32];
@@ -561,10 +475,10 @@ util_kv_get_fallback_parents(const char *cphy, struct fallback_parent *parent, i
     memset(parent, 0, sizeof(*parent) * size);
     num = 0;
 
-    if (!cphy)
+    if (!phy)
         return num;
 
-    kv = util_kv_get(F("%s.fallback_parents", cphy));
+    kv = util_kv_get(F("%s.fallback_parents", phy));
     if (!kv)
         return num;
 
@@ -577,7 +491,7 @@ util_kv_get_fallback_parents(const char *cphy, struct fallback_parent *parent, i
         if (sscanf(line, "%d %18s", &channel, bssid) != 2)
             continue;
 
-        LOGT("%s: parsed fallback parent kv: %d/%d: %s %d", cphy, num, size, bssid, channel);
+        LOGT("%s: parsed fallback parent kv: %d/%d: %s %d", phy, num, size, bssid, channel);
         if (num >= size)
             break;
 
@@ -590,13 +504,13 @@ util_kv_get_fallback_parents(const char *cphy, struct fallback_parent *parent, i
     return num;
 }
 
-static void util_kv_radar_get(const char *cphy, struct schema_Wifi_Radio_State *rstate)
+static void util_kv_radar_get(const char *phy, struct schema_Wifi_Radio_State *rstate)
 {
     char chan[32];
     const char *path;
     struct stat st;
 
-    path = F("/tmp/.%s.radar.detected", cphy);
+    path = F("/tmp/.%s.radar.detected", phy);
 
     if (util_file_read_str(path, chan, sizeof(chan)) < 0)
         return;
@@ -605,7 +519,7 @@ static void util_kv_radar_get(const char *cphy, struct schema_Wifi_Radio_State *
         return;
 
     if (stat(path, &st)) {
-        LOGW("%s: stat(%s) failed: %d (%s)", cphy, path, errno, strerror(errno));
+        LOGW("%s: stat(%s) failed: %d (%s)", phy, path, errno, strerror(errno));
         return;
     }
 
@@ -614,16 +528,16 @@ static void util_kv_radar_get(const char *cphy, struct schema_Wifi_Radio_State *
     SCHEMA_KEY_VAL_APPEND(rstate->radar, "time", F("%u", (unsigned int) st.st_mtim.tv_sec));
 }
 
-static void util_kv_radar_set(const char *cphy, const unsigned char chan)
+static void util_kv_radar_set(const char *phy, const unsigned char chan)
 {
     const char *buf;
     const char *path;
 
     buf = F("%u", chan);
-    path = F("/tmp/.%s.radar.detected", cphy);
+    path = F("/tmp/.%s.radar.detected", phy);
 
     if (util_file_write(path, buf, strlen(buf)) < 0)
-        LOGW("%s: write(%s) failed: %d (%s)", cphy, path, errno, strerror(errno));
+        LOGW("%s: write(%s) failed: %d (%s)", phy, path, errno, strerror(errno));
 }
 
 /******************************************************************************
@@ -634,7 +548,7 @@ static bool
 util_net_ifname_exists(const char *ifname, int *v)
 {
     char path[128];
-    snprintf(path, sizeof(path), "/sys/class/net/%s", ifname);
+    snprintf(path, sizeof(path), "/sys/class/net/%s/wireless", ifname);
     *v = 0 == access(path, X_OK);
     return true;
 }
@@ -687,14 +601,14 @@ util_net_get_macaddr(const char *ifname,
  *****************************************************************************/
 
 static int
-util_wifi_get_parent(const char *device_vif_ifname,
+util_wifi_get_parent(const char *vif,
                      char *buf,
                      int len)
 {
     char path[128];
     int err;
 
-    snprintf(path, sizeof(path), "/sys/class/net/%s/parent", device_vif_ifname);
+    snprintf(path, sizeof(path), "/sys/class/net/%s/parent", vif);
     err = util_file_read_str(path, buf, len);
     if (err <= 0)
         return err;
@@ -704,12 +618,12 @@ util_wifi_get_parent(const char *device_vif_ifname,
 }
 
 static bool
-util_wifi_is_phy_vif_match(const char *device_phy_ifname,
-                           const char *device_vif_ifname)
+util_wifi_is_phy_vif_match(const char *phy,
+                           const char *vif)
 {
     char buf[32];
-    util_wifi_get_parent(device_vif_ifname, buf, sizeof(buf));
-    return !strcmp(device_phy_ifname, buf);
+    util_wifi_get_parent(vif, buf, sizeof(buf));
+    return !strcmp(phy, buf);
 }
 
 static void
@@ -724,16 +638,16 @@ util_wifi_transform_macaddr(char *mac, int idx)
 }
 
 static int
-util_wifi_gen_macaddr(const char *device_phy_ifname,
+util_wifi_gen_macaddr(const char *phy,
                       char *macaddr,
                       int idx)
 {
     int err;
 
-    err = util_net_get_macaddr(device_phy_ifname, macaddr);
+    err = util_net_get_macaddr(phy, macaddr);
     if (err) {
         LOGW("%s: failed to get radio base macaddr: %d (%s)",
-             device_phy_ifname, errno, strerror(errno));
+             phy, errno, strerror(errno));
         return err;
     }
 
@@ -743,8 +657,8 @@ util_wifi_gen_macaddr(const char *device_phy_ifname,
 }
 
 static bool
-util_wifi_get_macaddr_idx(const char *device_phy_ifname,
-                          const char *device_vif_ifname,
+util_wifi_get_macaddr_idx(const char *phy,
+                          const char *vif,
                           int *idx)
 {
     char vifmac[6];
@@ -752,10 +666,10 @@ util_wifi_get_macaddr_idx(const char *device_phy_ifname,
     int err;
     int i;
 
-    err = util_net_get_macaddr(device_vif_ifname, vifmac);
+    err = util_net_get_macaddr(vif, vifmac);
     if (err) {
         LOGW("%s: failed to get radio base macaddr: %d (%s)",
-             device_phy_ifname, errno, strerror(errno));
+             phy, errno, strerror(errno));
         return err;
     }
 
@@ -765,7 +679,7 @@ util_wifi_get_macaddr_idx(const char *device_phy_ifname,
      * strategies.
      */
     for (i = 0; i < 16; i++) {
-        util_wifi_gen_macaddr(device_phy_ifname, mac, i);
+        util_wifi_gen_macaddr(phy, mac, i);
         if (!memcmp(mac, vifmac, 6)) {
             *idx = i;
             return true;
@@ -777,7 +691,7 @@ util_wifi_get_macaddr_idx(const char *device_phy_ifname,
 }
 
 static int
-util_wifi_get_phy_vifs(const char *device_phy_ifname,
+util_wifi_get_phy_vifs(const char *phy,
                        char *buf,
                        int len)
 {
@@ -795,7 +709,7 @@ util_wifi_get_phy_vifs(const char *device_phy_ifname,
         if (snprintf(path, sizeof(path), "/sys/class/net/%s/parent", p->d_name) > 0 &&
             util_file_read_str(path, parent, sizeof(parent)) > 0 &&
             (rtrimws(parent), 1) &&
-            !strcmp(device_phy_ifname, parent))
+            !strcmp(phy, parent))
             snprintf(buf + strlen(buf), len - strlen(buf), "%s ", p->d_name);
 
     closedir(d);
@@ -803,14 +717,14 @@ util_wifi_get_phy_vifs(const char *device_phy_ifname,
 }
 
 static int
-util_wifi_get_phy_vifs_cnt(const char *device_phy_ifname)
+util_wifi_get_phy_vifs_cnt(const char *phy)
 {
     char vifs[512];
     char *vif;
     char *p = vifs;
     int cnt = 0;
 
-    if(WARN_ON(util_wifi_get_phy_vifs(device_phy_ifname, vifs, sizeof(vifs))))
+    if (WARN_ON(util_wifi_get_phy_vifs(phy, vifs, sizeof(vifs))))
         return 0;
 
     while ((vif = strsep(&p, " ")))
@@ -821,12 +735,12 @@ util_wifi_get_phy_vifs_cnt(const char *device_phy_ifname)
 }
 
 static int
-util_wifi_any_phy_vif(const char *device_phy_ifname,
+util_wifi_any_phy_vif(const char *phy,
                       char *buf,
                       int len)
 {
     char *p;
-    if (util_wifi_get_phy_vifs(device_phy_ifname, buf, len) < 0)
+    if (util_wifi_get_phy_vifs(phy, buf, len) < 0)
         return -1;
     if (!(p = strtok(buf, " ")))
         return -1;
@@ -834,17 +748,17 @@ util_wifi_any_phy_vif(const char *device_phy_ifname,
 }
 
 static bool
-util_wifi_phy_is_offload(const char *device_phy_ifname)
+util_wifi_phy_is_offload(const char *phy)
 {
     char path[128];
-    snprintf(path, sizeof(path), "/sys/class/net/%s/is_offload", device_phy_ifname);
+    snprintf(path, sizeof(path), "/sys/class/net/%s/is_offload", phy);
     return 0 == access(path, R_OK);
 }
 
 static bool
-util_wifi_phy_is_2ghz(const char *dphy)
+util_wifi_phy_is_2ghz(const char *phy)
 {
-    const char *p = F("/sys/class/net/%s/2g_maxchwidth", dphy);
+    const char *p = F("/sys/class/net/%s/2g_maxchwidth", phy);
     char buf[32] = {};
     util_file_read_str(p, buf, sizeof(buf));
     return strlen(buf) > 0;
@@ -868,24 +782,23 @@ util_iwconfig_freq_to_chan(int mhz)
 }
 
 static bool
-util_iwconfig_get_chan(const char *device_phy_ifname,
-                       const char *device_vif_ifname,
+util_iwconfig_get_chan(const char *phy,
+                       const char *vif,
                        int *chan)
 {
     char vifs[1024];
     char buf[256];
     char *vifr;
-    char *vif;
     char *p;
     int mhz_last;
     int mhz;
     int err;
     int num;
 
-    if (device_vif_ifname)
-        err = snprintf(vifs, sizeof(vifs), "%s", device_vif_ifname);
+    if (vif)
+        err = STRSCPY(vifs, vif);
     else
-        err = util_wifi_get_phy_vifs(device_phy_ifname, vifs, sizeof(vifs));
+        err = util_wifi_get_phy_vifs(phy, vifs, sizeof(vifs));
 
     if (err < 0)
         return false;
@@ -952,7 +865,7 @@ util_iwconfig_get_chan(const char *device_phy_ifname,
 }
 
 static int
-util_iwconfig_get_opmode(const char *device_vif_ifname, char *opmode, int len)
+util_iwconfig_get_opmode(const char *vif, char *opmode, int len)
 {
     char buf[256];
     char *p;
@@ -961,9 +874,9 @@ util_iwconfig_get_opmode(const char *device_vif_ifname, char *opmode, int len)
     memset(opmode, 0, len);
 
     err = util_exec_read(rtrimws, buf, sizeof(buf),
-                         "iwconfig", device_vif_ifname);
+                         "iwconfig", vif);
     if (err) {
-        LOGW("%s: failed to get opmode: %d", device_vif_ifname, err);
+        LOGW("%s: failed to get opmode: %d", vif, err);
         return 0;
     }
 
@@ -971,12 +884,12 @@ util_iwconfig_get_opmode(const char *device_vif_ifname, char *opmode, int len)
         return 0;
 
     if (strstr(p, "Mode:Master")) {
-        snprintf(opmode, len, "ap");
+        strscpy(opmode, "ap", len);
         return 1;
     }
 
     if (strstr(p, "Mode:Managed")) {
-        snprintf(opmode, len, "sta");
+        strscpy(opmode, "sta", len);
         return 1;
     }
 
@@ -984,19 +897,77 @@ util_iwconfig_get_opmode(const char *device_vif_ifname, char *opmode, int len)
 }
 
 static char *
-util_iwconfig_any_phy_vif_type(const char *dphy, const char *type, char *buf, int len)
+util_iwconfig_any_phy_vif_type(const char *phy, const char *type, char *buf, int len)
 {
     char opmode[32];
-    char *dvif;
-    if (util_wifi_get_phy_vifs(dphy, buf, len))
+    char *vif;
+    if (util_wifi_get_phy_vifs(phy, buf, len))
         return NULL;
-    while ((dvif = strsep(&buf, " ")))
+    while ((vif = strsep(&buf, " ")))
         if (!type)
-            return dvif;
-        else if (util_iwconfig_get_opmode(dvif, opmode, sizeof(opmode)))
+            return vif;
+        else if (util_iwconfig_get_opmode(vif, opmode, sizeof(opmode)))
             if (!strcmp(opmode, type))
-                return dvif;
+                return vif;
     return NULL;
+}
+
+static void
+util_iwconfig_set_tx_power(const char *phy, const int tx_power_dbm)
+{
+    const char *txpwr = strfmta("%d", tx_power_dbm);
+    const char *vif;
+    char *vifs;
+
+    if (WARN_ON(util_wifi_get_phy_vifs(phy, vifs = A(512)) != 0))
+        return;
+    while ((vif = strsep(&vifs, " ")) != NULL)
+        if (strlen(vif) > 0)
+            WARN_ON(!strexa("iwconfig", vif, "txpower", txpwr));
+}
+
+static int
+util_iwconfig_get_tx_power(const char *phy)
+{
+    const char *vif;
+    const char *buf;
+    char *vifs;
+    int txpwr = 0;
+
+    if (WARN_ON(util_wifi_get_phy_vifs(phy, vifs = A(512)) != 0))
+        return 0;
+
+    while ((vif = strsep(&vifs, " ")) != NULL) {
+        if (strlen(vif) == 0)
+            continue;
+
+        buf = strexa("iwconfig", vif);
+        if (WARN_ON(!buf))
+            continue;
+
+        if (strstr(buf, "Not-Associated"))
+            continue;
+
+        buf = strstr(buf, "Tx-Power");
+        if (WARN_ON(!buf))
+            continue;
+
+        buf = strpbrk(buf, ":=");
+        if (WARN_ON(!buf))
+            continue;
+
+        buf += 1; /* skip the : or = */
+
+        if (txpwr > 0 && txpwr != atoi(buf))
+            return 0;
+
+        if (atoi(buf) == 50) /* not yet valid */
+            continue;
+
+        txpwr = atoi(buf);
+    }
+
+    return txpwr;
 }
 
 /******************************************************************************
@@ -1004,32 +975,33 @@ util_iwconfig_any_phy_vif_type(const char *dphy, const char *type, char *buf, in
  *****************************************************************************/
 
 static void
-util_cb_vif_state_update(const char *cloud_vif_ifname)
+util_cb_vif_state_update(const char *vif)
 {
     struct schema_Wifi_VIF_State vstate;
+    const char *phy = strchomp(R(F("/sys/class/net/%s/parent", vif)), "\r\n ");
     char ifname[32];
     bool ok;
 
-    LOGD("%s: updating state", cloud_vif_ifname);
+    LOGD("%s: updating state", vif);
 
-    snprintf(ifname, sizeof(ifname), "%s", cloud_vif_ifname);
+    STRSCPY(ifname, vif);
 
     ok = target_vif_state_get(ifname, &vstate);
     if (!ok) {
         LOGW("%s: failed to get vif state: %d (%s)",
-             cloud_vif_ifname, errno, strerror(errno));
+             vif, errno, strerror(errno));
         return;
     }
 
     if (rops.op_vstate)
-        rops.op_vstate(&vstate);
+        rops.op_vstate(&vstate, phy);
 }
 
 static void
 util_cb_vif_state_channel_sanity_update(const struct schema_Wifi_Radio_State *rstate)
 {
     const struct kvstore *kv;
-    char *dvif;
+    char *vif;
     char *p;
 
     /* qcawifi sta vap may not report ev_chan_change over netlink meaning its
@@ -1039,31 +1011,31 @@ util_cb_vif_state_channel_sanity_update(const struct schema_Wifi_Radio_State *rs
      * overrun and events are dropped - hence the sanity check below
      */
     if (rstate->channel_exists)
-        if (!util_wifi_get_phy_vifs(target_ifname_cloud2device((char *)rstate->if_name), p = A(256)))
-            while ((dvif = strsep(&p, " ")))
-                if ((kv = util_kv_get(F("%s.last_channel", dvif))))
+        if (!util_wifi_get_phy_vifs(rstate->if_name, p = A(256)))
+            while ((vif = strsep(&p, " ")))
+                if ((kv = util_kv_get(F("%s.last_channel", vif))))
                     if (atoi(kv->val) != rstate->channel) {
                         LOGI("%s: channel out of sync (%d != %d), forcing update",
-                             dvif, atoi(kv->val), rstate->channel);
-                        util_cb_vif_state_update(target_ifname_device2cloud(dvif));
+                             vif, atoi(kv->val), rstate->channel);
+                        util_cb_vif_state_update(vif);
                     }
 }
 
 static void
-util_cb_phy_state_update(const char *cloud_phy_ifname)
+util_cb_phy_state_update(const char *phy)
 {
     struct schema_Wifi_Radio_State rstate;
     char ifname[32];
     bool ok;
 
-    LOGD("%s: updating state", cloud_phy_ifname);
+    LOGD("%s: updating state", phy);
 
-    snprintf(ifname, sizeof(ifname), "%s", cloud_phy_ifname);
+    STRSCPY(ifname, phy);
 
     ok = target_radio_state_get(ifname, &rstate);
     if (!ok) {
         LOGW("%s: failed to get phy state: %d (%s)",
-             cloud_phy_ifname, errno, strerror(errno));
+             phy, errno, strerror(errno));
         return;
     }
 
@@ -1152,1396 +1124,288 @@ util_cb_delayed_update(const char *type, const char *ifname)
     util_kv_set(UTIL_CB_KV_KEY, buf);
 }
 
+/* FIXME: forward declarations are bad */
+static void
+qca_hapd_sta_regen(struct hapd *hapd);
+
 static void
 util_cb_delayed_update_all(void)
 {
-    char ifname[32];
+    char phy[32];
     struct dirent *i;
+    struct hapd *hapd;
     DIR *d;
 
     if (!(d = opendir("/sys/class/net")))
         return;
-    for (i = readdir(d); i; i = readdir(d))
-        if (strstr(i->d_name, "wifi"))
-            util_cb_delayed_update(UTIL_CB_PHY, target_ifname_device2cloud(i->d_name));
-        else if (0 == util_wifi_get_parent(i->d_name, ifname, sizeof(ifname)))
-            util_cb_delayed_update(UTIL_CB_VIF, target_ifname_device2cloud(i->d_name));
+    for (i = readdir(d); i; i = readdir(d)) {
+        if (strstr(i->d_name, "wifi")) {
+            util_cb_delayed_update(UTIL_CB_PHY, i->d_name);
+        } else if (0 == util_wifi_get_parent(i->d_name, phy, sizeof(phy))) {
+            hapd = hapd_lookup(i->d_name);
+            if (hapd)
+                qca_hapd_sta_regen(hapd);
+            util_cb_delayed_update(UTIL_CB_VIF, i->d_name);
+        }
+    }
     closedir(d);
 }
 
 /******************************************************************************
- * Utility: wpa/hostapd listening socket
+ * ctrl helpers
  *****************************************************************************/
 
-#define WPA_CTRL_LEVEL_WARNING 4
-#define WPA_CTRL_LEVEL_ERROR 5
-
-static struct util_wpa_ctrl_watcher *
-util_wpa_ctrl_listen_lookup(const char *sockpath)
-{
-    struct util_wpa_ctrl_watcher *w;
-
-    ds_dlist_foreach(&g_watcher_list, w)
-        if (!strcmp(w->sockpath, sockpath))
-            return w;
-
-    return NULL;
-}
+/* target -> core */
 
 static void
-util_wpa_ctrl_listen_stop(const char *sockpath)
-{
-    struct util_wpa_ctrl_watcher *w;
-
-    if (!(w = util_wpa_ctrl_listen_lookup(sockpath)))
-        return;
-
-    ds_dlist_remove(&g_watcher_list, w);
-    ev_io_stop(target_mainloop, &w->io);
-    wpa_ctrl_detach(w->ctrl);
-    wpa_ctrl_close(w->ctrl);
-    free(w);
-}
-
-static void
-util_wpa_ctrl_parse_ap_sta_connected(const struct util_wpa_ctrl_watcher *w,
-                                     const char *arg)
+qca_hapd_sta_report(struct hapd *hapd, const char *mac)
 {
     struct schema_Wifi_Associated_Clients client;
-    char cloud_vif_ifname[32];
-    char key_id[32];
-    char buf[128];
-    char *mac;
-    char *kv;
-    const char *k;
-    const char *v;
-
-    STRSCPY(key_id, "key");
-    snprintf(buf, sizeof(buf), "%s", arg);
-    mac = strtok(buf, " ");
-
-    while ((kv = strtok(NULL, " \r\n"))) {
-        if (!(k = strsep(&kv, "=")))
-            continue;
-        if (!(v = strsep(&kv, "")))
-            continue;
-        if (!strcmp(k, "keyid"))
-            STRSCPY(key_id, v);
-    }
-
-    LOGI("%s: client %s: connected with '%s'",
-         w->device_vif_ifname, mac, key_id);
+    int exists;
 
     memset(&client, 0, sizeof(client));
-    memset(cloud_vif_ifname, 0, sizeof(cloud_vif_ifname));
-
     schema_Wifi_Associated_Clients_mark_all_present(&client);
     client._partial_update = true;
-    client.state_exists = true;
-    strncpy(cloud_vif_ifname, w->cloud_vif_ifname, sizeof(cloud_vif_ifname) - 1);
-    strncpy(client.mac, mac, sizeof(client.mac) - 1);
-    strncpy(client.state, "active", sizeof(client.state) - 1);
-
-    if ((client.key_id_exists = (strlen(key_id) > 0)))
-        snprintf(client.key_id, sizeof(client.key_id), "%s", key_id);
+    exists = (hapd_sta_get(hapd, mac, &client) == 0);
+    LOGI("%s: %s: updating exists=%d", hapd->ctrl.bss, mac, exists);
 
     if (rops.op_client)
-        rops.op_client(&client, cloud_vif_ifname, true);
+        rops.op_client(&client, hapd->ctrl.bss, exists);
 }
 
 static void
-util_wpa_ctrl_parse_ap_sta_disconnected(const struct util_wpa_ctrl_watcher *w,
-                                        const char *arg)
+qca_hapd_sta_regen_iter(struct hapd *hapd, const char *mac, void *data)
 {
-    struct schema_Wifi_Associated_Clients client;
-    char cloud_vif_ifname[32];
-
-    LOGI("%s: client %s: disconnected", w->device_vif_ifname, arg);
-    memset(&client, 0, sizeof(client));
-    memset(cloud_vif_ifname, 0, sizeof(cloud_vif_ifname));
-    schema_Wifi_Associated_Clients_mark_all_present(&client);
-    client._partial_update = true;
-    client.state_exists = true;
-    strncpy(cloud_vif_ifname, w->cloud_vif_ifname, sizeof(cloud_vif_ifname) - 1);
-    strncpy(client.mac, arg, sizeof(client.mac) - 1);
-    strncpy(client.state, "active", sizeof(client.state) - 1);
-
-    if (rops.op_client)
-        rops.op_client(&client, cloud_vif_ifname, false);
+    qca_hapd_sta_report(hapd, mac);
 }
 
-static int
-util_wpas_get_status(const char *device_phy_ifname,
-                     const char *device_vif_ifname,
-                     char *bssid,
-                     int bssid_len,
-                     char *ssid,
-                     int ssid_len,
-                     char *id,
-                     int id_len,
-                     char *state,
-                     int state_len);
 static void
-util_iwpriv_set_scanfilter(const char *device_vif_ifname,
+qca_hapd_sta_regen(struct hapd *hapd)
+{
+    LOGI("%s: regenerating sta list", hapd->ctrl.bss);
+
+    if (rops.op_flush_clients)
+        rops.op_flush_clients(hapd->ctrl.bss);
+
+    hapd_sta_iter(hapd, qca_hapd_sta_regen_iter, NULL);
+}
+
+/* FIXME: forward declarations are bad */
+static void
+util_iwpriv_set_scanfilter(const char *vif,
                            const char *ssid);
 
 static void
-util_wpa_ctrl_parse_wpa_connected_war(const struct util_wpa_ctrl_watcher *w)
+qca_wpas_report(struct wpas *wpas)
 {
-    char ssid[64];
+    struct schema_Wifi_VIF_State vstate;
 
-    /* FIXME: Scanfilter is based off of ssid. However
-     *        during onboarding ssid is empty so scanfilter
-     *        is not set. Once device connects to a matching
-     *        network the VIF_Config may be updated by cloud
-     *        to mirror reflect existing VIF_State. In such
-     *        case wm2 will not call vif_config_set()
-     *        because it'll think there's nothing to do.
-     *
-     *        One solution would be to remove the
-     *        is_changed() logic from wm2 and allow the
-     *        target to take care of delta-ing state vs
-     *        conf or old_conf vs new_conf.
-     *
-     *        Another would be to have a list of filterssids
-     *        based on Credential_Config which never
-     *        changes.
-     *
-     *        This fix covers a narrow case of sta vap
-     *        transient issues with connection to its ap.
-     *
-     *        Once cloud requests same-radio different-bssid
-     *        parent change or different-radio parent change
-     *        vif_config_set() will get a chance to setup
-     *        scanfilter properly.
+    util_cb_delayed_update(UTIL_CB_VIF, wpas->ctrl.bss);
+    util_cb_delayed_update(UTIL_CB_PHY, wpas->phy);
+
+    /* scanfilter increases chance of finding bss entry in
+     * scan results in congested rf env
      */
-    util_wpas_get_status(w->device_phy_ifname,
-                         w->device_vif_ifname,
-                         NULL, 0,
-                         ssid, sizeof(ssid),
-                         NULL, 0,
-                         NULL, 0);
-    util_iwpriv_set_scanfilter(w->device_vif_ifname, ssid);
+    memset(&vstate, 0, sizeof(vstate));
+    wpas_bss_get(wpas, &vstate);
+    util_iwpriv_set_scanfilter(wpas->ctrl.bss, vstate.ssid);
+}
+
+/* ctrl -> target */
+
+static void
+qca_hapd_sta_connected(struct hapd *hapd, const char *mac, const char *keyid)
+{
+    qca_hapd_sta_report(hapd, mac);
 }
 
 static void
-util_wpa_ctrl_parse_wpa_connected(const struct util_wpa_ctrl_watcher *w,
-                                  const char *arg)
+qca_hapd_sta_disconnected(struct hapd *hapd, const char *mac)
 {
-    const char *macaddr;
-    char buf[128];
-
-    snprintf(buf, sizeof(buf), "%s", arg);
-    strtok(buf, " "); /* =- */
-    strtok(NULL, " "); /* =Connection */
-    strtok(NULL, " "); /* =to */
-    macaddr = strtok(NULL, " ");
-
-    LOGI("%s: connected to %s", w->device_vif_ifname, macaddr);
-    util_cb_delayed_update(UTIL_CB_VIF, w->cloud_vif_ifname);
-    util_cb_delayed_update(UTIL_CB_PHY, target_ifname_device2cloud((char *)w->device_phy_ifname));
-    util_wpa_ctrl_parse_wpa_connected_war(w);
+    qca_hapd_sta_report(hapd, mac);
 }
 
 static void
-util_wpa_ctrl_parse_wpa_disconnected(const struct util_wpa_ctrl_watcher *w,
-                                     const char *arg)
+qca_hapd_ap_enabled(struct hapd *hapd)
 {
-    const char *reason;
-    const char *bssid;
-    const char *local;
-    char buf[128];
-
-    snprintf(buf, sizeof(buf), "%s", arg);
-    strtok(buf, "="); /* =bssid */
-    bssid = strtok(NULL, " ");
-    strtok(NULL, "="); /* =reason */
-    reason = strtok(NULL, " ");
-    strtok(NULL, "="); /* =locally_generated */
-    local = strtok(NULL, " ");
-
-    if (!bssid)
-        bssid = "?";
-
-    if (!reason)
-        reason = "-1";
-
-    if (!local)
-        local = "-1";
-
-    LOGD("%s: disconnected from %s (reason='%s', local='%s')",
-         w->device_vif_ifname, bssid, reason, local);
-    LOGI("%s: disconnected from %s (reason=%d, local=%d)",
-         w->device_vif_ifname, bssid, atoi(reason), atoi(local));
-
-    util_cb_delayed_update(UTIL_CB_VIF, w->cloud_vif_ifname);
+    qca_hapd_sta_regen(hapd);
 }
 
 static void
-util_wpa_ctrl_parse_level(const struct util_wpa_ctrl_watcher *w,
-                          int level,
-                          const char *buf)
+qca_hapd_ap_disabled(struct hapd *hapd)
 {
-    switch (level) {
-        case WPA_CTRL_LEVEL_WARNING:
-            LOGW("%s: received '%s'", w->sockpath, buf);
-            break;
-        case WPA_CTRL_LEVEL_ERROR:
-            LOGE("%s: received '%s'", w->sockpath, buf);
-            break;
-        default:
-            LOGW("%s: received unknown level (%d) '%s'", w->sockpath, level, buf);
-            break;
+    qca_hapd_sta_regen(hapd);
+}
+
+static void
+qca_hapd_wps_active(struct hapd *hapd)
+{
+    util_cb_delayed_update(UTIL_CB_VIF, hapd->ctrl.bss);
+}
+
+static void
+qca_hapd_wps_success(struct hapd *hapd)
+{
+    util_cb_delayed_update(UTIL_CB_VIF, hapd->ctrl.bss);
+}
+
+static void
+qca_hapd_wps_timeout(struct hapd *hapd)
+{
+    util_cb_delayed_update(UTIL_CB_VIF, hapd->ctrl.bss);
+}
+
+static void
+qca_wpas_connected(struct wpas *wpas, const char *bssid, int id, const char *id_str)
+{
+    qca_wpas_report(wpas);
+}
+
+static void
+qca_wpas_disconnected(struct wpas *wpas, const char *bssid, int reason, int local)
+{
+    qca_wpas_report(wpas);
+}
+
+static void
+qca_hapd_ctrl_opened(struct ctrl *ctrl)
+{
+    struct hapd *hapd = container_of(ctrl, struct hapd, ctrl);
+    qca_hapd_sta_regen(hapd);
+}
+
+static void
+qca_hapd_ctrl_closed(struct ctrl *ctrl)
+{
+    struct hapd *hapd = container_of(ctrl, struct hapd, ctrl);
+    qca_hapd_sta_regen(hapd);
+}
+
+static void
+qca_wpas_ctrl_opened(struct ctrl *ctrl)
+{
+    struct wpas *wpas = container_of(ctrl, struct wpas, ctrl);
+    qca_wpas_report(wpas);
+}
+
+static void
+qca_wpas_ctrl_closed(struct ctrl *ctrl)
+{
+    struct wpas *wpas = container_of(ctrl, struct wpas, ctrl);
+    qca_wpas_report(wpas);
+}
+
+/* target -> target */
+
+static void
+qca_ctrl_discover(const char *bss)
+{
+    struct hapd *hapd = hapd_lookup(bss);
+    struct wpas *wpas = wpas_lookup(bss);
+    const char *phy = strchomp(R(F("/sys/class/net/%s/parent", bss)), "\r\n ");
+    char mode[32] = {};
+
+    if (phy)
+        util_iwconfig_get_opmode(bss, mode, sizeof(mode));
+
+    if (!strcmp(mode, "ap")) {
+        if (wpas) ctrl_disable(&wpas->ctrl);
+        if (!hapd) hapd = hapd_new(phy, bss);
+        if (WARN_ON(!hapd)) return;
+        STRSCPY_WARN(hapd->driver, "atheros");
+        hapd->ctrl.opened = qca_hapd_ctrl_opened;
+        hapd->ctrl.closed = qca_hapd_ctrl_closed;
+        hapd->ctrl.overrun = qca_hapd_ctrl_opened;
+        hapd->sta_connected = qca_hapd_sta_connected;
+        hapd->sta_disconnected = qca_hapd_sta_disconnected;
+        hapd->ap_enabled = qca_hapd_ap_enabled;
+        hapd->ap_disabled = qca_hapd_ap_disabled;
+        hapd->wps_active = qca_hapd_wps_active;
+        hapd->wps_success = qca_hapd_wps_success;
+        hapd->wps_timeout = qca_hapd_wps_timeout;
+        ctrl_enable(&hapd->ctrl);
+        hapd = NULL;
     }
+
+    if (!strcmp(mode, "sta")) {
+        if (hapd) ctrl_disable(&hapd->ctrl);
+        if (!wpas) wpas = wpas_new(phy, bss);
+        if (WARN_ON(!wpas)) return;
+        STRSCPY_WARN(wpas->driver, "athr");
+        wpas->ctrl.opened = qca_wpas_ctrl_opened;
+        wpas->ctrl.closed = qca_wpas_ctrl_closed;
+        wpas->ctrl.overrun = qca_wpas_ctrl_opened;
+        wpas->connected = qca_wpas_connected;
+        wpas->disconnected = qca_wpas_disconnected;
+        ctrl_enable(&wpas->ctrl);
+        wpas = NULL;
+    }
+
+    if (hapd) hapd_destroy(hapd);
+    if (wpas) wpas_destroy(wpas);
 }
 
 static void
-util_wpa_ctrl_parse(const struct util_wpa_ctrl_watcher *w,
-                    const char *buf)
+qca_ctrl_destroy(const char *bss)
 {
-    const char *str;
-    int level;
+    struct hapd *hapd = hapd_lookup(bss);
+    struct wpas *wpas = wpas_lookup(bss);
+    if (hapd) hapd_destroy(hapd);
+    if (wpas) wpas_destroy(wpas);
+}
 
-    LOGD("%s: received '%s'", w->sockpath, buf);
+static void
+qca_ctrl_wps_session(const char *bss, int wps, int wps_pbc)
+{
+    struct hapd *hapd = hapd_lookup(bss);
 
-    /* Example events:
-     *
-     * <3>AP-STA-CONNECTED 60:b4:f7:f0:0a:19
-     * <3>AP-STA-CONNECTED-PWD 60:b4:f7:f0:0a:19 passphrase
-     * <3>AP-STA-DISCONNECTED 60:b4:f7:f0:0a:19
-     * <3>CTRL-EVENT-CONNECTED - Connection to 00:1d:73:73:88:ea completed [id=0 id_str=]
-     * <3>CTRL-EVENT-DISCONNECTED bssid=00:1d:73:73:88:ea reason=3 locally_generated=1
-     */
-    if (!(str = index(buf, '>'))) {
-        LOGW("%s: failed to parse event '%s'", w->sockpath, buf);
+    if (!hapd || !wps)
         return;
-    }
 
-    if (1 != sscanf(buf, "<%d>", &level)) {
-        LOGW("%s: failed to parse level '%s'", w->sockpath, buf);
+    if (WARN_ON(hapd_wps_cancel(hapd) != 0))
         return;
-    }
 
-    str++;
-
-    if (str == strstr(str, AP_STA_CONNECTED))
-        util_wpa_ctrl_parse_ap_sta_connected(w, str + strlen(AP_STA_CONNECTED));
-    if (str == strstr(str, AP_STA_DISCONNECTED))
-        util_wpa_ctrl_parse_ap_sta_disconnected(w, str + strlen(AP_STA_DISCONNECTED));
-    if (str == strstr(str, WPA_EVENT_CONNECTED))
-        util_wpa_ctrl_parse_wpa_connected(w, str + strlen(WPA_EVENT_CONNECTED));
-    if (str == strstr(str, WPA_EVENT_DISCONNECTED))
-        util_wpa_ctrl_parse_wpa_disconnected(w, str + strlen(WPA_EVENT_DISCONNECTED));
-
-    if (level >= WPA_CTRL_LEVEL_WARNING)
-        util_wpa_ctrl_parse_level(w, level, str);
-}
-
-static void
-util_wpa_ctrl_listen_cb(struct ev_loop *loop,
-                        ev_io *watcher,
-                        int revents)
-{
-    struct util_wpa_ctrl_watcher *w;
-    char buf[1024];
-    size_t len;
-    int err;
-
-    w = (void *)watcher;
-
-    if (wpa_ctrl_pending(w->ctrl) < 0) {
-        LOGW("%s: nothing pending, userspace process crashed? closing", w->sockpath);
-        util_wpa_ctrl_listen_stop(w->sockpath);
+    if (!wps_pbc)
         return;
-    }
 
-    memset(buf, 0, sizeof(buf));
-
-    len = sizeof(buf) - 1;
-    err = wpa_ctrl_recv(w->ctrl, buf, &len);
-    if (err) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK)
-            return;
-        LOGW("%s: failed to read socket: %d (%s), closing",
-             w->sockpath, errno, strerror(errno));
-        util_wpa_ctrl_listen_stop(w->sockpath);
+    if (WARN_ON(hapd_wps_activate(hapd) != 0))
         return;
-    }
-
-    util_wpa_ctrl_parse(w, buf);
-}
-
-static int
-util_wpa_ctrl_listen_start(const char *sockpath,
-                           const char *device_phy_ifname,
-                           const char *device_vif_ifname,
-                           const char *cloud_vif_ifname)
-{
-    struct util_wpa_ctrl_watcher *w;
-    int retries;
-    int fd;
-
-    LOGT("%s: starting listening", device_vif_ifname);
-
-    w = calloc(1, sizeof(*w));
-    if (!w) {
-        LOGE("%s: failed to allocate structure; out of memory?",
-             sockpath);
-        return -1;
-    }
-
-    w->ctrl = wpa_ctrl_open(sockpath);
-    if (!w->ctrl) {
-        LOGE("%s: failed to open: %d (%s)",
-             sockpath, errno, strerror(errno));
-        goto err_free;
-    }
-
-    retries = 3;
-    while (wpa_ctrl_attach(w->ctrl) && retries--)
-        sleep(1);
-
-    if (retries == -1) {
-        LOGE("%s: timed out while attaching", sockpath);
-        goto err_close;
-    }
-
-    fd = wpa_ctrl_get_fd(w->ctrl);
-    if (fd < 0) {
-        LOGW("%s: failed to get file descriptor: %d (%s)",
-             sockpath, errno, strerror(errno));
-        goto err_detach;
-    }
-
-    strncpy(w->sockpath, sockpath, sizeof(w->sockpath) - 1);
-    strncpy(w->device_phy_ifname, device_phy_ifname, sizeof(w->device_phy_ifname) - 1);
-    strncpy(w->device_vif_ifname, device_vif_ifname, sizeof(w->device_vif_ifname) - 1);
-    strncpy(w->cloud_vif_ifname, cloud_vif_ifname, sizeof(w->cloud_vif_ifname) - 1);
-    ev_io_init(&w->io, util_wpa_ctrl_listen_cb, fd, EV_READ);
-    ev_io_start(target_mainloop, &w->io);
-    ds_dlist_insert_tail(&g_watcher_list, w);
-
-    LOGI("%s: started listening", device_vif_ifname);
-
-    return 0;
-
-err_detach:
-    wpa_ctrl_detach(w->ctrl);
-err_close:
-    wpa_ctrl_close(w->ctrl);
-err_free:
-    free(w);
-    return -1;
-}
-
-static int
-util_wpa_ctrl_wait_ready(const char *sockpath)
-{
-    int retries;
-    int err;
-
-    for (retries = 3; retries > 0; retries--) {
-        err = access(sockpath, R_OK);
-        if (err == 0)
-            return 0;
-
-        LOGD("%s: waiting", sockpath);
-        sleep(1);
-    }
-
-    errno = EAGAIN;
-    return -1;
-}
-
-/******************************************************************************
- * Utility: hostapd helpers
- *****************************************************************************/
-
-#define CMD_HOSTAP(dphy, dvif, ...) \
-    CMD_TIMEOUT("hostapd_cli", "-p", strfmta("/var/run/hostapd-%s", dphy), \
-                "-i", dvif, ## __VA_ARGS__)
-
-static void
-util_hostapd_get_sockpath(const char *device_phy_ifname,
-                          const char *device_vif_ifname,
-                          char *path,
-                          int len)
-{
-    snprintf(path, len - 1, "/var/run/hostapd-%s%s%s",
-             device_phy_ifname,
-             device_vif_ifname ? "/" : "",
-             device_vif_ifname ?: "");
 }
 
 static void
-util_hostapd_get_confpath(const char *device_vif_ifname, char *path, int len)
+qca_ctrl_apply(const char *bss,
+               const struct schema_Wifi_VIF_Config *vconf,
+               const struct schema_Wifi_Radio_Config *rconf,
+               const struct schema_Wifi_Credential_Config *cconf,
+               int num_cconf)
 {
-    snprintf(path, len, "/var/run/hostapd-%s.config", device_vif_ifname);
-}
+    struct hapd *hapd = hapd_lookup(bss);
+    struct wpas *wpas = wpas_lookup(bss);
+    bool first = false;
+    int err = 0;
 
-static void
-util_hostapd_get_confpath_pskfile(const char *device_vif_ifname, char *path, int len)
-{
-    snprintf(path, len, "/var/run/hostapd-%s.pskfile", device_vif_ifname);
-}
+    WARN_ON(hapd && wpas);
 
-static const char *
-util_hostapd_get_mode_str(int mode)
-{
-    switch (mode) {
-        case 1: return "1";
-        case 2: return "2";
-        case 3: return "mixed";
-    }
-    LOGW("%s: unknown mode number: %d", __func__, mode);
-    return NULL;
-}
-
-static int
-util_hostapd_get_mode(const char *mode)
-{
-    if (!strcmp(mode, "mixed"))
-        return 3;
-    else if (!strcmp(mode, "2"))
-        return 2;
-    else if (!strcmp(mode, "1"))
-        return 1;
-    else if (strlen(mode) == 0)
-        return 3;
-
-    LOGW("%s: unknown mode string: '%s'", __func__, mode);
-    return 3;
-}
-
-static const char *
-util_hostapd_get_pairwise(int wpa)
-{
-    switch (wpa) {
-        case 1: return "TKIP";
-        case 2: return "CCMP";
-        case 3: return "CCMP TKIP";
-    }
-    LOGW("%s: unhandled wpa mode %d", __func__, wpa);
-    return "";
-}
-
-static int
-util_hostapd_reload_pskfile(const char *device_phy_ifname,
-                            const char *device_vif_ifname)
-{
-    char sockpath[128];
-    char ifname[32];
-    char buf[32];
-    int err;
-    const char *argv[] = {
-        "timeout", "-t", "3",
-        "hostapd_cli", "-p", sockpath, "-i", ifname,
-        "reload_wpa_psk",
-        NULL
-    };
-
-    snprintf(ifname, sizeof(ifname), "%s", device_vif_ifname);
-    util_hostapd_get_sockpath(device_phy_ifname,
-                              NULL,
-                              sockpath,
-                              sizeof(sockpath));
-
-    err = forkexec(argv[0], argv, rtrimws, buf, sizeof(buf));
-    if (err) {
-        LOGW("%s: failed to forkexec: %d (%s)",
-             device_vif_ifname, errno, strerror(errno));
-        return -1;
+    if (hapd) {
+        first = (hapd->ctrl.wpa == NULL);
+        err |= WARN_ON(hapd_conf_gen(hapd, rconf, vconf) < 0);
+        err |= WARN_ON(hapd_conf_apply(hapd) < 0);
     }
 
-    if (strstr(buf, "OK") != buf) {
-        LOGW("%s: failed to hostapd_cli: %s", device_vif_ifname, buf);
-        errno = EINVAL;
-        return -1;
+    if (wpas) {
+        first = (wpas->ctrl.wpa == NULL);
+        err |= WARN_ON(wpas_conf_gen(wpas, rconf, vconf, cconf, num_cconf) < 0);
+        err |= WARN_ON(wpas_conf_apply(wpas) < 0);
     }
 
-    return 0;
-}
-
-static int
-util_hostapd_gen_conf_pskfile(const char *device_vif_ifname,
-                              const struct schema_Wifi_VIF_Config *vconf,
-                              char *buf,
-                              int len)
-{
-    struct schema_Wifi_VIF_Config vconfmut;
-    const char *oftag;
-    const char *psk;
-    char oftagkey[32];
-    int off;
-    int i;
-    int j;
-
-    memset(buf, 0, len);
-    memcpy(&vconfmut, vconf, sizeof(vconfmut));
-    off = 0;
-
-    for (i = 0; i < vconf->security_len; i++) {
-        if (!strstr(vconf->security_keys[i], "key-"))
-            continue;
-
-        LOGT("%s: parsing vconf: key '%s'",
-             device_vif_ifname, vconf->security_keys[i]);
-
-        if (1 != sscanf(vconf->security_keys[i], "key-%d", &j))
-            continue;
-
-        snprintf(oftagkey, sizeof(oftagkey),
-                 "oftag-%s",
-                 vconf->security_keys[i]);
-
-        oftag = SCHEMA_KEY_VAL(vconfmut.security, oftagkey);
-        psk = SCHEMA_KEY_VAL(vconfmut.security, vconfmut.security_keys[i]);
-
-        LOGT("%s: parsing vconf: key '%s': key=%d oftag='%s' psk='%s'",
-             device_vif_ifname, vconf->security_keys[i], j, oftag, psk);
-
-        if (strlen(oftag) == 0)
-            continue;
-
-        if (strlen(psk) == 0)
-            continue;
-
-        off += scnprintf(buf + off, len - off,
-                         "#oftag=%s\n"
-                         "keyid=%s 00:00:00:00:00:00 %s\n",
-                         oftag,
-                         vconf->security_keys[i],
-                         psk);
-    }
-
-    return 0;
-}
-
-static unsigned short int
-util_hostapd_fletcher16(const char *data, int count)
-{
-    unsigned short int sum1 = 0;
-    unsigned short int sum2 = 0;
-    int index;
-
-    for( index = 0; index < count; ++index )
-    {
-       sum1 = (sum1 + data[index]) % 255;
-       sum2 = (sum2 + sum1) % 255;
-    }
-
-    return (sum2 << 8) | sum1;
-}
-
-static const char *
-util_hostapd_ft_nas_id(void)
-{
-    /* This is connected with radius server. This is
-     * required when configure 802.11R even we only using
-     * FT-PSK today. For FT-PSK and ft_psk_generate_local=1
-     * is not used. Currently we can't skip this while
-     * hostapd will not start and we could see such message:
-     * FT (IEEE 802.11r) requires nas_identifier to be
-     * configured as a 1..48 octet string
+    /* FIXME: This should be made generic and moved to WM.
+     * It will need its semantics to be changed too.
      */
-    return "plumewifi";
-}
-
-static int
-util_hostapd_ft_reassoc_deadline_tu(void)
-{
-    return 5000;
-}
-
-static int
-util_hostapd_gen_conf(const char *device_phy_ifname,
-                      const char *device_vif_ifname,
-                      const struct schema_Wifi_VIF_Config *vconf,
-                      char *buf,
-                      int len)
-{
-    struct schema_Wifi_VIF_Config vconfmut;
-    const char *wpa_passphrase;
-    const char *wpa_pairwise;
-    const char *wpa_key_mgmt;
-    const char *oftag;
-    char sockpath[128];
-    char pskfile[128];
-    char keys[32];
-    int off;
-    int wpa;
-
-    memset(buf, 0, len);
-    memcpy(&vconfmut, vconf, sizeof(vconfmut));
-    util_hostapd_get_sockpath(device_phy_ifname,
-                              NULL,
-                              sockpath,
-                              sizeof(sockpath));
-    util_hostapd_get_confpath_pskfile(device_vif_ifname,
-                                      pskfile,
-                                      sizeof(pskfile));
-
-    off = 0;
-    off += scnprintf(buf + off, len - off,
-                     "driver=atheros\n"
-                     "interface=%s\n"
-                     "ctrl_interface=%s\n"
-                     "logger_syslog=-1\n"
-                     "logger_syslog_level=3\n"
-                     "ssid=%s\n",
-                     device_vif_ifname,
-                     sockpath,
-                     vconf->ssid);
-
-    if (vconf->ft_psk_exists) {
-        off += scnprintf(buf + off, len - off,
-                         "#ft_psk=%d\n",
-                         vconf->ft_psk);
-
-        if (vconf->ft_psk) {
-            off += scnprintf(buf + off, len - off,
-                             "nas_identifier=%s\n"
-                             "reassociation_deadline=%d\n"
-                             "mobility_domain=%04x\n"
-                             "ft_over_ds=0\n"
-                             "ft_psk_generate_local=1\n",
-                             util_hostapd_ft_nas_id(),
-                             util_hostapd_ft_reassoc_deadline_tu(),
-                             (vconf->ft_mobility_domain
-                              ? vconf->ft_mobility_domain
-                              : util_hostapd_fletcher16(vconf->ssid, strlen(vconf->ssid))));
-        }
-    }
-
-    if (vconf->btm_exists)
-        off += scnprintf(buf + off, len - off, "bss_transition=%d\n", !!vconf->btm);
-
-    if (vconf->rrm_exists)
-        off += scnprintf(buf + off, len - off, "rrm_neighbor_report=%d\n", !!vconf->rrm);
-
-    if (strlen(vconf->bridge) > 0) {
-        off += scnprintf(buf + off, len - off,
-                         "bridge=%s\n",
-                         vconf->bridge);
-    }
-
-    if (vconf->group_rekey_exists && vconf->group_rekey >= 0) {
-        off += scnprintf(buf + off, len - off,
-                         "wpa_group_rekey=%d\n",
-                         vconf->group_rekey);
-    }
-
-    wpa = util_hostapd_get_mode(SCHEMA_KEY_VAL(vconfmut.security, "mode"));
-    wpa_pairwise = util_hostapd_get_pairwise(wpa);
-    wpa_key_mgmt = SCHEMA_KEY_VAL(vconfmut.security, "encryption");
-    wpa_passphrase = SCHEMA_KEY_VAL(vconfmut.security, "key");
-    oftag = SCHEMA_KEY_VAL(vconfmut.security, "oftag");
-
-    if (!strcmp(wpa_key_mgmt, "WPA-PSK")) {
-        snprintf(keys, sizeof(keys), "%s%s",
-                 vconf->ft_psk_exists && vconf->ft_psk ? "FT-PSK " : "",
-                 wpa_key_mgmt);
-
-        off += scnprintf(buf + off, len - off,
-                         "auth_algs=1\n"
-                         "wpa_key_mgmt=%s\n"
-                         "wpa_psk_file=%s\n"
-                         "wpa=%d\n"
-                         "wpa_pairwise=%s\n",
-                         keys,
-                         pskfile,
-                         wpa,
-                         wpa_pairwise);
-        if (strlen(wpa_passphrase) > 0) {
-            off += scnprintf(buf + off, len - off,
-                             "#wpa_passphrase_oftag=%s\n"
-                             "wpa_passphrase=%s\n",
-                             oftag,
-                             wpa_passphrase);
-        }
-    } else {
-        LOGW("%s: key mgmt '%s' not supported", device_vif_ifname, wpa_key_mgmt);
-        errno = ENOTSUP;
-        return -1;
-    }
-
-    return 0;
-}
-
-static void
-util_hostapd_apply_conf(const char *device_phy_ifname,
-                        const char *device_vif_ifname,
-                        const struct schema_Wifi_VIF_Config *vconf,
-                        int *reload,
-                        int *reload_psk)
-
-{
-    char confpath[128];
-    char conf[4096];
-
-    util_hostapd_get_confpath(device_vif_ifname,
-                              confpath,
-                              sizeof(confpath));
-
-    util_hostapd_gen_conf(device_phy_ifname,
-                          device_vif_ifname,
-                          vconf,
-                          conf,
-                          sizeof(conf));
-
-    *reload = util_file_update(device_vif_ifname,
-                               confpath,
-                               conf);
-
-    util_hostapd_get_confpath_pskfile(device_vif_ifname,
-                                      confpath,
-                                      sizeof(confpath));
-
-    util_hostapd_gen_conf_pskfile(device_vif_ifname,
-                                  vconf,
-                                  conf,
-                                  sizeof(conf));
-
-    *reload_psk = util_file_update(device_vif_ifname,
-                                   confpath,
-                                   conf);
-}
-
-static int
-util_hostapd_each_client(const char *device_phy_ifname,
-                         const char *device_vif_ifname,
-                         void (*iter)(const char *mac,
-                                      void *data),
-                         void *data)
-{
-    char sockpath[128];
-    char buf[1024];
-    char *macr;
-    char *mac;
-    int n;
-
-    util_hostapd_get_sockpath(device_phy_ifname,
-                              NULL,
-                              sockpath,
-                              sizeof(sockpath));
-
-    if (util_exec_read(NULL, buf, sizeof(buf),
-                       "timeout", "-s", "KILL", "-t", "3",
-                       "hostapd_cli", "-p", sockpath, "-i",
-                       device_vif_ifname, "list_sta") < 0) {
-        LOGW("%s: hostapd: failed to get sta list: %d (%s)",
-             device_vif_ifname, errno, strerror(errno));
-        return -1;
-    }
-
-    n = 0;
-    mac = strtok_r(buf, "\n", &macr);
-    for (; mac; mac = strtok_r(NULL, "\n", &macr), n++)
-        iter(mac, data);
-
-    return n;
-}
-
-static int
-util_hostapd_get_config_entry_str(const char *device_vif_ifname,
-                                  const char *key,
-                                  char *value,
-                                  int len)
-{
-    char confpath[128];
-    char conf[4096];
-
-    util_hostapd_get_confpath(device_vif_ifname,
-                              confpath,
-                              sizeof(confpath));
-
-    if (util_file_read_str(confpath, conf, sizeof(conf)) < 0)
-        return -1;
-    if (util_ini_get(conf, key, value, len) < 0)
-        return -1;
-
-    return 0;
-}
-
-static bool
-util_hostapd_get_config_entry_int(const char *device_vif_ifname,
-                                  const char *key,
-                                  int *v)
-{
-    char buf[64];
-    int err;
-
-    err = util_hostapd_get_config_entry_str(device_vif_ifname,
-                                            key,
-                                            buf,
-                                            sizeof(buf));
-    *v = atoi(buf);
-    return err == 0 && strlen(buf) > 0;
-}
-
-static int
-util_hostapd_get_security(const char *device_phy_ifname,
-                          const char *device_vif_ifname,
-                          const char *conf,
-                          struct schema_Wifi_VIF_State *vstate)
-{
-    const char *mode;
-    char buf[128];
-    char *p;
-    int n;
-
-    n = 0;
-
-    util_ini_get(conf, "key_mgmt", buf, sizeof(buf));
-    if ((p = removestr(removestr(buf, "FT-PSK"), " "))) {
-        strncpy(vstate->security_keys[n], "encryption", sizeof(vstate->security_keys[n]));
-        snprintf(vstate->security[n], sizeof(vstate->security[n]), "%s", p);
-        n++;
-    }
-
-    if (p && !strcmp(p, "WPA-PSK")) {
-        util_ini_get(conf, "wpa", buf, sizeof(buf));
-        mode = util_hostapd_get_mode_str(atoi(buf));
-        if (mode) {
-            strncpy(vstate->security_keys[n], "mode", sizeof(vstate->security_keys[n]));
-            snprintf(vstate->security[n], sizeof(vstate->security[n]), "%s", mode);
-            n++;
-        }
-
-        strncpy(vstate->security_keys[n], "key", sizeof(vstate->security_keys[n]));
-        util_hostapd_get_config_entry_str(device_vif_ifname,
-                                          "wpa_passphrase",
-                                          vstate->security[n],
-                                          sizeof(vstate->security[n]));
-        n++;
-
-        strncpy(vstate->security_keys[n], "oftag", sizeof(vstate->security_keys[n]));
-        util_hostapd_get_config_entry_str(device_vif_ifname,
-                                          "#wpa_passphrase_oftag",
-                                          vstate->security[n],
-                                          sizeof(vstate->security[n]));
-        if (strlen(vstate->security[n]) > 0)
-            n++;
-    } else {
-        // FIXME: WPA-EAP
-        LOGW("%s: encryption key-mgmt '%s' not supported",
-             device_vif_ifname, p ?: "");
-    }
-
-    return n;
-}
-
-static int
-util_hostapd_get_security_pskfile(const char *device_vif_ifname,
-                                  struct schema_Wifi_VIF_State *vstate)
-{
-    char confpath[128];
-    char conf[4096];
-    const char *oftag;
-    const char *key_id;
-    const char *psk;
-    const char *mac;
-    const char *k;
-    const char *v;
-    char *oftagline;
-    char *pskline;
-    char *ptr;
-    char *param;
-    int err;
-    int n;
-    int c;
-
-    util_hostapd_get_confpath_pskfile(device_vif_ifname,
-                                      confpath,
-                                      sizeof(confpath));
-
-    err = util_file_read_str(confpath, conf, sizeof(conf));
-    if (err < 0) {
-        LOGD("%s: failed to read file '%s': %d (%s)",
-             device_vif_ifname, confpath, errno, strerror(errno));
-        return 0;
-    }
-
-    ptr = conf;
-    n = vstate->security_len;
-
-    for (;;) {
-        if (!(oftagline = strsep(&ptr, "\n")))
-            break;
-        if (!(pskline = strsep(&ptr, "\n")))
-            break;
-
-        LOGT("%s: parsing pskfile: raw: oftagline='%s' pskline='%s'",
-             device_vif_ifname, oftagline, pskline);
-
-        if (WARN_ON(!(oftag = strsep(&oftagline, "="))))
-            continue;
-        if (WARN_ON(strcmp(oftag, "#oftag")))
-            continue;
-        if (WARN_ON(!(oftag = strsep(&oftagline, ""))))
-            continue;
-
-        key_id = NULL;
-        while ((param = strsep(&pskline, " "))) {
-            if (!strstr(param, "="))
-                break;
-            if (!(k = strsep(&param, "=")))
-                continue;
-            if (!(v = strsep(&param, "")))
-                continue;
-            if (!strcmp(k, "keyid"))
-                key_id = v;
-        }
-
-        if (WARN_ON(!(mac = param)))
-            continue;
-        if (WARN_ON(strcmp(mac, "00:00:00:00:00:00")))
-            continue;
-        if (WARN_ON(!(psk = strsep(&pskline, ""))))
-            continue;
-
-        if (WARN_ON(!key_id))
-            continue;
-
-        LOGT("%s: parsing pskfile: stripped: key_id='%s' oftag='%s' psk='%s'",
-             device_vif_ifname, key_id, oftag, psk);
-
-        snprintf(vstate->security_keys[n], sizeof(vstate->security_keys[n]), "%s", key_id);
-        snprintf(vstate->security[n], sizeof(vstate->security[n]), "%s", psk);
-        n++;
-
-        snprintf(vstate->security_keys[n], sizeof(vstate->security_keys[n]), "oftag-%s", key_id);
-        snprintf(vstate->security[n], sizeof(vstate->security[n]), "%s", oftag);
-        n++;
-    }
-
-    c = n - vstate->security_len;
-    LOGT("%s: parsed %d psk entries", device_vif_ifname, c / 2);
-    return c;
-}
-
-static int
-util_hostapd_get_config(const char *device_phy_ifname,
-                        const char *device_vif_ifname,
-                        char *buf,
-                        int len)
-{
-    char sockpath[128];
-
-    util_hostapd_get_sockpath(device_phy_ifname,
-                              NULL,
-                              sockpath,
-                              sizeof(sockpath));
-
-    if (util_exec_read(rtrimnl, buf, len,
-                       "timeout", "-s", "KILL", "-t", "3",
-                       "hostapd_cli", "-p", sockpath, "-i",
-                       device_vif_ifname, "get_config") < 0) {
-        LOGE("%s: failed to exec read: %d (%s)",
-                device_vif_ifname, errno, strerror(errno));
-        return -1;
-    }
-
-    return 0;
-}
-
-static int
-util_hostapd_get_sta_keyid(const char *device_phy_ifname,
-                           const char *device_vif_ifname,
-                           const char *mac,
-                           char *keyid,
-                           int len)
-{
-    char sockpath[128];
-    char ifname[32];
-    char buf[4096];
-    char *line;
-    char *lines = buf;
-    const char *k = NULL;
-    const char *v = NULL;
-    int err;
-    const char *argv[] = {
-        "timeout", "-t", "3",
-        "hostapd_cli", "-p", sockpath, "-i", ifname,
-        "sta", mac,
-        NULL,
-    };
-
-    keyid[0] = 0;
-    snprintf(ifname, sizeof(ifname), "%s", device_vif_ifname);
-    util_hostapd_get_sockpath(device_phy_ifname,
-                              NULL,
-                              sockpath,
-                              sizeof(sockpath));
-
-    err = forkexec(argv[0], argv, rtrimws, buf, sizeof(buf));
-    if (err) {
-        LOGW("%s: failed to forkexec: %d (%s)",
-             device_vif_ifname, errno, strerror(errno));
-        return -1;
-    }
-
-    while ((line = strsep(&lines, "\r\n"))) {
-        if (!(k = strsep(&line, "=")))
-            continue;
-        if (!(v = strsep(&line, "")))
-            continue;
-        if (!strcmp(k, "keyid"))
-            break;
-    }
-
-    if (!line) {
-        LOGD("%s: %s: keyid= entry not found, using default", device_vif_ifname, mac);
-        strscpy(keyid, "key", len);
-        return 0;
-    }
-
-    if (WARN_ON(!v))
-        return -1;
-
-    strscpy(keyid, v, len);
-    return 0;
-}
-
-/******************************************************************************
- * Utility: wpas helpers
- *****************************************************************************/
-
-static void
-util_wpas_get_sockpath(const char *device_phy_ifname,
-                       const char *device_vif_ifname,
-                       char *path,
-                       int len)
-{
-    snprintf(path, len - 1, "/var/run/wpa_supplicant-%s%s%s",
-             device_phy_ifname,
-             device_vif_ifname ? "/" : "",
-             device_vif_ifname ?: "");
-}
-
-static void
-util_wpas_get_confpath(const char *device_vif_ifname, char *path, int len)
-{
-    snprintf(path, len, "/var/run/wpa_supplicant-%s.config", device_vif_ifname);
-}
-
-static const char *
-util_wpas_get_proto(int wpa)
-{
-    switch (wpa) {
-        case 1: return "WPA";
-        case 2: return "RSN";
-        case 3: return "WPA RSN";
-    }
-    return "";
-}
-
-static int
-util_wpas_get_mode(const char *mode)
-{
-    if (!strcmp(mode, "mixed"))
-        return 3;
-    else if (!strcmp(mode, "2"))
-        return 2;
-    else if (!strcmp(mode, "1"))
-        return 1;
-    else if (strlen(mode) == 0)
-        return 2;
-
-    LOGW("%s: unknown mode string: '%s'", __func__, mode);
-    return 2;
-}
-
-static void
-util_wpas_gen_conf(char *buf,
-                   int len,
-                   const char *device_phy_ifname,
-                   const char *device_vif_ifname,
-                   const struct schema_Wifi_VIF_Config *vconf,
-                   const struct schema_Wifi_Credential_Config *cconfs,
-                   int num_cconfs)
-{
-    struct schema_Wifi_VIF_Config vconfmut;
-    const char *wpa_passphrase;
-    const char *wpa_pairwise;
-    const char *wpa_key_mgmt;
-    const char *wpa_proto;
-    char sockpath[128];
-    int off;
-    int wpa;
-
-    util_wpas_get_sockpath(device_phy_ifname,
-                           NULL,
-                           sockpath,
-                           sizeof(sockpath));
-
-    off = 0;
-    off += scnprintf(buf + off, len - off,
-                     "ctrl_interface=%s\n"
-                     "%sdisallow_dfs=%d\n"
-                     "scan_cur_freq=%d\n",
-                     sockpath,
-                     g_capab_wpas_conf_disallow_dfs ? "" : "#",
-                     !(vconf->parent_exists && strlen(vconf->parent) > 0),
-                     vconf->parent_exists && strlen(vconf->parent) > 0);
-
-    /* FIXME: SCHEMA_KEY_VAL() is const-broken. Instead
-     *        of un-const-casting it's safer to make a
-     *        mutable copy so compiler can help catching
-     *        silly mistakes.
-     */
-
-    memcpy(&vconfmut, vconf, sizeof(vconfmut));
-
-    wpa = util_wpas_get_mode(SCHEMA_KEY_VAL(vconfmut.security, "mode"));
-    wpa_pairwise = util_hostapd_get_pairwise(wpa);
-    wpa_proto = util_wpas_get_proto(wpa);
-    wpa_key_mgmt = SCHEMA_KEY_VAL(vconfmut.security, "encryption");
-    wpa_passphrase = SCHEMA_KEY_VAL(vconfmut.security, "key");
-
-    if (vconf->security_len > 0 &&
-        vconf->ssid_exists &&
-        strlen(wpa_passphrase) > 0) {
-        /* FIXME: Unify security and creds generation */
-        off += scnprintf(buf + off, len - off,
-                         "network={\n");
-
-        off += scnprintf(buf + off, len - off,
-                         "\tscan_ssid=1\n"
-                         "\tbgscan=\"\"\n"
-                         "\tssid=\"%s\"\n"
-                         "\tpsk=\"%s\"\n"
-                         "\tkey_mgmt=%s\n"
-                         "\tpairwise=%s\n"
-                         "\tproto=%s\n",
-                         vconf->ssid,
-                         wpa_passphrase,
-                         wpa_key_mgmt,
-                         wpa_pairwise,
-                         wpa_proto);
-
-        if (vconf->parent_exists && strlen(vconf->parent) > 0)
-            off += scnprintf(buf + off, len - off,
-                             "\tbssid=%s\n",
-                             vconf->parent);
-
-        off += scnprintf(buf + off, len - off,
-                         "}\n");
-
-        /* Credential_Config is supposed to be used only
-         * during initial onboarding/bootstrap. After that
-         * the cloud is supposed to always provide a single
-         * parent to connect to.
-         */
-        return;
-    }
-
-    for (; num_cconfs; num_cconfs--, cconfs++) {
-        wpa = util_wpas_get_mode(SCHEMA_KEY_VAL(vconfmut.security, "mode"));
-        wpa_pairwise = util_hostapd_get_pairwise(wpa);
-        wpa_proto = util_wpas_get_proto(wpa);
-        wpa_key_mgmt = SCHEMA_KEY_VAL(cconfs->security, "encryption");
-        wpa_passphrase = SCHEMA_KEY_VAL(cconfs->security, "key");
-
-        off += scnprintf(buf + off, len - off,
-                         "network={\n");
-
-        off += scnprintf(buf + off, len - off,
-                         "\tscan_ssid=1\n"
-                         "\tbgscan=\"\"\n"
-                         "\tssid=\"%s\"\n"
-                         "\tpsk=\"%s\"\n"
-                         "\tkey_mgmt=%s\n"
-                         "\tpairwise=%s\n"
-                         "\tproto=%s\n",
-                         cconfs->ssid,
-                         wpa_passphrase,
-                         wpa_key_mgmt,
-                         wpa_pairwise,
-                         wpa_proto);
-
-        if (vconf->parent_exists && strlen(vconf->parent) > 0)
-            off += scnprintf(buf + off, len - off,
-                             "\tbssid=%s\n",
-                             vconf->parent);
-
-        off += scnprintf(buf + off, len - off,
-                         "}\n");
-    }
-}
-
-static int
-util_wpas_apply_conf(const char *device_phy_ifname,
-                     const char *device_vif_ifname,
-                     const struct schema_Wifi_VIF_Config *vconf,
-                     const struct schema_Wifi_Credential_Config *cconfs,
-                     int num_cconfs)
-{
-    char confpath[128];
-    char conf[4096];
-    bool updated;
-
-    util_wpas_get_confpath(device_vif_ifname,
-                           confpath,
-                           sizeof(confpath));
-
-    util_wpas_gen_conf(conf,
-                       sizeof(conf),
-                       device_phy_ifname,
-                       device_vif_ifname,
-                       vconf,
-                       cconfs,
-                       num_cconfs);
-
-    updated = util_file_update(device_vif_ifname,
-                               confpath,
-                               conf);
-
-    return updated;
-}
-
-static int
-util_wpas_get_status(const char *device_phy_ifname,
-                     const char *device_vif_ifname,
-                     char *bssid,
-                     int bssid_len,
-                     char *ssid,
-                     int ssid_len,
-                     char *id,
-                     int id_len,
-                     char *state,
-                     int state_len)
-{
-    char sockpath[128];
-    char status[512];
-    char *p_state;
-    char *p_bssid;
-    char *p_ssid;
-    char *p_id;
-    int err;
-
-    const char *argv[] = {
-        "timeout", "-t", "3",
-        "wpa_cli", "-p", sockpath, "-i", device_vif_ifname, "stat",
-        NULL
-    };
-
-    util_wpas_get_sockpath(device_phy_ifname,
-                           NULL,
-                           sockpath,
-                           sizeof(sockpath));
-
-    err = forkexec(argv[0], argv, rtrimnl, status, sizeof(status));
-    if (err) {
-        LOGW("%s: failed to forkexec to get wpas status: %d (%s)",
-             device_vif_ifname, errno, strerror(errno));
-        return -1;
-    }
-
-    if (state) state[0] = 0;
-    if (bssid) bssid[0] = 0;
-    if (ssid) ssid[0] = 0;
-    if (id) id[0] = 0;
-
-    /* Example output:
-     * Selected interface 'bhaul-sta-24'
-     * bssid=d2:b4:f7:01:ee:f5
-     * freq=2412
-     * ssid=we.piranha
-     * id=0
-     * mode=station
-     * pairwise_cipher=CCMP
-     * group_cipher=CCMP
-     * key_mgmt=WPA2-PSK
-     * wpa_state=COMPLETED
-     * ip_address=169.254.4.166
-     * address=60:b4:f7:f0:0a:18
-     * uuid=590e8349-c18f-5c06-8484-9a442023fffa
-     */
-
-    if ((p_bssid = strstr(status, "\nbssid=")) ||
-        (p_bssid = strstr(status, "bssid=")))
-        p_bssid = strstr(p_bssid, "=");
-
-    if ((p_ssid = strstr(status, "\nssid=")) ||
-        (p_ssid = strstr(status, "ssid=")))
-        p_ssid = strstr(p_ssid, "=");
-
-    if ((p_id = strstr(status, "\nid=")) ||
-        (p_id = strstr(status, "id=")))
-        p_id = strstr(p_id, "=");
-
-    if ((p_state = strstr(status, "\nwpa_state=")) ||
-        (p_state = strstr(status, "wpa_state=")))
-        p_state = strstr(p_state, "=");
-
-    if (bssid && p_bssid && (p_bssid = strtok(p_bssid+1, "\n")))
-        snprintf(bssid, bssid_len, "%s", p_bssid);
-
-    if (ssid && p_ssid && (p_ssid = strtok(p_ssid+1, "\n")))
-        snprintf(ssid, ssid_len, "%s", p_ssid);
-
-    if (id && p_id && (p_id = strtok(p_id+1, "\n")))
-        snprintf(id, id_len, "%s", p_id);
-
-    if (state && p_state && (p_state = strtok(p_state+1, "\n")))
-        snprintf(state, state_len, "%s", p_state);
-
-    return 0;
-}
-
-static int
-util_wpas_get_psk(const char *device_phy_ifname,
-                  const char *device_vif_ifname,
-                  int id,
-                  char *psk,
-                  int len)
-{
-    char confpath[128];
-    char conf[4096];
-    char *network;
-    char *p;
-    int err;
-
-    util_wpas_get_confpath(device_vif_ifname,
-                           confpath,
-                           sizeof(confpath));
-
-    err = util_file_read_str(confpath, conf, sizeof(conf));
-    if (err < 0) {
-        LOGW("%s: failed to read %s: %d (%s)",
-             device_vif_ifname, confpath, errno, strerror(errno));
-        return -1;
-    }
-
-    for (network = conf; network && id >= 0; id--)
-        network = strstr(network+1, "network={");
-
-    if (!network || network == conf) {
-        errno = ENOENT;
-        return -1;
-    }
-
-    if (!(p = strstr(network, "\tpsk=")) ||
-        !(p = strstr(p, "=")) ||
-        !(p = strtok(p+1, "\n")) ||
-        strlen(p) < 2) {
-        errno = ENOENT;
-        return -1;
-    }
-
-    /* strip " */
-    p++;
-    p[strlen(p) - 1] = 0;
-
-    /* FIXME: This should be converted to rely on
-     *        pbkdf2_sha1() for psk= and commented
-     *        passphrase hexstring. Remember about
-     *        util_wpas_gen_conf().
-     */
-    snprintf(psk, len, "%s", p);
-
-    return 0;
+    if (!err && first)
+        util_exec_scripts(bss);
+
+    if (err)
+        LOGI("%s: failed to apply config", bss);
 }
 
 /******************************************************************************
@@ -2641,7 +1505,7 @@ util_iwpriv_set_int(const char *ifname, const char *iwprivname, int v)
     for (mac = strtok(list, " \n"); mac; mac = strtok(NULL, " \n")) \
 
 static char *
-util_iwpriv_getmac(const char *dvif, char *buf, int len)
+util_iwpriv_getmac(const char *vif, char *buf, int len)
 {
     static const char *prefix = "getmac:";
     char *p;
@@ -2653,11 +1517,11 @@ util_iwpriv_getmac(const char *dvif, char *buf, int len)
      * workaround can be removed. This avoids
      * clash with BM which uses same driver ACL.
      */
-    if (strstr(target_ifname_device2cloud((char *)dvif), "home-ap-"))
+    if (strstr(vif, "home-ap-"))
         return buf;
 
-    if ((err = util_exec_read(NULL, buf, len, "iwpriv", dvif, "getmac"))) {
-        LOGW("%s: failed to get mac list: %d", dvif, err);
+    if ((err = util_exec_read(NULL, buf, len, "iwpriv", vif, "getmac"))) {
+        LOGW("%s: failed to get mac list: %d", vif, err);
         return NULL;
     }
 
@@ -2665,7 +1529,7 @@ util_iwpriv_getmac(const char *dvif, char *buf, int len)
         *p = tolower(*p);
 
     if (!(p = strstr(buf, prefix))) {
-        LOGW("%s: failed to parse get mac list", dvif);
+        LOGW("%s: failed to parse get mac list", vif);
         return NULL;
     }
 
@@ -2673,15 +1537,15 @@ util_iwpriv_getmac(const char *dvif, char *buf, int len)
 }
 
 static void
-util_iwpriv_setmac(const char *dvif, const char *want)
+util_iwpriv_setmac(const char *vif, const char *want)
 {
     char *has;
     char *mac;
     char *p;
     char *q;
 
-    if (!(has = util_iwpriv_getmac(dvif, A(4096)))) {
-        LOGW("%s: acl: failed to get mac list", dvif);
+    if (!(has = util_iwpriv_getmac(vif, A(4096)))) {
+        LOGW("%s: acl: failed to get mac list", vif);
         has = "";
     }
 
@@ -2692,19 +1556,19 @@ util_iwpriv_setmac(const char *dvif, const char *want)
 
     for_each_iwpriv_mac(mac, (p = strdup(want))) {
         if (!strstr(has, mac)) {
-            LOGI("%s: acl: adding mac: %s", dvif, mac);
-            if (E("iwpriv", dvif, "addmac", mac))
+            LOGI("%s: acl: adding mac: %s", vif, mac);
+            if (E("iwpriv", vif, "addmac", mac))
                 LOGW("%s: acl: failed to add mac: %s: %d (%s)",
-                     dvif, mac, errno, strerror(errno));
+                     vif, mac, errno, strerror(errno));
         }
     }
 
     for_each_iwpriv_mac(mac, (q = strdup(has))) {
         if (!strstr(want, mac)) {
-            LOGI("%s: acl: deleting mac: %s", dvif, mac);
-            if (E("iwpriv", dvif, "delmac", mac))
+            LOGI("%s: acl: deleting mac: %s", vif, mac);
+            if (E("iwpriv", vif, "delmac", mac))
                 LOGW("%s: acl: failed to delete mac: %s: %d (%s)",
-                     dvif, mac, errno, strerror(errno));
+                     vif, mac, errno, strerror(errno));
         }
     }
 
@@ -2769,42 +1633,40 @@ util_iwpriv_set_str_lazy(const char *device_ifname,
 }
 
 static bool
-util_iwpriv_get_bcn_int(const char *device_phy_ifname, int *v)
+util_iwpriv_get_bcn_int(const char *phy, int *v)
 {
-    char device_vif_ifname[32];
+    char *vif;
     int err;
 
-    err = util_wifi_any_phy_vif(device_phy_ifname,
-                                device_vif_ifname,
-                                sizeof(device_vif_ifname));
+    err = util_wifi_any_phy_vif(phy, vif = A(32));
     if (err)
         return false;
 
-    return util_iwpriv_get_int(device_vif_ifname, "get_bintval", v);
+    return util_iwpriv_get_int(vif, "get_bintval", v);
 }
 
 static bool
-util_iwpriv_get_ht_mode(char *device_vif_ifname, char *htmode, int htmode_len)
+util_iwpriv_get_ht_mode(const char *vif, char *htmode, int htmode_len)
 {
     char buf[120];
     char *p;
 
     if (WARN(-1 == util_exec_read(rtrimnl, buf, sizeof(buf),
-                "iwpriv", device_vif_ifname, "get_mode"),
+                "iwpriv", vif, "get_mode"),
                 "%s: failed to get iwpriv :%d (%s)",
-                device_vif_ifname, errno, strerror(errno)))
+                vif, errno, strerror(errno)))
         return false;
 
     if (!(p = strstr(buf, ":")))
         return false;
     p++;
 
-    strlcpy(htmode, p, htmode_len);
+    strscpy(htmode, p, htmode_len);
     return true;
 }
 
 static void
-util_iwpriv_set_scanfilter(const char *device_vif_ifname,
+util_iwpriv_set_scanfilter(const char *vif,
                            const char *ssid)
 {
     /* FIXME:
@@ -2821,33 +1683,30 @@ util_iwpriv_set_scanfilter(const char *device_vif_ifname,
      * cloud tells what parent to connect to.
      */
 
-    WARN(-1 == util_iwpriv_set_int_lazy(device_vif_ifname,
+    WARN(-1 == util_iwpriv_set_int_lazy(vif,
                                         "gscanfilter",
                                         "scanfilter",
                                         2 /* sort-first */),
          "%s: failed to set scanfilter: %d (%s)",
-         device_vif_ifname, errno, strerror(errno));
+         vif, errno, strerror(errno));
 
-    WARN(-1 == util_iwpriv_set_str_lazy(device_vif_ifname,
+    WARN(-1 == util_iwpriv_set_str_lazy(vif,
                                         "gscanfilterssid",
                                         "scanfilterssid",
                                         ssid),
          "%s: failed to set scanfilterssid(%s): %d (%s)",
-         device_vif_ifname, ssid, errno, strerror(errno));
+         vif, ssid, errno, strerror(errno));
 }
 
 /******************************************************************************
  * thermal helpers
  *****************************************************************************/
 
-#define UTIL_THERM_DDR_REFRESH_SCRIPT "/usr/plume/bin/therm_ddr_refresh_rate.sh"
-#define UTIL_THERM_PERIOD_SEC 60.
-
 struct util_thermal {
     ev_timer timer;
     struct ds_dlist_node list;
     const char **type;
-    char cloud_phy_ifname[32];
+    char phy[32];
     int period_sec;
     int tx_chainmask_capab;
     int tx_chainmask_limit;
@@ -2859,38 +1718,33 @@ struct util_thermal {
 static ds_dlist_t g_thermal_list = DS_DLIST_INIT(struct util_thermal, list);
 
 static const char **
-util_thermal_get_iwpriv_names(const char *device_phy_ifname)
+util_thermal_get_iwpriv_names(const char *phy)
 {
     static const char *soft[] = { "get_txchainsoft", "txchainsoft" };
     static const char *hard[] = { "get_txchainmask", "txchainmask" };
     bool ok;
     int v;
 
-    ok = util_iwpriv_get_int(device_phy_ifname, soft[0], &v);
+    ok = util_iwpriv_get_int(phy, soft[0], &v);
     if (ok) {
-        LOGT("%s: thermal: using txchainsoft", device_phy_ifname);
+        LOGT("%s: thermal: using txchainsoft", phy);
         return soft;
     }
 
-    LOGT("%s: thermal: using txchainmask", device_phy_ifname);
+    LOGT("%s: thermal: using txchainmask", phy);
     return hard;
 }
 
 static int
 util_thermal_phy_is_downgraded(const struct util_thermal *t)
 {
-    char *device_phy_ifname;
-    char ifname[32];
     bool ok;
     int v;
-
-    snprintf(ifname, sizeof(ifname), "%s", t->cloud_phy_ifname);
-    device_phy_ifname = target_ifname_cloud2device(ifname);
 
     if (__builtin_popcount(t->tx_chainmask_limit) == 1)
         return false;
 
-    ok = util_iwpriv_get_int(device_phy_ifname, t->type[0], &v);
+    ok = util_iwpriv_get_int(t->phy, t->type[0], &v);
     if (!ok)
         return false;
 
@@ -2901,37 +1755,27 @@ util_thermal_phy_is_downgraded(const struct util_thermal *t)
 }
 
 static int
-util_thermal_get_temp(const char *cloud_vif_ifname, int *temp)
+util_thermal_get_temp(const char *phy, int *temp)
 {
-    char *device_phy_ifname;
-    char device_vif_ifname[32];
-    char cloud_phy_ifname[32];
+    char *vif;
     bool ok;
     int err;
 
-    snprintf(cloud_phy_ifname,
-             sizeof(cloud_phy_ifname),
-             "%s",
-             cloud_vif_ifname);
-    device_phy_ifname = target_ifname_cloud2device(cloud_phy_ifname);
-
-    err = util_wifi_any_phy_vif(device_phy_ifname,
-                                device_vif_ifname,
-                                sizeof(device_vif_ifname));
+    err = util_wifi_any_phy_vif(phy, vif = A(32));
     if (err) {
-        LOGD("%s: failed to lookup any vif", device_phy_ifname);
+        LOGD("%s: failed to lookup any vif", phy);
         return -1;
     }
 
-    ok = util_iwpriv_get_int(device_vif_ifname, "get_therm", temp);
+    ok = util_iwpriv_get_int(vif, "get_therm", temp);
     if (!ok) {
-        LOGD("%s: failed to get temp", device_vif_ifname);
+        LOGD("%s: failed to get temp", vif);
         return -1;
     }
 
     if (*temp < 0) {
         LOGW("%s: possibly incorrect temp readout: %d, ignoring",
-             device_vif_ifname, *temp);
+             vif, *temp);
         errno = EINVAL;
         return -1;
     }
@@ -2940,12 +1784,12 @@ util_thermal_get_temp(const char *cloud_vif_ifname, int *temp)
 }
 
 static struct util_thermal *
-util_thermal_lookup(const char *cloud_phy_ifname)
+util_thermal_lookup(const char *phy)
 {
     struct util_thermal *t;
 
     ds_dlist_foreach(&g_thermal_list, t)
-        if (!strcmp(t->cloud_phy_ifname, cloud_phy_ifname))
+        if (!strcmp(t->phy, phy))
             return t;
 
     return NULL;
@@ -2957,7 +1801,7 @@ util_thermal_get_downgrade_state(bool *is_downgraded,
 {
     struct util_thermal *t;
     struct dirent *p;
-    char *cloud_phy_ifname;
+    const char *phy;
     DIR *d;
 
     *is_downgraded = false;
@@ -2971,19 +1815,18 @@ util_thermal_get_downgrade_state(bool *is_downgraded,
         if (strstr(p->d_name, "wifi") != p->d_name)
             continue;
 
-        cloud_phy_ifname = target_ifname_device2cloud(p->d_name);
-
-        t = util_thermal_lookup(cloud_phy_ifname);
+        phy = p->d_name;
+        t = util_thermal_lookup(phy);
         if (!t)
             continue;
 
         if (util_thermal_phy_is_downgraded(t)) {
-            LOGT("%s: thermal: is downgraded", cloud_phy_ifname);
+            LOGT("%s: thermal: is downgraded", phy);
             *is_downgraded = true;
         }
 
         if (t->should_downgrade) {
-            LOGT("%s: thermal: should downgrade", cloud_phy_ifname);
+            LOGT("%s: thermal: should downgrade", phy);
             *should_downgrade = true;
         }
     }
@@ -2992,19 +1835,15 @@ util_thermal_get_downgrade_state(bool *is_downgraded,
 }
 
 static int
-util_thermal_get_chainmask_capab(const char *cloud_phy_ifname)
+util_thermal_get_chainmask_capab(const char *phy)
 {
-    char *device_phy_ifname;
-    char ifname[32];
     bool ok;
     int v;
 
-    snprintf(ifname, sizeof(ifname), "%s", cloud_phy_ifname);
-    device_phy_ifname = target_ifname_cloud2device(ifname);
-    ok = util_iwpriv_get_int(device_phy_ifname, "get_rxchainmask", &v);
+    ok = util_iwpriv_get_int(phy, "get_rxchainmask", &v);
     if (!ok) {
         LOGW("%s: failed to get chainmask capability: %d (%s), assuming 1",
-             device_phy_ifname, errno, strerror(errno));
+             phy, errno, strerror(errno));
         return 1;
     }
 
@@ -3012,24 +1851,23 @@ util_thermal_get_chainmask_capab(const char *cloud_phy_ifname)
 }
 
 static void
-util_thermal_phy_recalc_tx_chainmask(const char *cloud_phy_ifname,
+util_thermal_phy_recalc_tx_chainmask(const char *phy,
                                      bool should_downgrade)
 {
     const struct util_thermal *t;
     const char **type;
-    char *device_phy_ifname;
     char ifname[32];
     int masks[3];
     int mask;
     int n;
     int err;
 
-    LOGD("%s: thermal: recalculating", cloud_phy_ifname);
+    LOGD("%s: thermal: recalculating", phy);
 
-    t = util_thermal_lookup(cloud_phy_ifname);
+    t = util_thermal_lookup(phy);
     mask = t
          ? t->tx_chainmask_capab
-         : util_thermal_get_chainmask_capab(cloud_phy_ifname);
+         : util_thermal_get_chainmask_capab(phy);
     n = 0;
 
     if (t && t->tx_chainmask_limit)
@@ -3042,16 +1880,12 @@ util_thermal_phy_recalc_tx_chainmask(const char *cloud_phy_ifname,
         if (__builtin_popcount(mask) > __builtin_popcount(masks[n]))
             mask = masks[n];
 
-    snprintf(ifname, sizeof(ifname), "%s", cloud_phy_ifname);
-    device_phy_ifname = target_ifname_cloud2device(ifname);
-    type = util_thermal_get_iwpriv_names(device_phy_ifname);
-    err = util_iwpriv_set_int_lazy(device_phy_ifname,
-                                   type[0],
-                                   type[1],
-                                   mask);
+    STRSCPY(ifname, phy);
+    type = util_thermal_get_iwpriv_names(phy);
+    err = util_iwpriv_set_int_lazy(phy, type[0], type[1], mask);
     if (err) {
         LOGW("%s: failed to set tx chainmask: %d (%s)",
-             device_phy_ifname, errno, strerror(errno));
+             phy, errno, strerror(errno));
         return;
     }
 }
@@ -3059,7 +1893,7 @@ util_thermal_phy_recalc_tx_chainmask(const char *cloud_phy_ifname,
 static void
 util_thermal_sys_recalc_tx_chainmask(void)
 {
-    char *cloud_phy_ifname;
+    const char *phy;
     bool should_downgrade;
     bool is_downgraded;
     struct dirent *p;
@@ -3085,9 +1919,8 @@ util_thermal_sys_recalc_tx_chainmask(void)
         if (strstr(p->d_name, "wifi") != p->d_name)
             continue;
 
-        cloud_phy_ifname = target_ifname_device2cloud(p->d_name);
-        util_thermal_phy_recalc_tx_chainmask(cloud_phy_ifname,
-                                             should_downgrade);
+        phy = p->d_name;
+        util_thermal_phy_recalc_tx_chainmask(phy, should_downgrade);
     }
 
     closedir(d);
@@ -3104,19 +1937,19 @@ util_thermal_phy_timer_cb(struct ev_loop *loop,
 
     t = (void *)timer;
 
-    LOGD("%s: thermal: timer tick", t->cloud_phy_ifname);
+    LOGD("%s: thermal: timer tick", t->phy);
 
-    err = util_thermal_get_temp(t->cloud_phy_ifname, &temp);
+    err = util_thermal_get_temp(t->phy, &temp);
     if (err) {
         LOGW("%s: thermal: failed to get temp: %d (%s)",
-             t->cloud_phy_ifname, errno, strerror(errno));
+             t->phy, errno, strerror(errno));
         return;
     }
 
     if (temp <= t->temp_upgrade) {
         if (t->should_downgrade) {
             LOGN("%s: thermal: upgrading (temp: %d <= %d)",
-                 t->cloud_phy_ifname, temp, t->temp_upgrade);
+                 t->phy, temp, t->temp_upgrade);
         }
         t->should_downgrade = false;
         util_thermal_sys_recalc_tx_chainmask();
@@ -3125,7 +1958,7 @@ util_thermal_phy_timer_cb(struct ev_loop *loop,
     if (temp >= t->temp_downgrade) {
         if (!t->should_downgrade) {
             LOGW("%s: thermal: downgrading (temp: %d >= %d)",
-                 t->cloud_phy_ifname, temp, t->temp_downgrade);
+                 t->phy, temp, t->temp_downgrade);
         }
         t->should_downgrade = true;
         util_thermal_sys_recalc_tx_chainmask();
@@ -3136,7 +1969,6 @@ static void
 util_thermal_config_set(const struct schema_Wifi_Radio_Config *rconf)
 {
     struct util_thermal *t;
-    char *device_phy_ifname;
     bool is_downgraded;
     int temp;
     int err;
@@ -3165,19 +1997,13 @@ util_thermal_config_set(const struct schema_Wifi_Radio_Config *rconf)
         return;
     }
 
-    snprintf(t->cloud_phy_ifname,
-             sizeof(t->cloud_phy_ifname),
-             "%s",
-             rconf->if_name);
-
-    device_phy_ifname = target_ifname_cloud2device(t->cloud_phy_ifname);
-
+    STRSCPY(t->phy, rconf->if_name);
     t->tx_chainmask_capab = util_thermal_get_chainmask_capab(rconf->if_name);
     t->tx_chainmask_limit = rconf->tx_chainmask_exists
                           ? rconf->tx_chainmask
                           : 0;
     t->should_downgrade = false;
-    t->type = util_thermal_get_iwpriv_names(device_phy_ifname);
+    t->type = util_thermal_get_iwpriv_names(rconf->if_name);
 
     if (rconf->thermal_integration_exists &&
         rconf->thermal_downgrade_temp_exists &&
@@ -3221,8 +2047,7 @@ util_thermal_config_set(const struct schema_Wifi_Radio_Config *rconf)
 int
 target_bsal_init(bsal_event_cb_t event_cb, struct ev_loop *loop)
 {
-    (void)loop;
-    return qca_bsal_init(event_cb);
+    return qca_bsal_init(event_cb, loop);
 }
 
 int
@@ -3327,325 +2152,10 @@ int target_bsal_rrm_remove_neighbor(const char *ifname, const bsal_neigh_info_t 
     return qca_bsal_rrm_remove_neighbor(ifname, nr);
 }
 
-/******************************************************************************
- * Clients utilities
- *****************************************************************************/
-
-struct util_clients_sync_iter_arg {
-    const char *device_phy_ifname;
-    const char *device_vif_ifname;
-    const char *cloud_vif_ifname;
-    bool connected;
-};
-
-static void
-util_clients_sync_iter(const char *mac, void *data)
+int target_bsal_send_action(const char *ifname, const uint8_t *mac_addr,
+                         const uint8_t *data, unsigned int data_len)
 {
-    struct schema_Wifi_Associated_Clients client;
-    struct util_clients_sync_iter_arg *arg;
-    char key_id[32];
-    char psk[128];
-    int err;
-
-    arg = data;
-    memset(&client, 0, sizeof(client));
-
-    err = util_hostapd_get_sta_keyid(arg->device_phy_ifname,
-                                     arg->device_vif_ifname,
-                                     mac,
-                                     key_id,
-                                     sizeof(key_id));
-    if (err) {
-        LOGW("%s: %s: failed to get keyid",
-             arg->device_vif_ifname, mac);
-    }
-
-    schema_Wifi_Associated_Clients_mark_all_present(&client);
-    client._partial_update = true;
-    client.state_exists = true;
-    strncpy(client.mac, mac, sizeof(client.mac));
-    strncpy(client.state, "active", sizeof(client.state) - 1);
-
-    if ((client.key_id_exists = (strlen(key_id) > 0)))
-        snprintf(client.key_id, sizeof(client.key_id), "%s", key_id);
-
-    LOGI("%s: syncing '%s' with psk='%s' (key_id='%s') as %d",
-         arg->cloud_vif_ifname, mac, psk, key_id, arg->connected);
-
-    if (rops.op_client)
-        rops.op_client(&client, arg->cloud_vif_ifname, arg->connected);
-}
-
-static void
-util_clients_sync(const char *device_phy_ifname,
-                  const char *device_vif_ifname,
-                  const char *cloud_vif_ifname,
-                  bool connected)
-{
-    struct util_clients_sync_iter_arg arg;
-
-    memset(&arg, 0, sizeof(arg));
-    arg.device_phy_ifname = device_phy_ifname;
-    arg.device_vif_ifname = device_vif_ifname;
-    arg.cloud_vif_ifname = cloud_vif_ifname;
-    arg.connected = connected;
-
-    util_hostapd_each_client(device_phy_ifname,
-                             device_vif_ifname,
-                             util_clients_sync_iter,
-                             &arg);
-}
-
-/******************************************************************************
- * Device stats implementation
- *****************************************************************************/
-
-#ifdef TARGET_PIRANHA2_QSDK52
-bool target_stats_device_fanrpm_get(uint32_t *fanrpm)
-{
-    char path[128];
-    char buff[128];
-    int ret;
-    int rpm = 0;
-    snprintf(path, sizeof(path), "/sys/class/hwmon/hwmon0/current_rpm");
-    ret = util_file_read_str(path, buff, sizeof(buff));
-    if (ret > 0)
-    {
-        if (sscanf(buff, "%d", &rpm) == 1)
-        {
-            *fanrpm = rpm;
-            return true;
-        }
-    }
-    
-    return false;
-}
-#endif
-
-/******************************************************************************
- * Userspace wrappers (for hostapd/wpas)
- *****************************************************************************/
-
-static bool
-util_userspace_is_running(const char *device_phy_ifname,
-                          const char *device_vif_ifname,
-                          const char *opmode)
-{
-    char sockpath[128];
-
-    if (!strcmp("ap", opmode))
-        util_hostapd_get_sockpath(device_phy_ifname,
-                                  device_vif_ifname,
-                                  sockpath,
-                                  sizeof(sockpath));
-
-    if (!strcmp("sta", opmode))
-        util_wpas_get_sockpath(device_phy_ifname,
-                               device_vif_ifname,
-                               sockpath,
-                               sizeof(sockpath));
-
-    return 0 == access(sockpath, R_OK);
-}
-
-static void
-util_userspace_stop(const char *device_phy_ifname,
-                    const char *device_vif_ifname,
-                    const char *cloud_vif_ifname)
-{
-    char sockpath[128];
-    int err;
-
-    util_hostapd_get_sockpath(device_phy_ifname,
-                              device_vif_ifname,
-                              sockpath,
-                              sizeof(sockpath));
-
-    if (access(sockpath, R_OK) == 0) {
-        LOGI("%s: stopping userspace: hostapd", device_vif_ifname);
-
-        util_wpa_ctrl_listen_stop(sockpath);
-
-        if (rops.op_flush_clients)
-            rops.op_flush_clients(cloud_vif_ifname);
-
-        err = util_exec_expect("OK", timeout_arg, "wpa_cli", "-g",
-                               "/var/run/hostapd/global", "raw", "REMOVE",
-                               device_vif_ifname);
-
-        if (err)
-            LOGW("%s: failed to stop hostapd: %d (%s)",
-                 device_vif_ifname, errno, strerror(errno));
-    }
-
-    util_wpas_get_sockpath(device_phy_ifname,
-                           device_vif_ifname,
-                           sockpath,
-                           sizeof(sockpath));
-
-    if (access(sockpath, R_OK) == 0) {
-        LOGI("%s: stopping userspace: wpas", device_vif_ifname);
-
-        util_wpa_ctrl_listen_stop(sockpath);
-
-        err = util_exec_expect("OK", timeout_arg, "wpa_cli", "-g",
-                               "/var/run/wpa_supplicantglobal",
-                               "interface_remove", device_vif_ifname);
-        if (err)
-            LOGW("%s: failed to stop wpas: %d (%s)",
-                 device_vif_ifname, errno, strerror(errno));
-    }
-}
-
-static int
-util_userspace_start(const char *device_phy_ifname,
-                     const char *device_vif_ifname,
-                     const char *cloud_vif_ifname,
-                     const char *opmode)
-{
-    char confpath[128];
-    char sockpath[128];
-    char bssconf[384];
-    int err;
-
-    LOGI("%s: starting userspace", device_vif_ifname);
-
-    if (!strcmp("ap", opmode)) {
-        util_hostapd_get_confpath(device_vif_ifname,
-                                  confpath,
-                                  sizeof(confpath));
-
-        snprintf(bssconf, sizeof(bssconf), "bss_config=%s:%s",
-                 device_vif_ifname,
-                 confpath);
-
-        err = util_exec_expect("OK", timeout_arg, "wpa_cli", "-g",
-                               "/var/run/hostapd/global", "raw",
-                               "ADD", bssconf);
-        if (err) {
-            LOGW("%s: failed to start hostapd: %d (%s), bssconf: %s",
-                 device_vif_ifname, errno, strerror(errno), bssconf);
-            return err;
-        }
-
-        util_hostapd_get_sockpath(device_phy_ifname,
-                                  NULL,
-                                  sockpath,
-                                  sizeof(sockpath));
-
-        goto fix_debug_level;
-    }
-
-    if (!strcmp("sta", opmode)) {
-        util_wpas_get_confpath(device_vif_ifname,
-                               confpath,
-                               sizeof(confpath));
-
-        util_wpas_get_sockpath(device_phy_ifname,
-                               NULL,
-                               sockpath,
-                               sizeof(sockpath));
-
-        err = util_exec_expect("OK", timeout_arg, "wpa_cli", "-g",
-                               "/var/run/wpa_supplicantglobal",
-                               "interface_add", device_vif_ifname, confpath,
-                               "athr", sockpath);
-        if (err) {
-            LOGW("%s: failed to start wpas: %d (%s), socket: %s",
-                 device_vif_ifname, errno, strerror(errno), sockpath);
-            return err;
-        }
-
-        goto fix_debug_level;
-    }
-
-    errno = ENOTSUP;
-    return -1;
-
-fix_debug_level:
-    err = util_exec_simple("timeout", "-t", "3",
-                           "wpa_cli", "-p", sockpath, "-i", device_vif_ifname,
-                           "log_level", "DEBUG");
-    if (err) {
-        LOGW("%s: failed to set hostapd debug level: %d (%s), socket: %s",
-                device_vif_ifname, errno, strerror(errno), sockpath);
-        return err;
-    }
-
-    return 0;
-}
-
-static int
-util_userspace_reload(const char *device_phy_ifname,
-                      const char *device_vif_ifname,
-                      const char *cloud_vif_ifname,
-                      const char *opmode)
-{
-    char sockpath[128];
-    int err;
-    char c;
-
-    const char *reconfigure[] = {
-        "timeout", "-t", "3",
-        "wpa_cli", "-p", sockpath, "-i", device_vif_ifname, "reconfigure",
-        NULL,
-    };
-
-    const char *reassoc[] = {
-        "timeout", "-t", "3",
-        "wpa_cli", "-p", sockpath, "-i", device_vif_ifname, "reassoc",
-        NULL,
-    };
-
-    if (!strcmp(opmode, "ap")) {
-        /* I originally intended to use dedicated reloading
-         * mechanisms but it turns out qcawifi doesn't
-         * really do well with that (e.g. ssid was not
-         * reloaded meaning possibly WPS problems).
-         *
-         * Therefore I decided to use stop+start.
-         */
-        util_userspace_stop(device_phy_ifname,
-                            device_vif_ifname,
-                            cloud_vif_ifname);
-
-        err = util_userspace_start(device_phy_ifname,
-                                   device_vif_ifname,
-                                   cloud_vif_ifname,
-                                   opmode);
-
-        return err;
-    }
-
-    if (!strcmp(opmode, "sta")) {
-        util_wpas_get_sockpath(device_phy_ifname,
-                               NULL,
-                               sockpath,
-                               sizeof(sockpath));
-
-        err = forkexec(reconfigure[0], reconfigure, NULL, &c, sizeof(c));
-        if (err) {
-            LOGW("%s: failed to reconfigure wpas: %d (%s)",
-                 device_vif_ifname, errno, strerror(errno));
-            return -1;
-        }
-
-        /* FIXME: This can be skipped/optimized because
-         *        during onboarding the parent will
-         *        essentially remain the same.
-         */
-        err = forkexec(reassoc[0], reassoc, NULL, &c, sizeof(c));
-        if (err) {
-            LOGW("%s: failed to reassoc wpas: %d (%s)",
-                 device_vif_ifname, errno, strerror(errno));
-            return -1;
-        }
-
-        return 0;
-    }
-
-    errno = ENOTSUP;
-    return -1;
+    return qca_bsal_send_action(ifname, mac_addr, data, data_len);
 }
 
 /******************************************************************************
@@ -3666,8 +2176,25 @@ util_userspace_reload(const char *device_phy_ifname,
 
 #define CSA_COUNT 15
 
+static const int *
+util_get_channels(const char *phy, int chan, const char *mode)
+{
+    unsigned int width;
+
+    /* TODO add support for HT80+80 if we will support this */
+    WARN_ON(strcmp(mode, "HT80+80") == 0);
+
+    if (sscanf(mode, "HT%u", &width) != 1) {
+        width = 20;
+        LOGW("%s: failed to get channel width '%s' return default %d",
+             phy, mode, width);
+    }
+
+    return unii_5g_chan2list(chan, width);
+}
+
 static int
-util_csa_get_chwidth(const char *device_phy_ifname, const char *mode)
+util_csa_get_chwidth(const char *phy, const char *mode)
 {
     if (!strcmp(mode, "HT20"))
         return EXTTOOL_CW_20;
@@ -3679,12 +2206,12 @@ util_csa_get_chwidth(const char *device_phy_ifname, const char *mode)
         return EXTTOOL_CW_160;
 
     LOGW("%s: failed to get channel width, defaulting to: %d",
-         device_phy_ifname, EXTTOOL_CW_DEFAULT);
+         phy, EXTTOOL_CW_DEFAULT);
     return EXTTOOL_CW_DEFAULT;
 }
 
 static int
-util_csa_is_sec_offset_supported(const char *device_phy_ifname,
+util_csa_is_sec_offset_supported(const char *phy,
                               int channel,
                               const char *offset_str)
 {
@@ -3696,32 +2223,27 @@ util_csa_is_sec_offset_supported(const char *device_phy_ifname,
                        " | sed 's/Channel/\\n/g'"
                        " | awk '$1 == %d && / %s/'"
                        " | grep -q .",
-                       device_phy_ifname,
+                       phy,
                        channel,
                        offset_str);
 }
 
 static int
-util_csa_get_secoffset(const char *device_phy_ifname, int channel)
+util_csa_get_secoffset(const char *phy, int channel)
 {
-    if (util_csa_is_sec_offset_supported(device_phy_ifname,
-                                         channel,
-                                         EXTTOOL_HT40_PLUS_STR))
+    if (util_csa_is_sec_offset_supported(phy, channel, EXTTOOL_HT40_PLUS_STR))
         return EXTTOOL_HT40_PLUS;
 
-    if (util_csa_is_sec_offset_supported(device_phy_ifname,
-                                         channel,
-                                         EXTTOOL_HT40_MINUS_STR))
+    if (util_csa_is_sec_offset_supported(phy, channel, EXTTOOL_HT40_MINUS_STR))
         return EXTTOOL_HT40_MINUS;
 
     LOGW("%s: failed to find suitable csa channel offset, defaulting to: %d",
-         device_phy_ifname, EXTTOOL_HT40_DEFAULT);
+         phy, EXTTOOL_HT40_DEFAULT);
     return EXTTOOL_HT40_DEFAULT;
 }
 
 static bool
-util_csa_chan_is_supported(const char *device_vif_ifname,
-                           int chan)
+util_csa_chan_is_supported(const char *vif, int chan)
 {
     /* TODO: Currently OVSDB isn't able to express more than a mere channel
      * number for CSA. This means all other info (width, cfreq, secondary) are
@@ -3734,16 +2256,14 @@ util_csa_chan_is_supported(const char *device_vif_ifname,
                        "| grep -o 'Channel[ ]*[0-9]* ' "
                        "| awk '$2 == %d' "
                        "| grep -q .",
-                       device_vif_ifname,
+                       vif,
                        chan);
 }
 
 static int
-util_csa_chan_get_capable_phy(char *device_phy_ifname,
-                              int len,
-                              int chan)
+util_csa_chan_get_capable_phy(char *phy, int len, int chan)
 {
-    char device_vif_ifname[32];
+    char vif[32];
     struct dirent *p;
     int err;
     DIR *d;
@@ -3760,15 +2280,13 @@ util_csa_chan_get_capable_phy(char *device_phy_ifname,
         if (strstr(p->d_name, "wifi") != p->d_name)
             continue;
 
-        if (util_wifi_any_phy_vif(p->d_name,
-                                  device_vif_ifname,
-                                  sizeof(device_vif_ifname)))
+        if (util_wifi_any_phy_vif(p->d_name, vif, sizeof(vif)))
             continue;
 
-        if (!util_csa_chan_is_supported(device_vif_ifname, chan))
+        if (!util_csa_chan_is_supported(vif, chan))
             continue;
 
-        snprintf(device_phy_ifname, len, "%s", p->d_name);
+        strscpy(phy, p->d_name, len);
         err = 0;
         break;
     }
@@ -3778,12 +2296,12 @@ util_csa_chan_get_capable_phy(char *device_phy_ifname,
 }
 
 static void
-util_csa_do_implicit_parent_switch(const char *device_vif_ifname,
+util_csa_do_implicit_parent_switch(const char *vif,
                                    const char *bssid,
                                    int chan)
 {
     static const char zeroaddr[6] = {};
-    char device_phy_ifname[32];
+    char phy[32];
     char bssid_arg[32];
     int err;
 
@@ -3794,12 +2312,12 @@ util_csa_do_implicit_parent_switch(const char *device_vif_ifname,
 
     if (!memcmp(zeroaddr, bssid, 6)) {
         LOGW("%s: bssid is missing, parent switch will take longer",
-             device_vif_ifname);
+             vif);
         bssid_arg[0] = 0;
     }
 
-    if ((err = util_csa_chan_get_capable_phy(device_phy_ifname,
-                                             sizeof(device_phy_ifname),
+    if ((err = util_csa_chan_get_capable_phy(phy,
+                                             sizeof(phy),
                                              chan))) {
         LOGW("%s: failed to get capable phy for chan %d: %d (%s)",
              __func__, chan, errno, strerror(errno));
@@ -3808,13 +2326,13 @@ util_csa_do_implicit_parent_switch(const char *device_vif_ifname,
 
     err = runcmd("%s/parentchange.sh '%s' '%s' '%d'",
                  target_bin_dir(),
-                 device_phy_ifname,
+                 phy,
                  bssid_arg,
                  chan);
     if (err) {
         LOGW("%s: failed to run parentchange.sh '%s' '%s' '%d': %d (%s)",
              __func__,
-             device_phy_ifname,
+             phy,
              bssid_arg,
              chan,
              errno,
@@ -3823,29 +2341,20 @@ util_csa_do_implicit_parent_switch(const char *device_vif_ifname,
 }
 
 static void
-util_csa_completion_check_vif(const char *device_vif_ifname)
+util_csa_completion_check_vif(const char *vif)
 {
-    char device_phy_ifname[32];
-    char ifname[32];
-    char *cloud_phy_ifname;
-    char *cloud_vif_ifname;
+    char *phy;
     int err;
 
-    err = util_wifi_get_parent(device_vif_ifname,
-                               device_phy_ifname,
-                               sizeof(device_phy_ifname));
+    err = util_wifi_get_parent(vif, phy = A(32));
     if (err) {
         LOGW("%s: failed to get parent radio name: %d (%s)",
-             device_vif_ifname, errno, strerror(errno));
+             vif, errno, strerror(errno));
         return;
     }
 
-    snprintf(ifname, sizeof(ifname), "%s", device_vif_ifname);
-    cloud_vif_ifname = target_ifname_device2cloud(ifname);
-    cloud_phy_ifname = target_ifname_device2cloud(device_phy_ifname);
-
-    util_cb_delayed_update(UTIL_CB_VIF, cloud_vif_ifname);
-    util_cb_delayed_update(UTIL_CB_PHY, cloud_phy_ifname);
+    util_cb_delayed_update(UTIL_CB_VIF, vif);
+    util_cb_delayed_update(UTIL_CB_PHY, phy);
 }
 
 static int
@@ -3865,8 +2374,8 @@ util_cac_in_progress(const char *phy)
 }
 
 static int
-util_csa_start(const char *device_phy_ifname,
-               const char *device_vif_ifname,
+util_csa_start(const char *phy,
+               const char *vif,
                const char *hw_mode,
                const char *freq_band,
                const char *ht_mode,
@@ -3875,27 +2384,27 @@ util_csa_start(const char *device_phy_ifname,
     char mode[32];
     int err;
 
-    if (util_cac_in_progress(device_phy_ifname)) {
-        LOGI("%s: cac in progress, switching channel through down/up", device_phy_ifname);
+    if (util_cac_in_progress(phy)) {
+        LOGI("%s: cac in progress, switching channel through down/up", phy);
         memset(mode, 0, sizeof(mode));
         err = 0;
-        err |= WARN_ON(!strexa("ifconfig", device_vif_ifname, "down"));
+        err |= WARN_ON(!strexa("ifconfig", vif, "down"));
         err |= WARN_ON(util_iwpriv_get_mode(hw_mode, ht_mode, freq_band, mode, sizeof(mode)) < 0);
-        err |= WARN_ON(util_iwpriv_set_str_lazy(device_vif_ifname, "get_mode", "mode", mode) < 0);
-        err |= WARN_ON(!strexa("iwconfig", device_vif_ifname, "channel", strfmta("%d", channel)));
-        err |= WARN_ON(!strexa("ifconfig", device_vif_ifname, "up"));
+        err |= WARN_ON(util_iwpriv_set_str_lazy(vif, "get_mode", "mode", mode) < 0);
+        err |= WARN_ON(!strexa("iwconfig", vif, "channel", strfmta("%d", channel)));
+        err |= WARN_ON(!strexa("ifconfig", vif, "up"));
         return err ? -1 : 0;
     }
 
     err = runcmd("exttool --chanswitch --interface %s --chan %d --numcsa %d --chwidth %d --secoffset %d",
-                 device_phy_ifname,
+                 phy,
                  channel,
                  CSA_COUNT,
-                 util_csa_get_chwidth(device_phy_ifname, ht_mode),
-                 util_csa_get_secoffset(device_phy_ifname, channel));
+                 util_csa_get_chwidth(phy, ht_mode),
+                 util_csa_get_secoffset(phy, channel));
     if (err) {
         LOGW("%s: failed to run exttool; is csa already running? invalid channel? nop active?",
-             device_phy_ifname);
+             phy);
         return err;
     }
 
@@ -3907,19 +2416,19 @@ util_csa_start(const char *device_phy_ifname,
 }
 
 static void
-util_csa_war_update_rconf_channel(const char *dphy, int chan)
+util_csa_war_update_rconf_channel(const char *phy, int chan)
 {
     const char *get = F("%s/../tools/ovsh -r s Wifi_Radio_Config -w channel!=%d -w if_name==%s | grep .",
-                        target_bin_dir(), chan, dphy);
+                        target_bin_dir(), chan, phy);
     const char *cmd = F("%s/../tools/ovsh u Wifi_Radio_Config channel:=%d -w if_name==%s | grep 1",
-                        target_bin_dir(), chan, dphy);
+                        target_bin_dir(), chan, phy);
     int err;
     if ((system(get)))
         return;
     LOGE("Updating Radio::channel on CSA Rx leaf. This must be fixed with CAES-600.");
     LOGE("Do not attempt to remove or lower the severity of this message");
     if ((err = system(cmd)))
-        LOGEM("%s: system(%s) failed: %d, expect topology deviation", dphy, cmd, err);
+        LOGEM("%s: system(%s) failed: %d, expect topology deviation", phy, cmd, err);
 }
 
 /******************************************************************************
@@ -3994,7 +2503,7 @@ util_nl_parse_iwevcustom_csa_rx(const char *ifname,
 {
     const struct ieee80211_csa_rx_ev *ev;
     bool supported;
-    char device_vif_ifname[32];
+    char vif[32];
 
     ev = data;
 
@@ -4004,14 +2513,12 @@ util_nl_parse_iwevcustom_csa_rx(const char *ifname,
         return;
     }
 
-    if (util_wifi_any_phy_vif(ifname,
-                              device_vif_ifname,
-                              sizeof(device_vif_ifname))) {
+    if (util_wifi_any_phy_vif(ifname, vif, sizeof(vif))) {
         LOGW("%s: failed to find at least 1 vap", ifname);
         return;
     }
 
-    supported = util_csa_chan_is_supported(device_vif_ifname, ev->chan);
+    supported = util_csa_chan_is_supported(vif, ev->chan);
     LOGI("%s: csa rx to bssid %02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx chan %d width %dMHz sec %d cfreq2 %d valid %d supported %d",
          ifname,
          ev->bssid[0], ev->bssid[1], ev->bssid[2],
@@ -4039,31 +2546,31 @@ util_nl_parse_iwevcustom_csa_rx(const char *ifname,
 }
 
 static void
-util_nl_parse_iwevcustom_channel_list_updated(const char *cphy,
+util_nl_parse_iwevcustom_channel_list_updated(const char *phy,
                                               const void *data,
                                               unsigned int len)
 {
     const unsigned char *chan;
 
     if (len < sizeof(*chan)) {
-        LOGW("%s: channel list updated event too short (%d < %d), userspace/driver abi mismatch?", cphy, len, sizeof(*chan));
+        LOGW("%s: channel list updated event too short (%d < %d), userspace/driver abi mismatch?", phy, len, sizeof(*chan));
         return;
     }
 
     chan = data;
-    LOGI("%s: channel list updated, chan %d", cphy, *chan);
-    util_cb_delayed_update(UTIL_CB_PHY, cphy);
+    LOGI("%s: channel list updated, chan %d", phy, *chan);
+    util_cb_delayed_update(UTIL_CB_PHY, phy);
 }
 
 static bool
-util_wifi_phy_has_sta(const char *dphy)
+util_wifi_phy_has_sta(const char *phy)
 {
     char vifs[1024];
     char *vifr;
     char *vif;
 
-    if (util_wifi_get_phy_vifs(dphy, vifs, sizeof(vifs)) < 0) {
-        LOGW("%s: failed to get phy vif list: %d (%s)", dphy, errno, strerror(errno));
+    if (util_wifi_get_phy_vifs(phy, vifs, sizeof(vifs)) < 0) {
+        LOGW("%s: failed to get phy vif list: %d (%s)", phy, errno, strerror(errno));
         return false;
     }
 
@@ -4076,43 +2583,41 @@ util_wifi_phy_has_sta(const char *dphy)
 }
 
 static void
-util_nl_parse_iwevcustom_radar_detected(const char *dphy,
+util_nl_parse_iwevcustom_radar_detected(const char *phy,
                                         const void *data,
                                         unsigned int len)
 {
     const unsigned char *chan;
-    const char *cphy;
-    const char *fallback_dphy;
+    const char *fallback_phy;
     struct fallback_parent parents[8];
     struct fallback_parent *parent;
     int num;
     int err;
 
     if (len < sizeof(*chan)) {
-        LOGW("%s: radar event too short (%d < %d), userspace/driver api mismatch?", dphy, len, sizeof(*chan));
+        LOGW("%s: radar event too short (%d < %d), userspace/driver api mismatch?", phy, len, sizeof(*chan));
         return;
     }
 
     chan = data;
-    cphy = target_ifname_device2cloud((char *) dphy);
-    LOGEM("%s: radar detected, chan %d \n", dphy, *chan);
+    LOGEM("%s: radar detected, chan %d \n", phy, *chan);
 
-    util_kv_radar_set(cphy, *chan);
-    util_cb_delayed_update(UTIL_CB_PHY, cphy);
+    util_kv_radar_set(phy, *chan);
+    util_cb_delayed_update(UTIL_CB_PHY, phy);
 
-    if (!util_wifi_phy_has_sta(dphy)) {
-        LOGD("%s: no sta vif found, skipping parent change", dphy);
+    if (!util_wifi_phy_has_sta(phy)) {
+        LOGD("%s: no sta vif found, skipping parent change", phy);
         return;
     }
 
-    fallback_dphy = wiphy_info_get_2ghz_ifname();
-    if (!fallback_dphy) {
-        LOGW("%s: no phy found for 2.4G", dphy);
+    fallback_phy = wiphy_info_get_2ghz_ifname();
+    if (!fallback_phy) {
+        LOGW("%s: no phy found for 2.4G", phy);
         return;
     }
 
-    if ((num = util_kv_get_fallback_parents(target_ifname_device2cloud((char *) fallback_dphy), parents, ARRAY_SIZE(parents))) <= 0) {
-        LOGEM("%s: no fallback parents configured, restarting managers", dphy);
+    if ((num = util_kv_get_fallback_parents(fallback_phy, parents, ARRAY_SIZE(parents))) <= 0) {
+        LOGEM("%s: no fallback parents configured, restarting managers", phy);
         target_device_restart_managers();
         return;
     }
@@ -4120,16 +2625,16 @@ util_nl_parse_iwevcustom_radar_detected(const char *dphy,
     /* Simplest way, just choose first one */
     parent = &parents[0];
 
-    LOGI("%s: parentchange.sh %s %s %d", dphy, fallback_dphy, parent->bssid, parent->channel);
+    LOGI("%s: parentchange.sh %s %s %d", phy, fallback_phy, parent->bssid, parent->channel);
     err = runcmd("%s/parentchange.sh '%s' '%s' '%d'",
                  target_bin_dir(),
-                 fallback_dphy,
+                 fallback_phy,
                  parent->bssid,
                  parent->channel);
     if (err) {
         LOGW("%s: failed to run parentchange.sh '%s' '%s' '%d': %d (%s)",
              __func__,
-             fallback_dphy,
+             fallback_phy,
              parent->bssid,
              parent->channel,
              errno,
@@ -4178,25 +2683,39 @@ util_nl_parse(const void *buf, unsigned int len)
     const struct iw_event *iwe;
     const struct nlmsghdr *hdr;
     const struct rtattr *attr;
+    struct ifinfomsg *ifm;
     char ifname[32];
     int attrlen;
     int iwelen;
+    bool created;
+    bool deleted;
 
-    util_nl_each_msg_type(buf, hdr, len, RTM_NEWLINK) {
-        memset(ifname, 0, sizeof(ifname));
+    util_nl_each_msg(buf, hdr, len)
+        if (hdr->nlmsg_type == RTM_NEWLINK ||
+            hdr->nlmsg_type == RTM_DELLINK) {
+            memset(ifname, 0, sizeof(ifname));
 
-        util_nl_each_attr_type(hdr, attr, attrlen, IFLA_IFNAME)
-            memcpy(ifname, RTA_DATA(attr), RTA_PAYLOAD(attr));
+            util_nl_each_attr_type(hdr, attr, attrlen, IFLA_IFNAME)
+                memcpy(ifname, RTA_DATA(attr), RTA_PAYLOAD(attr));
 
-        if (strlen(ifname) == 0)
-            continue;
+            if (strlen(ifname) == 0)
+                continue;
 
-        util_nl_each_attr_type(hdr, attr, attrlen, IFLA_WIRELESS)
-            util_nl_each_iwe_type(attr, iwe, iwelen, IWEVCUSTOM)
-                util_nl_parse_iwevcustom(ifname,
-                                         util_nl_iwe_data(iwe),
-                                         util_nl_iwe_payload(iwe));
-    }
+            qca_ctrl_discover(ifname);
+
+            util_nl_each_attr_type(hdr, attr, attrlen, IFLA_WIRELESS)
+                util_nl_each_iwe_type(attr, iwe, iwelen, IWEVCUSTOM)
+                    util_nl_parse_iwevcustom(ifname,
+                                             util_nl_iwe_data(iwe),
+                                             util_nl_iwe_payload(iwe));
+
+            ifm = NLMSG_DATA(hdr);
+            created = (hdr->nlmsg_type == RTM_NEWLINK) && (ifm->ifi_change == ~0UL);
+            deleted = (hdr->nlmsg_type == RTM_DELLINK);
+            if ((created || deleted) &&
+                (access(F("/sys/class/net/%s/parent", ifname), R_OK) == 0))
+                util_cb_delayed_update(UTIL_CB_VIF, ifname);
+        }
 }
 
 static int util_nl_listen_start(void);
@@ -4290,16 +2809,16 @@ util_nl_listen_start(void)
 #define POLICY_RTS_THR 1000
 
 static int
-util_policy_get_csa_deauth(const char *cloud_vif_ifname, const char *freq_band)
+util_policy_get_csa_deauth(const char *vif, const char *freq_band)
 {
     return 0;
 }
 
 static bool
-util_policy_get_rts(const char *device_phy_ifname,
+util_policy_get_rts(const char *phy,
                     const char *freq_band)
 {
-    if (util_wifi_phy_is_offload(device_phy_ifname))
+    if (util_wifi_phy_is_offload(phy))
         return false;
 
     if (strcmp(freq_band, "2.4G"))
@@ -4309,33 +2828,33 @@ util_policy_get_rts(const char *device_phy_ifname,
 }
 
 static bool
-util_policy_get_cwm_enable(const char *device_phy_ifname)
+util_policy_get_cwm_enable(const char *phy)
 {
     /* This prevents chips like Dragonfly from downgrading
      * to HT20 mode.
      */
-    return util_wifi_phy_is_offload(device_phy_ifname);
+    return util_wifi_phy_is_offload(phy);
 }
 
 static bool
-util_policy_get_disable_coext(const char *device_phy_ifname)
+util_policy_get_disable_coext(const char *phy)
 {
     /* This prevents chips like Dragonfly from downgrading
      * to HT20 mode.
      */
-    return !util_wifi_phy_is_offload(device_phy_ifname);
+    return !util_wifi_phy_is_offload(phy);
 }
 
 static bool
-util_policy_get_csa_interop(const char *device_vif_ifname)
+util_policy_get_csa_interop(const char *vif)
 {
-    return strstr(device_vif_ifname, "home-ap-");
+    return strstr(vif, "home-ap-");
 }
 
 static const char *
-util_policy_get_min_hw_mode(const char *cvif)
+util_policy_get_min_hw_mode(const char *vif)
 {
-    if (!strcmp(cvif, "home-ap-24"))
+    if (!strcmp(vif, "home-ap-24"))
         return "11b";
     else
         return "11g"; /* works for both 2.4GHz and 5GHz */
@@ -4371,8 +2890,138 @@ util_radio_channel_state(const char *line)
     return "{\"state\": \"nop_started\"}";
 }
 
+static bool
+util_radio_bgcac_active(const char *phy, int chan, const char *ht_mode)
+{
+    const int *channels;
+    const int *chans;
+    const char *line;
+    char *buf;
+    int c;
+    int precac;
+
+    /* Check if driver/hw enable/support precac */
+    if (!util_iwpriv_get_int(phy, "get_preCACEn", &precac))
+        return false;
+    if (precac != 1)
+        return false;
+
+    /* Get current channels */
+    channels = util_get_channels(phy, chan, ht_mode);
+    if (WARN_ON(!channels))
+        return false;
+
+    /* Check if any of current channels have CAC started */
+    if (WARN_ON(!(buf = strexa("exttool", "--interface", phy, "--list"))))
+        return false;
+
+    while ((line = strsep(&buf, "\r\n"))) {
+        if (sscanf(line, "chan %d", &c) != 1)
+            continue;
+        if (!strstr(line, "DFS_CAC_STARTED"))
+            continue;
+
+        chans = channels;
+        while (*chans)
+            if (*chans++ == c)
+                return true;
+    }
+
+    return false;
+}
+
 static void
-util_radio_channel_list_get(const char *cloud_phy_ifname, struct schema_Wifi_Radio_State *rstate)
+util_radio_bgcac_recalc(const char *phy, const struct schema_Wifi_Radio_State *rstate)
+{
+    const int *channels;
+    /*
+     * Today only Cascade support this. When we set
+     * VHT80 check if can run background CAC and if
+     * possible switch HW to VHT80+80, where first
+     * 80MHz stay as our main channel and second
+     * 80MHz block is used for background CAC.
+     * Because of that, we will check only possible
+     * 80MHz DFS channels here.
+     */
+    const int cw_80[] = {60, 108, 124};
+    unsigned int i;
+    const char *state;
+    int channel;
+    int restart;
+    int precac;
+    int j;
+
+    restart = 0;
+
+    /* Check if driver/hw set/enable precac */
+    if (!util_iwpriv_get_int(phy, "get_preCACEn", &precac))
+        return;
+    if (precac != 1)
+        return;
+
+    /* Check if any apvif */
+    if (!util_iwconfig_any_phy_vif_type(phy, "ap", A(32)))
+        return;
+
+    /* Check if channel(s) are CAC ready */
+    for (i = 0; i < ARRAY_SIZE(cw_80); i++) {
+        channels = util_get_channels(phy, cw_80[i], "HT80");
+        if (!channels)
+            continue;
+
+        while (*channels) {
+            channel = 0;
+            state = NULL;
+
+            for (j = 0; j < rstate->channels_len; j++) {
+                channel = atoi(rstate->channels_keys[j]);
+                state = rstate->channels[j];
+                if (*channels != channel)
+                    continue;
+                break;
+            }
+
+            if (*channels++ != channel) {
+                LOGT("%s no channel found %d, skip", phy, channel);
+                restart = 0;
+                break;
+            }
+
+            if (!state)
+                continue;
+
+            /* Check if NOP started on any channel from 80MHz */
+            if (strstr(state, "nop_started")) {
+                LOGT("%s nop started %d, skip", phy, channel);
+                restart = 0;
+                break;
+            }
+
+            /* Count CAC ready channels */
+            if (strstr(state, "nop_finished"))
+                restart++;
+        }
+
+        if (restart)
+            break;
+    }
+
+    if (!restart)
+        return;
+
+    LOGI("%s background CAC restart vdev(s) chan %d @ %s %d",
+         phy, rstate->channel, rstate->ht_mode, restart);
+
+    runcmd("exttool --chanswitch --interface %s --chan %d --numcsa %d --chwidth %d --secoffset %d --force",
+            phy,
+            rstate->channel,
+            CSA_COUNT,
+            util_csa_get_chwidth(phy, rstate->ht_mode),
+            util_csa_get_secoffset(phy, rstate->channel));
+}
+
+static void
+util_radio_channel_list_get(const char *phy, struct schema_Wifi_Radio_State *rstate)
 {
     char buf[4096];
     char *buffer;
@@ -4382,66 +3031,75 @@ util_radio_channel_list_get(const char *cloud_phy_ifname, struct schema_Wifi_Rad
 
     buffer = buf;
 
-    err = readcmd(buf, sizeof(buf), 0, "exttool --interface %s --list",
-                  target_ifname_cloud2device((char *)cloud_phy_ifname));
+    err = readcmd(buf, sizeof(buf), 0, "exttool --interface %s --list", phy);
     if (err) {
-        LOGW("%s: readcmd() failed: %d (%s)", cloud_phy_ifname, errno, strerror(errno));
+        LOGW("%s: readcmd() failed: %d (%s)", phy, errno, strerror(errno));
         return;
     }
 
     while ((line = strsep(&buffer, "\n")) != NULL) {
-        LOGD("%s line: |%s|", cloud_phy_ifname, line);
+        LOGD("%s line: |%s|", phy, line);
         if (sscanf(line, "chan %d", &channel) == 1) {
             rstate->allowed_channels[rstate->allowed_channels_len++] = channel;
             SCHEMA_KEY_VAL_APPEND(rstate->channels, F("%d", channel), util_radio_channel_state(line));
         }
     }
+
+    /*
+     * We put background CAC recalc here to cover case
+     * when channels back to CAC ready (nop_finished)
+     * after NOP period finished.
+     * This is also called when we update Config::zero_wait_dfs
+     * from upper layer (WM2). So, use this place as a single
+     * recalculation point.
+     */
+    util_radio_bgcac_recalc(phy, rstate);
 }
 
 static void
-util_radio_fallback_parents_get(const char *cphy, struct schema_Wifi_Radio_State *rstate)
+util_radio_fallback_parents_get(const char *phy, struct schema_Wifi_Radio_State *rstate)
 {
     struct fallback_parent parents[8];
     int parents_num;
     int i;
 
-    parents_num = util_kv_get_fallback_parents(cphy, &parents[0], ARRAY_SIZE(parents));
+    parents_num = util_kv_get_fallback_parents(phy, &parents[0], ARRAY_SIZE(parents));
 
     for (i = 0; i < parents_num; i++)
         SCHEMA_KEY_VAL_APPEND_INT(rstate->fallback_parents, parents[i].bssid, parents[i].channel);
 }
 
 static void
-util_radio_fallback_parents_set(const char *cphy, const struct schema_Wifi_Radio_Config *rconf)
+util_radio_fallback_parents_set(const char *phy, const struct schema_Wifi_Radio_Config *rconf)
 {
     char buf[512] = {};
     int i;
 
     for (i = 0; i < rconf->fallback_parents_len; i++) {
-        LOGI("%s: fallback_parents[%d] %s %d", cphy, i,
+        LOGI("%s: fallback_parents[%d] %s %d", phy, i,
              rconf->fallback_parents_keys[i],
              rconf->fallback_parents[i]);
         strscat(buf, F("%d %s,", rconf->fallback_parents[i], rconf->fallback_parents_keys[i]), sizeof(buf));
     }
 
-    util_kv_set(F("%s.fallback_parents", cphy), strlen(buf) ? buf : NULL);
+    util_kv_set(F("%s.fallback_parents", phy), strlen(buf) ? buf : NULL);
 }
 
 static bool
-util_radio_ht_mode_get_max(const char *device_phy_ifname,
+util_radio_ht_mode_get_max(const char *phy,
                        char *ht_mode_vif,
                        int htmode_len)
 {
     char path[128];
 
-    snprintf(path, sizeof(path), "/sys/class/net/%s/2g_maxchwidth", device_phy_ifname);
+    snprintf(path, sizeof(path), "/sys/class/net/%s/2g_maxchwidth", phy);
     if (util_file_read_str(path, ht_mode_vif, htmode_len) < 0)
         return false;
 
     if (strlen(ht_mode_vif) > 0)
         return true;
 
-    snprintf(path, sizeof(path), "/sys/class/net/%s/5g_maxchwidth", device_phy_ifname);
+    snprintf(path, sizeof(path), "/sys/class/net/%s/5g_maxchwidth", phy);
     if (util_file_read_str(path, ht_mode_vif, htmode_len) < 0)
         return false;
 
@@ -4449,7 +3107,7 @@ util_radio_ht_mode_get_max(const char *device_phy_ifname,
 }
 
 static bool
-util_radio_ht_mode_get(char *device_phy_ifname, char *htmode, int htmode_len)
+util_radio_ht_mode_get(char *phy, char *htmode, int htmode_len)
 {
     const struct util_iwpriv_mode *mode;
     char vifs[512];
@@ -4459,8 +3117,8 @@ util_radio_ht_mode_get(char *device_phy_ifname, char *htmode, int htmode_len)
 
     memset(ht_mode_vif, '\0', sizeof(ht_mode_vif));
 
-    if (util_wifi_get_phy_vifs(device_phy_ifname, vifs, sizeof(vifs))) {
-        LOGE("%s: get vifs failed", device_phy_ifname);
+    if (util_wifi_get_phy_vifs(phy, vifs, sizeof(vifs))) {
+        LOGE("%s: get vifs failed", phy);
         return false;
     }
 
@@ -4469,7 +3127,7 @@ util_radio_ht_mode_get(char *device_phy_ifname, char *htmode, int htmode_len)
             if (strstr(vif, "bhaul-sta") == NULL) {
                 if (util_iwpriv_get_ht_mode(vif, htmode, htmode_len)) {
                     if (strlen(ht_mode_vif) == 0) {
-                        strlcpy(ht_mode_vif, htmode, sizeof(ht_mode_vif));
+                        STRSCPY(ht_mode_vif, htmode);
                     }
                     else if ((strcmp(ht_mode_vif, htmode)) != 0) {
                         return false;
@@ -4479,7 +3137,7 @@ util_radio_ht_mode_get(char *device_phy_ifname, char *htmode, int htmode_len)
         }
     }
     if (strlen(htmode) == 0) {
-        if (util_radio_ht_mode_get_max(device_phy_ifname, ht_mode_vif, sizeof(ht_mode_vif))) {
+        if (util_radio_ht_mode_get_max(phy, ht_mode_vif, sizeof(ht_mode_vif))) {
             snprintf(htmode, htmode_len, "HT%s", ht_mode_vif);
             return true;
         }
@@ -4490,12 +3148,12 @@ util_radio_ht_mode_get(char *device_phy_ifname, char *htmode, int htmode_len)
     if (!mode)
         return false;
 
-    strlcpy(htmode, mode->htmode, htmode_len);
+    strscpy(htmode, mode->htmode, htmode_len);
     return true;
 }
 
 static bool
-util_radio_country_get(const char *dphy, char *country, int country_len)
+util_radio_country_get(const char *phy, char *country, int country_len)
 {
     char buf[256];
     char *p;
@@ -4503,13 +3161,13 @@ util_radio_country_get(const char *dphy, char *country, int country_len)
 
     memset(country, '\0', country_len);
 
-    if ((err = util_exec_read(rtrimws, buf, sizeof(buf), "iwpriv", dphy, "getCountry"))) {
-        LOGW("%s: failed to get country: %d", dphy, err);
+    if ((err = util_exec_read(rtrimws, buf, sizeof(buf), "iwpriv", phy, "getCountry"))) {
+        LOGW("%s: failed to get country: %d", phy, err);
         return false;
     }
 
     if ((p = strstr(buf, "getCountry:")))
-        snprintf(country, country_len, "%s", strstr(p, ":")+1);
+        strscpy(country, strstr(p, ":") + 1, country_len);
 
     return strlen(country);
 }
@@ -4518,7 +3176,7 @@ util_radio_country_get(const char *dphy, char *country, int country_len)
  * Radio implementation
  *****************************************************************************/
 
-bool target_radio_state_get(char *cloud_phy_ifname, struct schema_Wifi_Radio_State *rstate)
+bool target_radio_state_get(char *phy, struct schema_Wifi_Radio_State *rstate)
 {
     const struct wiphy_info *wiphy_info;
     const struct util_thermal *t;
@@ -4528,9 +3186,8 @@ bool target_radio_state_get(char *cloud_phy_ifname, struct schema_Wifi_Radio_Sta
     const char *hw_mode;
     const char **type;
     struct dirent *d;
-    char device_vif_ifname[32];
-    char *device_phy_ifname;
     char buf[512];
+    char *vif;
     DIR *dirp;
     int extbusythres;
     int n;
@@ -4540,7 +3197,6 @@ bool target_radio_state_get(char *cloud_phy_ifname, struct schema_Wifi_Radio_Sta
 
     memset(htmode, '\0', sizeof(htmode));
     memset(rstate, 0, sizeof(*rstate));
-    device_phy_ifname = target_ifname_cloud2device(cloud_phy_ifname);
 
     schema_Wifi_Radio_State_mark_all_present(rstate);
     rstate->_partial_update = true;
@@ -4549,9 +3205,9 @@ bool target_radio_state_get(char *cloud_phy_ifname, struct schema_Wifi_Radio_Sta
     rstate->channel_sync_present = false;
     rstate->channel_mode_present = false;
 
-    wiphy_info = wiphy_info_get(device_phy_ifname);
+    wiphy_info = wiphy_info_get(phy);
     if (!wiphy_info) {
-        LOGW("%s: failed to identify radio", device_phy_ifname);
+        LOGW("%s: failed to identify radio", phy);
         return false;
     }
 
@@ -4559,35 +3215,32 @@ bool target_radio_state_get(char *cloud_phy_ifname, struct schema_Wifi_Radio_Sta
     freq_band = wiphy_info->band;
     hw_mode = wiphy_info->mode;
 
-    if (util_wifi_any_phy_vif(device_phy_ifname,
-                              device_vif_ifname,
-                              sizeof(device_vif_ifname))) {
-        LOGD("%s: no vifs, some rstate bits will be missing",
-             device_phy_ifname);
+    if (util_wifi_any_phy_vif(phy, vif = A(32))) {
+        LOGD("%s: no vifs, some rstate bits will be missing", phy);
     }
 
-    if ((rstate->mac_exists = (0 == util_net_get_macaddr_str(device_phy_ifname, buf, sizeof(buf)))))
-        strncpy(rstate->mac, buf, sizeof(rstate->mac));
+    if ((rstate->mac_exists = (0 == util_net_get_macaddr_str(phy, buf, sizeof(buf)))))
+        STRSCPY(rstate->mac, buf);
 
-    if ((rstate->enabled_exists = util_net_ifname_exists(device_phy_ifname, &v)))
+    if ((rstate->enabled_exists = util_net_ifname_exists(phy, &v)))
         rstate->enabled = v;
 
-    if ((rstate->channel_exists = util_iwconfig_get_chan(device_phy_ifname, NULL, &v)))
+    if ((rstate->channel_exists = util_iwconfig_get_chan(phy, NULL, &v)))
         rstate->channel = v;
 
-    if ((rstate->bcn_int_exists = util_iwpriv_get_bcn_int(device_phy_ifname, &v)))
+    if ((rstate->bcn_int_exists = util_iwpriv_get_bcn_int(phy, &v)))
         rstate->bcn_int = v;
 
-    if ((rstate->ht_mode_exists = util_radio_ht_mode_get(device_phy_ifname, htmode, sizeof(htmode))))
-        strlcpy(rstate->ht_mode, htmode, sizeof(rstate->ht_mode));
+    if ((rstate->ht_mode_exists = util_radio_ht_mode_get(phy, htmode, sizeof(htmode))))
+        STRSCPY(rstate->ht_mode, htmode);
 
-    if ((rstate->country_exists = util_radio_country_get(device_phy_ifname, country, sizeof(country))))
-        strlcpy(rstate->country, country, sizeof(rstate->country));
+    if ((rstate->country_exists = util_radio_country_get(phy, country, sizeof(country))))
+        STRSCPY(rstate->country, country);
 
-    strncpy(rstate->if_name, cloud_phy_ifname, sizeof(rstate->if_name) - 1);
-    strncpy(rstate->hw_type, hw_type, sizeof(rstate->hw_type) - 1);
-    strncpy(rstate->hw_mode, hw_mode, sizeof(rstate->hw_mode) - 1);
-    strncpy(rstate->freq_band, freq_band, sizeof(rstate->freq_band) - 1);
+    STRSCPY(rstate->if_name, phy);
+    STRSCPY(rstate->hw_type, hw_type);
+    STRSCPY(rstate->hw_mode, hw_mode);
+    STRSCPY(rstate->freq_band, freq_band);
 
     rstate->if_name_exists = true;
     rstate->hw_type_exists = true;
@@ -4597,14 +3250,14 @@ bool target_radio_state_get(char *cloud_phy_ifname, struct schema_Wifi_Radio_Sta
 
     n = 0;
 
-    if (util_iwpriv_get_int(device_phy_ifname, "getCountryID", &v)) {
-        snprintf(rstate->hw_params_keys[n], sizeof(rstate->hw_params_keys[n]), "country_id");
+    if (util_iwpriv_get_int(phy, "getCountryID", &v)) {
+        STRSCPY(rstate->hw_params_keys[n], "country_id");
         snprintf(rstate->hw_params[n], sizeof(rstate->hw_params[n]), "%d", v);
         n++;
     }
 
-    if (util_iwpriv_get_int(device_phy_ifname, "getRegdomain", &v)) {
-        snprintf(rstate->hw_params_keys[n], sizeof(rstate->hw_params_keys[n]), "reg_domain");
+    if (util_iwpriv_get_int(phy, "getRegdomain", &v)) {
+        STRSCPY(rstate->hw_params_keys[n], "reg_domain");
         snprintf(rstate->hw_params[n], sizeof(rstate->hw_params[n]), "%d", v);
         n++;
     }
@@ -4613,11 +3266,11 @@ bool target_radio_state_get(char *cloud_phy_ifname, struct schema_Wifi_Radio_Sta
 
     n = 0;
 
-    if ((kv = util_kv_get(F("%s.cwm_extbusythres", cloud_phy_ifname)))) {
+    if ((kv = util_kv_get(F("%s.cwm_extbusythres", phy)))) {
         if ((dirp = opendir("/sys/class/net"))) {
             extbusythres = -1;
             for (d = readdir(dirp); d; d = readdir(dirp)) {
-                if (util_wifi_is_phy_vif_match(device_phy_ifname, d->d_name)) {
+                if (util_wifi_is_phy_vif_match(phy, d->d_name)) {
                     if (!util_iwpriv_get_int(d->d_name, "g_extbusythres", &v))
                         continue;
                     if (extbusythres == -1)
@@ -4631,18 +3284,18 @@ bool target_radio_state_get(char *cloud_phy_ifname, struct schema_Wifi_Radio_Sta
             closedir(dirp);
 
             if (extbusythres > -1) {
-                snprintf(rstate->hw_config_keys[n], sizeof(rstate->hw_config_keys[n]), "cwm_extbusythres");
+                STRSCPY(rstate->hw_config_keys[n], "cwm_extbusythres");
                 snprintf(rstate->hw_config[n], sizeof(rstate->hw_config[n]), "%d", extbusythres);
                 n++;
             }
         }
     }
 
-    if ((kv = util_kv_get(F("%s.dfs_usenol", cloud_phy_ifname)))) {
+    if ((kv = util_kv_get(F("%s.dfs_usenol", phy)))) {
         WARN(-1 == util_exec_read(rtrimws, buf, sizeof(buf),
-                                  "radartool", "-i", device_phy_ifname),
+                                  "radartool", "-i", phy),
              "%s: failed to read radartool status: %d (%s)",
-             device_phy_ifname, errno, strerror(errno));
+             phy, errno, strerror(errno));
 
         if (strstr(buf, "No Channel Switch announcement"))
             v = 2;
@@ -4654,39 +3307,39 @@ bool target_radio_state_get(char *cloud_phy_ifname, struct schema_Wifi_Radio_Sta
             v = -1;
 
         if (v >= 0) {
-            snprintf(rstate->hw_config_keys[n], sizeof(rstate->hw_config_keys[n]), "dfs_usenol");
+            STRSCPY(rstate->hw_config_keys[n], "dfs_usenol");
             snprintf(rstate->hw_config[n], sizeof(rstate->hw_config[n]), "%d", v);
             n++;
         }
     }
 
-    if ((kv = util_kv_get(F("%s.dfs_enable", cloud_phy_ifname)))) {
-        snprintf(rstate->hw_config_keys[n], sizeof(rstate->hw_config_keys[n]), "dfs_enable");
-        snprintf(rstate->hw_config[n], sizeof(rstate->hw_config[n]), "%s", kv->val);
+    if ((kv = util_kv_get(F("%s.dfs_enable", phy)))) {
+        STRSCPY(rstate->hw_config_keys[n], "dfs_enable");
+        STRSCPY(rstate->hw_config[n], kv->val);
         n++;
     }
 
-    if ((kv = util_kv_get(F("%s.dfs_ignorecac", cloud_phy_ifname)))) {
-        snprintf(rstate->hw_config_keys[n], sizeof(rstate->hw_config_keys[n]), "dfs_ignorecac");
-        snprintf(rstate->hw_config[n], sizeof(rstate->hw_config[n]), "%s", kv->val);
+    if ((kv = util_kv_get(F("%s.dfs_ignorecac", phy)))) {
+        STRSCPY(rstate->hw_config_keys[n], "dfs_ignorecac");
+        STRSCPY(rstate->hw_config[n], kv->val);
         n++;
     }
 
     rstate->hw_config_len = n;
 
-    if (strlen(device_vif_ifname) > 0 &&
-        (rstate->thermal_shutdown_exists = util_iwpriv_get_int(device_vif_ifname,
+    if (strlen(vif) > 0 &&
+        (rstate->thermal_shutdown_exists = util_iwpriv_get_int(vif,
                                                                "get_therm_shut",
                                                                &v)
                                            && v >= 0)) {
         rstate->thermal_shutdown = v;
     }
 
-    type = util_thermal_get_iwpriv_names(device_phy_ifname);
-    if ((rstate->tx_chainmask_exists = util_iwpriv_get_int(device_phy_ifname, type[0], &v) && v > 0))
+    type = util_thermal_get_iwpriv_names(phy);
+    if ((rstate->tx_chainmask_exists = util_iwpriv_get_int(phy, type[0], &v) && v > 0))
         rstate->tx_chainmask = v;
 
-    t = util_thermal_lookup(cloud_phy_ifname);
+    t = util_thermal_lookup(phy);
 
     if ((rstate->thermal_downgrade_temp_exists = t && t->period_sec > 0))
         rstate->thermal_downgrade_temp = t->temp_downgrade;
@@ -4700,9 +3353,19 @@ bool target_radio_state_get(char *cloud_phy_ifname, struct schema_Wifi_Radio_Sta
     if ((rstate->thermal_downgraded_exists = t && t->period_sec > 0))
         rstate->thermal_downgraded = util_thermal_phy_is_downgraded(t);
 
-    util_radio_channel_list_get(cloud_phy_ifname, rstate);
-    util_radio_fallback_parents_get(cloud_phy_ifname, rstate);
-    util_kv_radar_get(cloud_phy_ifname, rstate);
+    if ((rstate->tx_power = util_iwconfig_get_tx_power(phy)) > 0)
+        rstate->tx_power_exists = true;
+
+    if ((kv = util_kv_get(F("%s.zero_wait_dfs", phy))) && strlen(kv->val)) {
+        if (!strcmp(kv->val, "precac") && util_iwpriv_get_int(phy, "get_preCACEn", &v) && v == 1)
+            SCHEMA_SET_STR(rstate->zero_wait_dfs, kv->val);
+        if (!strcmp(kv->val, "disable"))
+            SCHEMA_SET_STR(rstate->zero_wait_dfs, kv->val);
+    }
+
+    util_radio_channel_list_get(phy, rstate);
+    util_radio_fallback_parents_get(phy, rstate);
+    util_kv_radar_get(phy, rstate);
 
     return true;
 }
@@ -4711,51 +3374,47 @@ void
 util_hw_config_set(const struct schema_Wifi_Radio_Config *rconf)
 {
     const struct dirent *d;
-    const char *cphy;
-    const char *dphy;
+    const char *phy = rconf->if_name;
     const char *p;
     DIR *dir;
-
-    cphy = rconf->if_name;
-    dphy = target_ifname_cloud2device((char *)cphy); // FIXME
 
     if (strlen(p = SCHEMA_KEY_VAL(rconf->hw_config, "cwm_extbusythres")) > 0)
         if ((dir = opendir("/sys/class/net"))) {
             for (d = readdir(dir); d; d = readdir(dir))
-                if (util_wifi_is_phy_vif_match(dphy, d->d_name))
+                if (util_wifi_is_phy_vif_match(phy, d->d_name))
                     WARN(-1 == util_iwpriv_set_int_lazy(d->d_name,
                                                         "g_extbusythres",
                                                         "extbusythres",
                                                         atoi(p)),
                          "%s@%s: failed to set '%s' = %d: %d (%s)",
-                         d->d_name, dphy, "cwm_extbusythres", atoi(p), errno, strerror(errno));
+                         d->d_name, phy, "cwm_extbusythres", atoi(p), errno, strerror(errno));
             closedir(dir);
     }
-    util_kv_set(F("%s.cwm_extbusythres", cphy), strlen(p) ? p : NULL);
+    util_kv_set(F("%s.cwm_extbusythres", phy), strlen(p) ? p : NULL);
 
     if (strlen(p = SCHEMA_KEY_VAL(rconf->hw_config, "dfs_usenol")) > 0) {
-        LOGI("%s: setting '%s' = '%s'", dphy, "dfs_usenol", p);
-        WARN(0 != E("radartool", "-i", dphy, "usenol", p),
+        LOGI("%s: setting '%s' = '%s'", phy, "dfs_usenol", p);
+        WARN(0 != E("radartool", "-i", phy, "usenol", p),
              "%s: failed to set radartool '%s': %d (%s)",
-             dphy, "dfs_usenol", errno, strerror(errno));
+             phy, "dfs_usenol", errno, strerror(errno));
     }
-    util_kv_set(F("%s.dfs_usenol", cphy), strlen(p) ? p : NULL);
+    util_kv_set(F("%s.dfs_usenol", phy), strlen(p) ? p : NULL);
 
     if (strlen(p = SCHEMA_KEY_VAL(rconf->hw_config, "dfs_enable")) > 0) {
-        LOGI("%s: setting '%s' = '%s'", dphy, "dfs_enable", p);
-        WARN(0 != E("radartool", "-i", dphy, "enable", p),
+        LOGI("%s: setting '%s' = '%s'", phy, "dfs_enable", p);
+        WARN(0 != E("radartool", "-i", phy, "enable", p),
              "%s: failed to set radartool '%s': %d (%s)",
-             dphy, "dfs_enable", errno, strerror(errno));
+             phy, "dfs_enable", errno, strerror(errno));
     }
-    util_kv_set(F("%s.dfs_enable", cphy), strlen(p) ? p : NULL);
+    util_kv_set(F("%s.dfs_enable", phy), strlen(p) ? p : NULL);
 
     if (strlen(p = SCHEMA_KEY_VAL(rconf->hw_config, "dfs_ignorecac")) > 0) {
-        LOGI("%s: setting '%s' = '%s'", dphy, "dfs_ignorecac", p);
-        WARN(0 != E("radartool", "-i", dphy, "ignorecac", p),
+        LOGI("%s: setting '%s' = '%s'", phy, "dfs_ignorecac", p);
+        WARN(0 != E("radartool", "-i", phy, "ignorecac", p),
              "%s: failed to set radartool '%s': %d (%s)",
-             dphy, "dfs_ignorecac", errno, strerror(errno));
+             phy, "dfs_ignorecac", errno, strerror(errno));
     }
-    util_kv_set(F("%s.dfs_ignorecac", cphy), strlen(p) ? p : NULL);
+    util_kv_set(F("%s.dfs_ignorecac", phy), strlen(p) ? p : NULL);
 }
 
 static bool
@@ -4776,39 +3435,39 @@ bool
 target_radio_config_set2(const struct schema_Wifi_Radio_Config *rconf,
                          const struct schema_Wifi_Radio_Config_flags *changed)
 {
-    const char *cphy;
-    const char *dphy;
-    char *dvif;
-
-    cphy = rconf->if_name;
-    dphy = target_ifname_cloud2device((char *)cphy); // FIXME
+    const char *phy = rconf->if_name;
+    const char *vif;
 
     if ((changed->channel || changed->ht_mode)) {
         if (rconf->channel_exists && rconf->channel > 0 && rconf->ht_mode_exists) {
-            if ((dvif = util_iwconfig_any_phy_vif_type(dphy, "ap", A(32)))) {
-                LOGI("%s: starting csa to %d @ %s", dphy, rconf->channel, rconf->ht_mode);
-                if (util_csa_start(dphy, dvif, rconf->hw_mode, rconf->freq_band, rconf->ht_mode, rconf->channel))
-                    LOGW("%s: failed to start csa: %d (%s)", dphy, errno, strerror(errno));
-                else if (util_radio_config_only_channel_changed(changed))
-                    return true;
-            } else {
+            if ((vif = util_iwconfig_any_phy_vif_type(phy, "ap", A(32)))) {
+                if (util_radio_bgcac_active(phy, rconf->channel, rconf->ht_mode)) {
+                    LOGI("%s: background CAC active %d @ %s postpone channel change", phy, rconf->channel, rconf->ht_mode);
+                } else {
+                    LOGI("%s: starting csa to %d @ %s", phy, rconf->channel, rconf->ht_mode);
+                    if (util_csa_start(phy, vif, rconf->hw_mode, rconf->freq_band, rconf->ht_mode, rconf->channel))
+                        LOGW("%s: failed to start csa: %d (%s)", phy, errno, strerror(errno));
+                    else if (util_radio_config_only_channel_changed(changed))
+                        return true;
+                }
+             } else {
                 LOGI("%s: no ap vaps, channel %d will be set on first vap if possible",
-                     dphy, rconf->channel);
+                     phy, rconf->channel);
             }
         }
     }
 
-    if ((dvif = util_iwconfig_any_phy_vif_type(dphy, NULL, A(32)))) {
+    if ((vif = util_iwconfig_any_phy_vif_type(phy, NULL, A(32)))) {
         if (changed->thermal_shutdown) {
-            if (-1 == util_iwpriv_set_int_lazy(dvif, "get_therm_shut", "therm_shutdown", rconf->thermal_shutdown))
+            if (-1 == util_iwpriv_set_int_lazy(vif, "get_therm_shut", "therm_shutdown", rconf->thermal_shutdown))
                 LOGW("%s: failed to set thermal_shutdown to %d: %d (%s)",
-                     dvif, rconf->thermal_shutdown, errno, strerror(errno));
+                     vif, rconf->thermal_shutdown, errno, strerror(errno));
         }
 
         if (changed->bcn_int) {
-            if (-1 == util_iwpriv_set_int_lazy(dvif, "get_bintval", "bintval", rconf->bcn_int))
+            if (-1 == util_iwpriv_set_int_lazy(vif, "get_bintval", "bintval", rconf->bcn_int))
                 LOGW("%s: failed to set bcn_int to %d: %d (%s)",
-                     dvif, rconf->bcn_int, errno, strerror(errno));
+                     vif, rconf->bcn_int, errno, strerror(errno));
         }
     }
 
@@ -4822,11 +3481,29 @@ target_radio_config_set2(const struct schema_Wifi_Radio_Config *rconf,
         util_hw_config_set(rconf);
 
     if (changed->fallback_parents)
-        util_radio_fallback_parents_set(cphy, rconf);
+        util_radio_fallback_parents_set(phy, rconf);
+
+    if (changed->tx_power)
+        util_iwconfig_set_tx_power(phy, rconf->tx_power);
+
+    if (changed->zero_wait_dfs) {
+        if (!strcmp(rconf->zero_wait_dfs, "precac")) {
+            util_iwpriv_set_int_lazy(phy, "get_preCACEn", "preCACEn", 1);
+            util_kv_set(F("%s.zero_wait_dfs", phy), rconf->zero_wait_dfs);
+        } else if (!strcmp(rconf->zero_wait_dfs, "disable")) {
+            util_iwpriv_set_int_lazy(phy, "get_preCACEn", "preCACEn", 0);
+            util_kv_set(F("%s.zero_wait_dfs", phy), rconf->zero_wait_dfs);
+        } else {
+            /* Today we don't support enable mode */
+            WARN_ON(strcmp(rconf->zero_wait_dfs, "enable") == 0);
+            util_iwpriv_set_int_lazy(phy, "get_preCACEn", "preCACEn", 0);
+            util_kv_set(F("%s.zero_wait_dfs", phy), NULL);
+        }
+    }
 
     util_thermal_sys_recalc_tx_chainmask();
-    util_cb_phy_state_update(cphy);
-    util_cb_delayed_update(UTIL_CB_PHY, cphy);
+    util_cb_phy_state_update(phy);
+    util_cb_delayed_update(UTIL_CB_PHY, phy);
 
     return true;
 }
@@ -4839,9 +3516,9 @@ static bool
 util_vif_mac_list_int2str(int i, char *str, int len)
 {
     switch (i) {
-        case 0: return snprintf(str, len, "none") > 0;
-        case 1: return snprintf(str, len, "whitelist") > 0;
-        case 2: return snprintf(str, len, "blacklist") > 0;
+        case 0: return strscpy(str, "none", len) > 0;
+        case 1: return strscpy(str, "whitelist", len) > 0;
+        case 2: return strscpy(str, "blacklist", len) > 0;
     }
     return 0;
 }
@@ -4853,28 +3530,6 @@ util_vif_mac_list_str2int(const char *str, int *i)
     if (!strcmp(str, "whitelist")) { *i = 1; return true; }
     if (!strcmp(str, "blacklist")) { *i = 2; return true; }
     return false;
-}
-
-static int
-util_vif_exec_scripts(const char *device_vif_ifname)
-{
-    int err;
-
-    /* FIXME: target_scripts_dir() points to something
-     *        different than on WM1. This needs to be
-     *        killed fast!
-     */
-    LOGI("%s: running hook scripts", device_vif_ifname);
-    err = runcmd("{ cd %s/wm.d 2>/dev/null || cd %s/../scripts/wm.d 2>/dev/null; } && for i in *.sh; do sh $i %s; done; exit 0",
-                 target_bin_dir(),
-                 target_bin_dir(),
-                 device_vif_ifname);
-    if (err) {
-        LOGW("%s: failed to run command", device_vif_ifname);
-        return err;
-    }
-
-    return 0;
 }
 
 static char *
@@ -4891,81 +3546,6 @@ util_vif_get_vconf_maclist(const struct schema_Wifi_VIF_Config *vconf,
     if (strlen(buf) == len - 1)
         LOGW("%s: mac list truncated", vconf->if_name);
     return buf;
-}
-
-static int
-util_vif_sta_update(const char *device_phy_ifname,
-                    const char *device_vif_ifname,
-                    struct schema_Wifi_VIF_State *vstate)
-{
-    char state[64];
-    char bssid[64];
-    char ssid[64];
-    char psk[128];
-    char id[64];
-    int err;
-    int n;
-
-    err = util_wpas_get_status(device_phy_ifname,
-                               device_vif_ifname,
-                               bssid, sizeof(bssid),
-                               ssid, sizeof(ssid),
-                               id, sizeof(id),
-                               state, sizeof(state));
-    if (err) {
-        LOGW("%s: failed to get wpas status: %d (%s)",
-             device_vif_ifname, errno, strerror(errno));
-        return -1;
-    }
-
-    LOGT("%s: status bssid='%s' ssid='%s' id='%s' state='%s'",
-         device_vif_ifname, bssid, ssid, id, state);
-
-    if (strlen(state) == 0 || strcmp(state, "COMPLETED")) {
-        LOGT("%s: sta update skipped because not connected yet",
-             device_vif_ifname);
-        return 0;
-    }
-
-    if (strlen(bssid) == 0)
-        LOGW("%s: sta bssid is empty", device_vif_ifname);
-
-    if (strlen(ssid) == 0)
-        LOGW("%s: sta ssid is empty", device_vif_ifname);
-
-    if (strlen(id) == 0)
-        LOGW("%s: sta id is empty", device_vif_ifname);
-
-    err = util_wpas_get_psk(device_phy_ifname,
-                            device_vif_ifname,
-                            atoi(id),
-                            psk,
-                            sizeof(psk));
-    if (err) {
-        LOGW("%s: failed to get wpas psk: %d (%s)",
-             device_vif_ifname, errno, strerror(errno));
-        return 0;
-    }
-
-    if ((vstate->ssid_exists = (strlen(ssid) > 0)))
-        snprintf(vstate->ssid, sizeof(vstate->ssid), "%s", ssid);
-
-    if ((vstate->parent_exists = (strlen(bssid) > 0)))
-        snprintf(vstate->parent, sizeof(vstate->parent), "%s", bssid);
-
-    n = 0;
-
-    snprintf(vstate->security_keys[n], sizeof(vstate->security_keys[n]), "encryption");
-    snprintf(vstate->security[n], sizeof(vstate->security_keys[n]), "WPA-PSK");
-    n++;
-
-    snprintf(vstate->security_keys[n], sizeof(vstate->security_keys[n]), "key");
-    snprintf(vstate->security[n], sizeof(vstate->security_keys[n]), "%s", psk);
-    n++;
-
-    vstate->security_len = n;
-
-    return 0;
 }
 
 struct vif_ratepair {
@@ -5002,13 +3582,13 @@ static const struct vif_ratepair g_util_vif_11a_rates[] = {
 };
 
 static bool
-util_vif_ratepair_is_set(const char *dvif, const struct vif_ratepair *r)
+util_vif_ratepair_is_set(const char *vif, const struct vif_ratepair *r)
 {
     int i;
     int v;
 
     for (i = 0; r[i].get; i++) {
-        if (!util_iwpriv_get_int(dvif, r[i].get, &v))
+        if (!util_iwpriv_get_int(vif, r[i].get, &v))
             return false;
         if (v != r[i].value)
             return false;
@@ -5018,23 +3598,24 @@ util_vif_ratepair_is_set(const char *dvif, const struct vif_ratepair *r)
 }
 
 static void
-util_vif_ratepair_war(const char *dvif)
+util_vif_ratepair_war(const char *vif)
 {
+    struct hapd *hapd = hapd_lookup(vif);
     char opmode[32];
-    char dphy[32];
+    char phy[32];
     char *p;
     int err;
 
-    if (!util_iwconfig_get_opmode(dvif, opmode, sizeof(opmode)))
+    if (!util_iwconfig_get_opmode(vif, opmode, sizeof(opmode)))
         return;
     if (strcmp(opmode, "ap"))
         return;
-    if (util_wifi_get_parent(dvif, dphy, sizeof(dphy)))
+    if (util_wifi_get_parent(vif, phy, sizeof(phy)))
         return;
-    if (util_userspace_is_running(dphy, dvif, "ap"))
+    if (hapd && hapd->ctrl.wpa)
         return;
 
-    LOGI("%s: forcing phy mode update", dvif);
+    LOGI("%s: forcing phy mode update", vif);
     p = F("i=%s ; "
           "a=$(iwpriv $i get_maccmd | cut -d: -f2) ;"
           "b=$(iwpriv $i get_hide_ssid | cut -d: -f2) ;"
@@ -5046,30 +3627,30 @@ util_vif_ratepair_war(const char *dvif)
           "iwpriv $i maccmd $a ;"
           "iwpriv $i hide_ssid $b ;"
           "",
-          dvif);
+          vif);
     if ((err = system(p)))
-        LOGW("%s: failed to apply min_hw_mode workaround: %d", dvif, err);
+        LOGW("%s: failed to apply min_hw_mode workaround: %d", vif, err);
 }
 
 static bool
-util_vif_ratepair_set(const char *dvif, const struct vif_ratepair *r)
+util_vif_ratepair_set(const char *vif, const struct vif_ratepair *r)
 {
     int i;
 
-    util_vif_ratepair_war(dvif);
+    util_vif_ratepair_war(vif);
 
     for (i = 0; r[i].get; i++)
-        if (util_iwpriv_set_int_lazy(dvif, r[i].get, r[i].set, r[i].value))
+        if (util_iwpriv_set_int_lazy(vif, r[i].get, r[i].set, r[i].value))
             LOGW("%s: failed to set '%s' = %d: %d (%s)",
-                 dvif, r[i].set, r[i].value, errno, strerror(errno));
+                 vif, r[i].set, r[i].value, errno, strerror(errno));
 
-    return util_vif_ratepair_is_set(dvif, r);
+    return util_vif_ratepair_is_set(vif, r);
 }
 
 static const char *
-util_vif_min_hw_mode_get(const char *dvif)
+util_vif_min_hw_mode_get(const char *vif)
 {
-    char dphy[32];
+    char phy[32];
     int pure11ac;
     int pure11n;
     int pure11g;
@@ -5078,55 +3659,54 @@ util_vif_min_hw_mode_get(const char *dvif)
     int rate11b = 0;
     int is2ghz;
 
-    if (util_wifi_get_parent(dvif, dphy, sizeof(dphy)))
+    if (util_wifi_get_parent(vif, phy, sizeof(phy)))
         return NULL;
 
-    if (!util_iwpriv_get_int(dvif, "get_pureg", &pure11g))
-        LOGW("%s: failed to get pureg: %d (%s)", dvif, errno, strerror(errno));
-    if (!util_iwpriv_get_int(dvif, "get_puren", &pure11n))
-        LOGW("%s: failed to get puren: %d (%s)", dvif, errno, strerror(errno));
-    if (!util_iwpriv_get_int(dvif, "get_pure11ac", &pure11ac))
-        LOGW("%s: failed to get pure11ac: %d (%s)", dvif, errno, strerror(errno));
+    if (!util_iwpriv_get_int(vif, "get_pureg", &pure11g))
+        LOGW("%s: failed to get pureg: %d (%s)", vif, errno, strerror(errno));
+    if (!util_iwpriv_get_int(vif, "get_puren", &pure11n))
+        LOGW("%s: failed to get puren: %d (%s)", vif, errno, strerror(errno));
+    if (!util_iwpriv_get_int(vif, "get_pure11ac", &pure11ac))
+        LOGW("%s: failed to get pure11ac: %d (%s)", vif, errno, strerror(errno));
 
-    if ((is2ghz = util_wifi_phy_is_2ghz(dphy))) {
-        if ((rate11a = util_vif_ratepair_is_set(dvif, g_util_vif_11g_rates))) {
+    if ((is2ghz = util_wifi_phy_is_2ghz(phy))) {
+        if ((rate11g = util_vif_ratepair_is_set(vif, g_util_vif_11g_rates))) {
             if (pure11n)
                 return "11n";
             if (pure11g)
                 return "11g";
         }
-        if ((rate11b = util_vif_ratepair_is_set(dvif, g_util_vif_11b_rates))) {
+        if ((rate11b = util_vif_ratepair_is_set(vif, g_util_vif_11b_rates))) {
             if (!pure11ac && !pure11n && !pure11g)
                 return "11b";
         }
     } else {
-        if ((rate11g = util_vif_ratepair_is_set(dvif, g_util_vif_11a_rates))) {
+        if ((rate11a = util_vif_ratepair_is_set(vif, g_util_vif_11a_rates))) {
             if (pure11ac)
                 return "11ac";
             if (pure11n)
                 return "11n";
-            if (pure11g)
-                return "11a";
+            return "11a";
         }
     }
 
     LOGW("%s: is running in unexpected min_hw_mode:"
-         " is2ghz=%d 11ac=%d 11n=%d 11g=%d rate11g=%d rate11a=%d rate11b=%d",
-         dvif, is2ghz, pure11ac, pure11n, pure11g, rate11g, rate11a, rate11b);
+         " is2ghz=%d pure11ac=%d pure11n=%d pure11g=%d rate11g=%d rate11a=%d rate11b=%d",
+         vif, is2ghz, pure11ac, pure11n, pure11g, rate11g, rate11a, rate11b);
     return NULL;
 }
 
 static void
-util_vif_min_hw_mode_set(const char *dvif, const char *mode)
+util_vif_min_hw_mode_set(const char *vif, const char *mode)
 {
-    char dphy[32];
+    char phy[32];
     int pure11ac;
     int pure11n;
     int pure11g;
 
-    LOGI("%s: setting min hw mode to %s", dvif, mode);
+    LOGI("%s: setting min hw mode to %s", vif, mode);
 
-    if (util_wifi_get_parent(dvif, dphy, sizeof(dphy)))
+    if (util_wifi_get_parent(vif, phy, sizeof(phy)))
         return;
 
     pure11ac = !strcmp(mode, "11ac");
@@ -5134,29 +3714,29 @@ util_vif_min_hw_mode_set(const char *dvif, const char *mode)
     pure11g = !strcmp(mode, "11g") || !strcmp(mode, "11a");
 
     if (strcmp(mode, "11b")) {
-        if (util_wifi_phy_is_2ghz(dphy)) {
-            if (!util_vif_ratepair_set(dvif, g_util_vif_11g_rates))
-                LOGW("%s: failed to enable 11g rates: %d (%s)", dvif, errno, strerror(errno));
+        if (util_wifi_phy_is_2ghz(phy)) {
+            if (!util_vif_ratepair_set(vif, g_util_vif_11g_rates))
+                LOGW("%s: failed to enable 11g rates: %d (%s)", vif, errno, strerror(errno));
         } else {
-            if (!util_vif_ratepair_set(dvif, g_util_vif_11a_rates))
-                LOGW("%s: failed to enable 11a rates: %d (%s)", dvif, errno, strerror(errno));
+            if (!util_vif_ratepair_set(vif, g_util_vif_11a_rates))
+                LOGW("%s: failed to enable 11a rates: %d (%s)", vif, errno, strerror(errno));
         }
     }
 
-    if (util_iwpriv_set_int_lazy(dvif, "get_pure11ac", "pure11ac", pure11ac))
-        LOGW("%s: failed to set pure11ac: %d (%s)", dvif, errno, strerror(errno));
-    if (util_iwpriv_set_int_lazy(dvif, "get_puren", "puren", pure11n))
-        LOGW("%s: failed to set pure11n: %d (%s)", dvif, errno, strerror(errno));
-    if (util_iwpriv_set_int_lazy(dvif, "get_pureg", "pureg", pure11g))
-        LOGW("%s: failed to set pure11g: %d (%s)", dvif, errno, strerror(errno));
+    if (util_iwpriv_set_int_lazy(vif, "get_pure11ac", "pure11ac", pure11ac))
+        LOGW("%s: failed to set pure11ac: %d (%s)", vif, errno, strerror(errno));
+    if (util_iwpriv_set_int_lazy(vif, "get_puren", "puren", pure11n))
+        LOGW("%s: failed to set pure11n: %d (%s)", vif, errno, strerror(errno));
+    if (util_iwpriv_set_int_lazy(vif, "get_pureg", "pureg", pure11g))
+        LOGW("%s: failed to set pure11g: %d (%s)", vif, errno, strerror(errno));
 
     if (!strcmp(mode, "11b"))
-        if (!util_vif_ratepair_set(dvif, g_util_vif_11b_rates))
-            LOGW("%s: failed to enable 11b rates: %d (%s)", dvif, errno, strerror(errno));
+        if (!util_vif_ratepair_set(vif, g_util_vif_11b_rates))
+            LOGW("%s: failed to enable 11b rates: %d (%s)", vif, errno, strerror(errno));
 }
 
 static void
-util_vif_config_athnewind(const char *dphy)
+util_vif_config_athnewind(const char *phy)
 {
     char opmode[32];
     char vifs[512];
@@ -5164,7 +3744,7 @@ util_vif_config_athnewind(const char *dphy)
     char *p;
     int n = 0;
     int v = 0;
-    if (util_wifi_get_phy_vifs(dphy, vifs, sizeof(vifs)))
+    if (util_wifi_get_phy_vifs(phy, vifs, sizeof(vifs)))
         return;
     p = vifs;
     while ((vif = strsep(&p, " ")) && ++n)
@@ -5177,10 +3757,11 @@ util_vif_config_athnewind(const char *dphy)
 }
 
 static void
-util_vif_acl_enforce(const char *dphy,
-                     const char *dvif,
+util_vif_acl_enforce(const char *phy,
+                     const char *vif,
                      const struct schema_Wifi_VIF_Config *vconf)
 {
+    struct hapd *hapd = hapd_lookup(vif);
     char *line;
     char *buf;
     char *mac;
@@ -5193,7 +3774,7 @@ util_vif_acl_enforce(const char *dphy,
      * longer part of the ACL.
      */
 
-    if (WARN_ON(!(buf = strexa("wlanconfig", dvif, "list", "sta"))))
+    if (WARN_ON(!(buf = strexa("wlanconfig", vif, "list", "sta"))))
         return;
 
     /* Output is:
@@ -5218,7 +3799,7 @@ util_vif_acl_enforce(const char *dphy,
             break;
         }
         else {
-            LOGW("%s: unknown mac list type '%s'", dvif, vconf->mac_list_type);
+            LOGW("%s: unknown mac list type '%s'", vif, vconf->mac_list_type);
             return;
         }
 
@@ -5226,13 +3807,13 @@ util_vif_acl_enforce(const char *dphy,
             if (!strcasecmp(vconf->mac_list[i], mac))
                 allowed = on_match;
 
-        LOGI("%s: station '%s' is allowed=%d", dvif, mac, allowed);
+        LOGI("%s: station '%s' is allowed=%d", vif, mac, allowed);
         if (allowed)
             continue;
 
-        LOGI("%s: deauthing '%s' because it's no longer allowed by acl", dvif, mac);
-        if (!strexa(CMD_HOSTAP(dphy, dvif, "deauth", mac)))
-            LOGW("%s: failed to deauth '%s': %d (%s)", dvif, mac, errno, strerror(errno));
+        LOGI("%s: deauthing '%s' because it's no longer allowed by acl", vif, mac);
+        if (!hapd || !hapd_sta_deauth(hapd, mac))
+            LOGW("%s: failed to deauth '%s': %d (%s)", vif, mac, errno, strerror(errno));
     }
 }
 
@@ -5247,128 +3828,118 @@ target_vif_config_set2(const struct schema_Wifi_VIF_Config *vconf,
                        const struct schema_Wifi_VIF_Config_flags *changed,
                        int num_cconfs)
 {
-    const char *cvif;
-    const char *dvif;
-    const char *cphy;
-    const char *dphy;
+    const char *phy = rconf->if_name;
+    const char *vif = vconf->if_name;
     const char *p;
-    char sockpath[128];
     char macaddr[6];
     char mode[32];
-    int reload_psk;
-    int reload;
     int v;
-
-    reload = 0;
-    reload_psk = 0;
-    cvif = vconf->if_name;
-    dvif = target_ifname_cloud2device((char *)cvif); // FIXME
-    cphy = rconf->if_name;
-    dphy = target_ifname_cloud2device((char *)cphy); // FIXME
 
     if (!rconf ||
         changed->enabled ||
         changed->mode ||
         changed->vif_radio_idx) {
-        util_userspace_stop(dphy, dvif, cvif);
+        qca_ctrl_destroy(vif);
 
-        if (access(F("/sys/class/net/%s", dvif), X_OK) == 0) {
-            LOGI("%s: deleting netdev", dvif);
-            if (E("wlanconfig", dvif, "destroy"))
-                LOGW("%s: failed to destroy: %d (%s)", dvif, errno, strerror(errno));
-            util_vif_config_athnewind(dphy);
+        if (access(F("/sys/class/net/%s", vif), X_OK) == 0) {
+            LOGI("%s: deleting netdev", vif);
+            if (E("wlanconfig", vif, "destroy"))
+                LOGW("%s: failed to destroy: %d (%s)", vif, errno, strerror(errno));
+            util_vif_config_athnewind(phy);
         }
 
         if (!rconf || !vconf->enabled)
             goto done;
 
-        if (util_wifi_gen_macaddr(dphy, macaddr, vconf->vif_radio_idx)) {
-            LOGW("%s: failed to generate mac address: %d (%s)", dvif, errno, strerror(errno));
+        if (util_wifi_gen_macaddr(phy, macaddr, vconf->vif_radio_idx)) {
+            LOGW("%s: failed to generate mac address: %d (%s)", vif, errno, strerror(errno));
             return false;
         }
 
         LOGI("%s: creating netdev with mac %02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx on channel %d",
-             dvif,
+             vif,
              macaddr[0], macaddr[1], macaddr[2],
              macaddr[3], macaddr[4], macaddr[5],
              rconf->channel_exists ? rconf->channel : 0);
 
-        if (E("wlanconfig", dvif, "create", "wlandev", dphy, "wlanmode", vconf->mode,
+        if (E("wlanconfig", vif, "create", "wlandev", phy, "wlanmode", vconf->mode,
               "-bssid", F("%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx",
                           macaddr[0], macaddr[1], macaddr[2], macaddr[3], macaddr[4], macaddr[5]),
               "vapid", F("%d", vconf->vif_radio_idx))) {
-            LOGW("%s: failed to create vif: %d (%s)", dvif, errno, strerror(errno));
+            LOGW("%s: failed to create vif: %d (%s)", vif, errno, strerror(errno));
             return false;
         }
 
-        if (!strcmp("ap", vconf->mode)) {
-            LOGI("%s: setting channel %d", dvif, rconf->channel);
-            if (E("iwconfig", dvif, "channel", F("%d", rconf->channel)))
-                LOGW("%s: failed to set channel %d: %d (%s)",
-                     dvif, rconf->channel, errno, strerror(errno));
+        qca_ctrl_discover(vif);
 
-            if (strstr(rconf->freq_band, "5G") && util_iwpriv_get_int(dvif, "get_dfsdomain", &v) && v == 0) {
-                LOGI("%s: we need to restore dfs domain", dphy);
-                WARN_ON(util_exec_simple("iwpriv", dphy, "setCountry"));
-                if (!util_iwpriv_get_int(dvif, "get_dfsdomain", &v) || v == 0) {
-                    LOGW("%s: dfs domain restore failed", dphy);
+        if (!strcmp("ap", vconf->mode)) {
+            LOGI("%s: setting channel %d", vif, rconf->channel);
+            if (E("iwconfig", vif, "channel", F("%d", rconf->channel)))
+                LOGW("%s: failed to set channel %d: %d (%s)",
+                     vif, rconf->channel, errno, strerror(errno));
+
+            if (strstr(rconf->freq_band, "5G") && util_iwpriv_get_int(vif, "get_dfsdomain", &v) && v == 0) {
+                LOGI("%s: we need to restore dfs domain", phy);
+                WARN_ON(util_exec_simple("iwpriv", phy, "setCountry"));
+                if (!util_iwpriv_get_int(vif, "get_dfsdomain", &v) || v == 0) {
+                    LOGW("%s: dfs domain restore failed", phy);
                     return false;
                 }
-                LOGI("%s: dfs domain restored correctly to %d", dphy, v);
+                LOGI("%s: dfs domain restored correctly to %d", phy, v);
             }
         }
 
-        if (strstr(rconf->freq_band, "5G") && util_wifi_get_phy_vifs_cnt(dphy) == 1) {
-            LOGI("%s: we need to restore NOL", dphy);
+        if (strstr(rconf->freq_band, "5G") && util_wifi_get_phy_vifs_cnt(phy) == 1) {
+            LOGI("%s: we need to restore NOL", phy);
             WARN_ON(runcmd("%s/nol.sh restore", target_bin_dir()));
         }
 
-        if (util_policy_get_rts(dphy, rconf->freq_band)) {
-            LOGI("%s: setting rts = %d", dvif, POLICY_RTS_THR);
-            if (E("iwconfig", dvif, "rts", F("%d", POLICY_RTS_THR)))
+        if (util_policy_get_rts(phy, rconf->freq_band)) {
+            LOGI("%s: setting rts = %d", vif, POLICY_RTS_THR);
+            if (E("iwconfig", vif, "rts", F("%d", POLICY_RTS_THR)))
                 LOGW("%s: failed to set rts %d: %d (%s)",
-                     dvif, POLICY_RTS_THR, errno, strerror(errno));
+                     vif, POLICY_RTS_THR, errno, strerror(errno));
         }
 
-        util_iwpriv_set_str_lazy(dvif, "getdbgLVL", "dbgLVL", "0x0");
-        util_iwpriv_set_int_lazy(dvif, "get_powersave", "powersave", 0);
-        util_iwpriv_set_int_lazy(dvif, "get_uapsd", "uapsd", 0);
-        util_iwpriv_set_int_lazy(dvif, "get_shortgi", "shortgi", 1);
-        util_iwpriv_set_int_lazy(dvif, "get_doth", "doth", 1);
-        util_iwpriv_set_int_lazy(dvif, "get_csa2g", "csa2g", 1);
-        util_iwpriv_set_int_lazy(dvif,
+        util_iwpriv_set_str_lazy(vif, "getdbgLVL", "dbgLVL", "0x0");
+        util_iwpriv_set_int_lazy(vif, "get_powersave", "powersave", 0);
+        util_iwpriv_set_int_lazy(vif, "get_uapsd", "uapsd", 0);
+        util_iwpriv_set_int_lazy(vif, "get_shortgi", "shortgi", 1);
+        util_iwpriv_set_int_lazy(vif, "get_doth", "doth", 1);
+        util_iwpriv_set_int_lazy(vif, "get_csa2g", "csa2g", 1);
+        util_iwpriv_set_int_lazy(vif,
                                  "get_cwmenable",
                                  "cwmenable",
-                                 util_policy_get_cwm_enable(dphy));
-        util_iwpriv_set_int_lazy(dvif,
+                                 util_policy_get_cwm_enable(phy));
+        util_iwpriv_set_int_lazy(vif,
                                  "g_disablecoext",
                                  "disablecoext",
-                                 util_policy_get_disable_coext(dphy));
-        util_iwpriv_set_int_lazy(dvif,
+                                 util_policy_get_disable_coext(phy));
+        util_iwpriv_set_int_lazy(vif,
                                  "gcsadeauth",
                                  "scsadeauth",
-                                 util_policy_get_csa_deauth(cvif, rconf->freq_band));
+                                 util_policy_get_csa_deauth(vif, rconf->freq_band));
 
-        if (util_policy_get_csa_interop(cvif)) {
-            util_iwpriv_set_int_lazy(dvif, "gcsainteropphy", "scsainteropphy", 1);
-            util_iwpriv_set_int_lazy(dvif, "gcsainteropauth", "scsainteropauth", 1);
-            util_iwpriv_set_int_lazy(dvif, "gcsainteropaggr", "scsainteropaggr", 1);
+        if (util_policy_get_csa_interop(vif)) {
+            util_iwpriv_set_int_lazy(vif, "gcsainteropphy", "scsainteropphy", 1);
+            util_iwpriv_set_int_lazy(vif, "gcsainteropauth", "scsainteropauth", 1);
+            util_iwpriv_set_int_lazy(vif, "gcsainteropaggr", "scsainteropaggr", 1);
         }
 
         if ((p = SCHEMA_KEY_VAL(rconf->hw_config, "cwm_extbusythres")))
-            util_iwpriv_set_int_lazy(dvif,
+            util_iwpriv_set_int_lazy(vif,
                                      "g_extbusythres",
                                      "extbusythres",
                                      atoi(p));
 
         if (rconf->bcn_int_exists)
-            util_iwpriv_set_int_lazy(dvif,
+            util_iwpriv_set_int_lazy(vif,
                                      "get_bintval",
                                      "bintval",
                                      rconf->bcn_int);
 
         if (rconf->thermal_shutdown_exists)
-            util_iwpriv_set_int_lazy(dvif,
+            util_iwpriv_set_int_lazy(vif,
                                      "get_therm_shut",
                                      "therm_shutdown",
                                      rconf->thermal_shutdown);
@@ -5380,145 +3951,76 @@ target_vif_config_set2(const struct schema_Wifi_VIF_Config *vconf,
                                       rconf->freq_band,
                                       mode,
                                       sizeof(mode)))
-            util_iwpriv_set_str_lazy(dvif, "get_mode", "mode", mode);
+            util_iwpriv_set_str_lazy(vif, "get_mode", "mode", mode);
 
         if (!strcmp(vconf->mode, "ap"))
             if (!vconf->min_hw_mode_exists)
-                if ((p = util_policy_get_min_hw_mode(cvif)))
-                    util_vif_min_hw_mode_set(dvif, p);
+                if ((p = util_policy_get_min_hw_mode(vif)))
+                    util_vif_min_hw_mode_set(vif, p);
     }
 
     if (vconf->ssid_broadcast_exists)
-        util_iwpriv_set_int_lazy(dvif, "get_hide_ssid", "hide_ssid",
+        util_iwpriv_set_int_lazy(vif, "get_hide_ssid", "hide_ssid",
                                  !strcmp("enabled", D(vconf->ssid_broadcast, "enabled")) ? 0 : 1);
 
     if (changed->dynamic_beacon)
-        util_iwpriv_set_int_lazy(dvif, "g_dynamicbeacon", "dynamicbeacon", D(vconf->dynamic_beacon, 0));
+        util_iwpriv_set_int_lazy(vif, "g_dynamicbeacon", "dynamicbeacon", D(vconf->dynamic_beacon, 0));
+
+    if (changed->mcast2ucast)
+        util_iwpriv_set_int_lazy(vif, "g_mcastenhance", "mcastenhance", D(vconf->mcast2ucast, 0) ? 2 : 0);
 
     if (changed->ap_bridge)
-        util_iwpriv_set_int_lazy(dvif, "get_ap_bridge", "ap_bridge", D(vconf->ap_bridge, 0));
+        util_iwpriv_set_int_lazy(vif, "get_ap_bridge", "ap_bridge", D(vconf->ap_bridge, 0));
 
     if (changed->uapsd_enable)
-        util_iwpriv_set_int_lazy(dvif, "get_uapsd", "uapsd", D(vconf->uapsd_enable, 0));
+        util_iwpriv_set_int_lazy(vif, "get_uapsd", "uapsd", D(vconf->uapsd_enable, 0));
 
     if (changed->vif_dbg_lvl)
-        util_iwpriv_set_int_lazy(dvif, "getdbgLVL", "dbgLVL", D(vconf->vif_dbg_lvl, 0));
+        util_iwpriv_set_int_lazy(vif, "getdbgLVL", "dbgLVL", D(vconf->vif_dbg_lvl, 0));
 
     if (changed->rrm)
-        util_iwpriv_set_int_lazy(dvif, "get_rrm", "rrm", D(vconf->rrm, 0));
+        util_iwpriv_set_int_lazy(vif, "get_rrm", "rrm", D(vconf->rrm, 0));
 
-    if (!strcmp(vconf->mode, "ap"))
-        util_hostapd_apply_conf(dphy, dvif, vconf, &reload, &reload_psk);
+    if (rconf->tx_power_exists)
+        WARN_ON(!strexa("iwconfig", vif, "txpower", strfmta("%d", rconf->tx_power)));
 
-    if (!strcmp(vconf->mode, "sta"))
-        reload = util_wpas_apply_conf(dphy, dvif, vconf, cconfs, num_cconfs);
-
-    util_vif_config_athnewind(dphy);
+    util_vif_config_athnewind(phy);
 
     if (changed->mac_list_type)
         if (vconf->mac_list_type_exists && util_vif_mac_list_str2int(vconf->mac_list_type, &v))
-            util_iwpriv_set_int_lazy(dvif, "get_maccmd", "maccmd", v);
+            util_iwpriv_set_int_lazy(vif, "get_maccmd", "maccmd", v);
 
     if (changed->mac_list)
-        util_iwpriv_setmac(dvif, util_vif_get_vconf_maclist(vconf, A(4096)));
+        util_iwpriv_setmac(vif, util_vif_get_vconf_maclist(vconf, A(4096)));
 
     if (changed->mac_list_type || changed->mac_list)
-        util_vif_acl_enforce(dphy, dvif, vconf);
+        util_vif_acl_enforce(phy, vif, vconf);
 
     if (!strcmp(vconf->mode, "ap"))
         if (changed->min_hw_mode)
-            util_vif_min_hw_mode_set(dvif, vconf->min_hw_mode);
+            util_vif_min_hw_mode_set(vif, vconf->min_hw_mode);
 
-    if (!util_userspace_is_running(dphy, dvif, vconf->mode)) {
-        if (util_userspace_start(dphy, dvif, cvif, vconf->mode)) {
-            LOGW("%s: failed to start userspace daemon: %d (%s)",
-                 dvif, errno, strerror(errno));
-            return false;
-        }
+    qca_ctrl_apply(vif, vconf, rconf, cconfs, num_cconfs);
 
-        if (util_vif_exec_scripts(dvif)) {
-            LOGW("%s: failed to execute hook scripts: %d (%s)",
-                 dvif, errno, strerror(errno));
-            return false;
-        }
-
-        if (reload) {
-            LOGD("%s: skipping userspace reload because it was just started "
-                 "and would do nothing but cause delays",
-                 dvif);
-            reload = 0;
-            reload_psk = 0;
-        }
-    }
-
-    if (reload) {
-        if (!util_userspace_is_running(dphy, dvif, vconf->mode)) {
-            LOGW("%s: userspace config changed, but daemon is not running, did it crash?",
-                 dvif);
-            return false;
-        }
-
-        LOGI("%s: userspace config changed, reloading", dvif);
-
-        if (util_userspace_reload(dphy, dvif, cvif, vconf->mode)) {
-            LOGE("%s: failed to re-start userspace: %d (%s)",
-                 dvif, errno, strerror(errno));
-            return false;
-        }
-
-        reload_psk = 0;
-    }
-
-    if (reload_psk) {
-        LOGI("%s: reloading wpa psk file", dvif);
-        if (util_hostapd_reload_pskfile(dphy, dvif)) {
-            LOGW("%s: failed to reload pskfile: %d (%s)",
-                 dvif, errno, strerror(errno));
-            return false;
-        }
-    }
-
-    if (util_userspace_is_running(dphy, dvif, vconf->mode)) {
-        if (!strcmp("ap", vconf->mode))
-            util_hostapd_get_sockpath(dphy, dvif, sockpath, sizeof(sockpath));
-
-        if (!strcmp("sta", vconf->mode))
-            util_wpas_get_sockpath(dphy, dvif, sockpath, sizeof(sockpath));
-
-        if (util_wpa_ctrl_wait_ready(sockpath)) {
-            LOGW("%s: timed out while waiting for userspace socket",
-                    dvif);
-            /* not fatal: this will be retried upon next vif_config_set() */
-        }
-
-        if (!util_wpa_ctrl_listen_lookup(sockpath)) {
-            if (util_wpa_ctrl_listen_start(sockpath, dphy, dvif, cvif)) {
-                LOGW("%s: failed to start wpa ctrl listen: %d (%s)",
-                     dvif, errno, strerror(errno));
-                /* not fatal: this will be retried upon next vif_config_set() */
-            } else if (!strcmp("ap", vconf->mode)) {
-                if (rops.op_flush_clients)
-                    rops.op_flush_clients(cvif);
-                util_clients_sync(dphy, dvif, cvif, true);
-            }
-        }
+    if (changed->wps_pbc || changed->wps || changed->wps_pbc_key_id) {
+        qca_ctrl_wps_session(vif, vconf->wps, vconf->wps_pbc);
+        util_ovsdb_wpa_clear(vconf->if_name);
     }
 
 done:
-    util_cb_vif_state_update(cvif);
-    util_cb_delayed_update(UTIL_CB_PHY, cphy);
+    util_cb_vif_state_update(vif);
+    util_cb_delayed_update(UTIL_CB_PHY, phy);
 
-    LOGI("%s: (re)config complete", dvif);
+    LOGI("%s: (re)config complete", vif);
     return true;
 }
 
-bool target_vif_state_get(char *cloud_vif_ifname, struct schema_Wifi_VIF_State *vstate)
+bool target_vif_state_get(char *vif, struct schema_Wifi_VIF_State *vstate)
 {
+    struct hapd *hapd = hapd_lookup(vif);
+    struct wpas *wpas = wpas_lookup(vif);
     const char *r;
-    char device_phy_ifname[32];
-    char *device_vif_ifname;
-    char sockpath[128];
-    char conf[4096];
+    char phy[32];
     char buf[256];
     char *mac;
     char *p;
@@ -5526,179 +4028,84 @@ bool target_vif_state_get(char *cloud_vif_ifname, struct schema_Wifi_VIF_State *
     int v;
 
     memset(vstate, 0, sizeof(*vstate));
-    memset(conf, 0, sizeof(conf));
-    memset(sockpath, 0, sizeof(sockpath));
 
     schema_Wifi_VIF_State_mark_all_present(vstate);
     vstate->_partial_update = true;
     vstate->associated_clients_present = false;
     vstate->vif_config_present = false;
 
-    device_vif_ifname = target_ifname_cloud2device(cloud_vif_ifname);
-    if (!device_vif_ifname) {
-        LOGE("%s: failed to map ifname from cloud to device", cloud_vif_ifname);
-        return false;
-    }
-
-    strncpy(vstate->if_name, cloud_vif_ifname, sizeof(vstate->if_name));
+    STRSCPY(vstate->if_name, vif);
     vstate->if_name_exists = true;
-    vstate->bridge_exists = true;
 
-    if ((vstate->enabled_exists = util_net_ifname_exists(device_vif_ifname, &v)))
+    if ((vstate->enabled_exists = util_net_ifname_exists(vif, &v)))
         vstate->enabled = !!v;
 
-    util_kv_set(F("%s.last_channel", cloud_vif_ifname), NULL);
+    util_kv_set(F("%s.last_channel", vif), NULL);
 
     if (vstate->enabled_exists && !vstate->enabled)
         return true;
 
-    err = util_wifi_get_parent(device_vif_ifname,
-                               device_phy_ifname,
-                               sizeof(device_phy_ifname));
+    err = util_wifi_get_parent(vif, phy, sizeof(phy));
     if (err) {
         LOGE("%s: failed to read parent phy ifname: %d (%s)",
-             device_vif_ifname, errno, strerror(errno));
+             vif, errno, strerror(errno));
         return false;
     }
 
-    if ((vstate->mode_exists = util_iwconfig_get_opmode(device_vif_ifname, buf, sizeof(buf))))
-        strncpy(vstate->mode, buf, sizeof(vstate->mode));
+    if ((vstate->mode_exists = util_iwconfig_get_opmode(vif, buf, sizeof(buf))))
+        STRSCPY(vstate->mode, buf);
 
-    if (!strlen(vstate->ssid) && !strcmp("ap", vstate->mode)) {
-        if (util_hostapd_get_config(device_phy_ifname,
-                                    device_vif_ifname,
-                                    conf,
-                                    sizeof(conf)) < 0) {
-            LOGE("%s: hostapd: failed to get_config: %d (%s)",
-                 device_vif_ifname, errno, strerror(errno));
-            return false;
-        }
+    if ((vstate->ssid_broadcast_exists = util_iwpriv_get_int(vif, "get_hide_ssid", &v)))
+        STRSCPY(vstate->ssid_broadcast, v ? "disabled" : "enabled");
 
-        if ((vstate->ssid_exists = 0 == util_ini_get(conf, "ssid", buf, sizeof(buf)))) {
-            str_unescape_hex(buf);
-            snprintf(vstate->ssid, sizeof(vstate->ssid), "%s", buf);
-        }
-    }
-
-    if (util_hostapd_get_config_entry_str(device_vif_ifname, "bridge", buf, sizeof(buf)) == 0)
-        STRLCPY(vstate->bridge, buf);
-
-    if ((vstate->ssid_broadcast_exists = util_iwpriv_get_int(device_vif_ifname, "get_hide_ssid", &v)))
-        strncpy(vstate->ssid_broadcast, v ? "disabled" : "enabled", sizeof(vstate->ssid_broadcast));
-
-    if ((vstate->dynamic_beacon_exists = util_iwpriv_get_int(device_vif_ifname, "g_dynamicbeacon", &v)))
+    if ((vstate->dynamic_beacon_exists = util_iwpriv_get_int(vif, "g_dynamicbeacon", &v)))
         vstate->dynamic_beacon = !!v;
 
-    if ((vstate->mac_list_type_exists = ({ if (!util_iwpriv_get_int(device_vif_ifname, "get_maccmd", &v))
+    if ((vstate->mcast2ucast_exists = util_iwpriv_get_int(vif, "g_mcastenhance", &v)))
+        vstate->mcast2ucast = !!v;
+
+    if ((vstate->mac_list_type_exists = ({ if (!util_iwpriv_get_int(vif, "get_maccmd", &v))
                                                v = -1;
                                            util_vif_mac_list_int2str(v, buf, sizeof(buf)); })))
-        strncpy(vstate->mac_list_type, buf, sizeof(vstate->mac_list_type));
+        STRSCPY(vstate->mac_list_type, buf);
 
-    if ((vstate->mac_exists = (0 == util_net_get_macaddr_str(device_vif_ifname, buf, sizeof(buf)))))
-        strncpy(vstate->mac, buf, sizeof(vstate->mac));
+    if ((vstate->mac_exists = (0 == util_net_get_macaddr_str(vif, buf, sizeof(buf)))))
+        STRSCPY(vstate->mac, buf);
 
-    if ((vstate->wds_exists = util_iwpriv_get_int(device_vif_ifname, "get_wds", &v)))
+    if ((vstate->wds_exists = util_iwpriv_get_int(vif, "get_wds", &v)))
         vstate->wds = !!v;
 
-    if ((vstate->ap_bridge_exists = util_iwpriv_get_int(device_vif_ifname, "get_ap_bridge", &v)))
+    if ((vstate->ap_bridge_exists = util_iwpriv_get_int(vif, "get_ap_bridge", &v)))
         vstate->ap_bridge = !!v;
 
-    if ((vstate->uapsd_enable_exists = util_iwpriv_get_int(device_vif_ifname, "get_uapsd", &v)))
+    if ((vstate->uapsd_enable_exists = util_iwpriv_get_int(vif, "get_uapsd", &v)))
         vstate->uapsd_enable = !!v;
 
-    if ((vstate->rrm_exists = util_iwpriv_get_int(device_vif_ifname, "get_rrm", &v)))
+    if ((vstate->rrm_exists = util_iwpriv_get_int(vif, "get_rrm", &v)))
         vstate->rrm = !!v;
 
-    if ((vstate->channel_exists = util_iwconfig_get_chan(NULL, device_vif_ifname, &v)))
+    if ((vstate->channel_exists = util_iwconfig_get_chan(NULL, vif, &v)))
         vstate->channel = v;
 
-    util_kv_set(F("%s.last_channel", cloud_vif_ifname),
+    util_kv_set(F("%s.last_channel", vif),
                 vstate->channel_exists ? F("%d", vstate->channel) : "");
 
-    if ((vstate->vif_radio_idx_exists = util_wifi_get_macaddr_idx(device_phy_ifname,
-                                                                  device_vif_ifname,
-                                                                  &v)))
+    if ((vstate->vif_radio_idx_exists = util_wifi_get_macaddr_idx(phy, vif, &v)))
         vstate->vif_radio_idx = v;
 
-    if ((p = util_iwpriv_getmac(device_vif_ifname, A(4096)))) {
+    if ((p = util_iwpriv_getmac(vif, A(4096)))) {
         for_each_iwpriv_mac(mac, p) {
-            strlcpy(vstate->mac_list[vstate->mac_list_len], mac, sizeof(vstate->mac_list[0]));
+            STRSCPY(vstate->mac_list[vstate->mac_list_len], mac);
             vstate->mac_list_len++;
         }
     }
 
     if (!strcmp(vstate->mode, "ap"))
-        if ((vstate->min_hw_mode_exists = (r = util_vif_min_hw_mode_get(device_vif_ifname))))
+        if ((vstate->min_hw_mode_exists = (r = util_vif_min_hw_mode_get(vif))))
             STRSCPY(vstate->min_hw_mode, r);
 
-    if (util_userspace_is_running(device_phy_ifname, device_vif_ifname, vstate->mode)) {
-        if (!strcmp("ap", vstate->mode)) {
-            if ((vstate->group_rekey_exists = util_hostapd_get_config_entry_int(device_vif_ifname, "wpa_group_rekey", &v)))
-                vstate->group_rekey = v;
-
-            if ((vstate->ft_mobility_domain_exists = ({ util_hostapd_get_config_entry_str(device_vif_ifname, "mobility_domain", buf, sizeof(buf));
-                                                        1 == sscanf(buf, "%04x", &v); })))
-                vstate->ft_mobility_domain = v;
-
-            if ((vstate->ft_psk_exists = util_hostapd_get_config_entry_int(device_vif_ifname, "#ft_psk", &v)))
-                vstate->ft_psk = v;
-
-            if ((vstate->btm_exists = util_hostapd_get_config_entry_int(device_vif_ifname, "bss_transition", &v)))
-                vstate->btm = v;
-
-            vstate->security_len += util_hostapd_get_security(device_phy_ifname,
-                                                              device_vif_ifname,
-                                                              conf,
-                                                              vstate);
-            vstate->security_len += util_hostapd_get_security_pskfile(device_vif_ifname,
-                                                                      vstate);
-
-            /* FIXME: Cloud state machine requires ft_psk to be defined
-             *        regardless of requested config. It's a cloud bug and this
-             *        is temporary workaround before it gets fixed.
-             *
-             *        PIR-11008
-             */
-            vstate->ft_psk_exists = true;
-        }
-
-        if (!strcmp("sta", vstate->mode)) {
-            err = util_vif_sta_update(device_phy_ifname,
-                                      device_vif_ifname,
-                                      vstate);
-            if (err) {
-                LOGW("%s: failed to get sta update: %d (%s)",
-                     device_vif_ifname, errno, strerror(errno));
-                return false;
-            }
-        }
-
-        if (!strcmp("ap", vstate->mode))
-            util_hostapd_get_sockpath(device_phy_ifname,
-                                      device_vif_ifname,
-                                      sockpath,
-                                      sizeof(sockpath));
-
-        if (!strcmp("sta", vstate->mode))
-            util_wpas_get_sockpath(device_phy_ifname,
-                                   device_vif_ifname,
-                                   sockpath,
-                                   sizeof(sockpath));
-
-        /* hostapd/wpa_supplicant can fail to start due to
-         * transient socket file open error. Once that
-         * happens WM core will be convinced config matches
-         * state and will not call target_vif_config_set2()
-         * which can open the socket listener up. Clearing
-         * out ssid in vstate forces WM core to call us. It
-         * won't change anything because resulting
-         * hostapd/wpa_s config file will remain unchanged
-         * so no real reload will happen except giving us an
-         * opportunity to call util_wpa_ctrl_listen_start().
-         */
-        if (!util_wpa_ctrl_listen_lookup(sockpath))
-            vstate->ssid_exists = false;
-    }
+    if (hapd) hapd_bss_get(hapd, vstate);
+    if (wpas) wpas_bss_get(wpas, vstate);
 
     return true;
 }
@@ -5723,8 +4130,6 @@ target_radio_config_init_check_runtime(void)
     assert(0 == util_exec_simple("which", "xargs"));
     assert(0 == util_exec_simple("which", "readlink"));
     assert(0 == util_exec_simple("which", "basename"));
-    if (!(g_capab_wpas_conf_disallow_dfs = (0 == system("which wpa_supplicant | xargs grep -q disallow_dfs"))))
-        LOGW("wpa_s disallow_dfs not supported; patch is missing; ignore this if dfs will not be used");
 }
 
 bool
@@ -5788,9 +4193,31 @@ free:
     return ok;
 }
 
+static void
+target_radio_init_discover(EV_P_ ev_async *async, int events)
+{
+    char *ifnames = strexa("iwconfig");
+    char *line;
+    char *ifname;
+
+    LOGI("enumerating interfaces");
+    while ((line = strsep(&ifnames, "\n")))
+        if (!isspace(line[0]) && (ifname = strsep(&line, " \t")))
+            if (strlen(ifname) > 0) {
+                qca_ctrl_discover(ifname);
+                if (strstr(ifname, "wifi") == ifname)
+                    util_cb_delayed_update(UTIL_CB_PHY, ifname);
+                if (strchomp(R(F("/sys/class/net/%s/parent", ifname)), "\r\n "))
+                    util_cb_delayed_update(UTIL_CB_VIF, ifname);
+            }
+
+    ev_async_stop(EV_DEFAULT, async);
+}
+
 bool
 target_radio_init(const struct target_radio_ops *ops)
 {
+    static ev_async async;
     ovsdb_table_t table_Wifi_Radio_Config;
     ovsdb_table_t table_Wifi_VIF_Config;
 
@@ -5807,6 +4234,16 @@ target_radio_init(const struct target_radio_ops *ops)
         return false;
     }
 
+    /* Workaround: due to target_radio_init()
+     * being called before Wifi_Associated_Clients
+     * is cleaned up, discovery must be deferred
+     * until later so clients can actually be
+     * picked up.
+     */
+    ev_async_init(&async, target_radio_init_discover);
+    ev_async_start(EV_DEFAULT, &async);
+    ev_async_send(EV_DEFAULT, &async);
+
     /* See target_radio_config_init2() for details */
     OVSDB_TABLE_INIT(Wifi_Radio_Config, if_name);
     OVSDB_TABLE_INIT(Wifi_VIF_Config, if_name);
@@ -5819,365 +4256,3 @@ target_radio_init(const struct target_radio_ops *ops)
 
     return true;
 }
-
-/******************************************************************************
- * Utility: connectivity, ntp check
- *****************************************************************************/
-
-#if !defined(CONFIG_TARGET_CM_LINUX_SUPPORT_PACKAGE)
-static int
-util_timespec_cmp_lt(struct timespec *cur, struct timespec *ref)
-{
-     if (cur == NULL || ref == NULL)
-         return 0;
-
-     if (cur->tv_sec < ref->tv_sec)
-         return 1;
-
-     if (cur->tv_sec == ref->tv_sec)
-         return cur->tv_nsec < ref->tv_nsec;
-
-     return 0;
-}
-
-static time_t
-util_year_to_epoch(int year, int month)
-{
-     struct tm time_formatted;
-
-     if (year < 1900)
-        return -1;
-
-    memset(&time_formatted, 0, sizeof(time_formatted));
-        time_formatted.tm_year = year - 1900;
-    time_formatted.tm_mday = 1;
-        time_formatted.tm_mon  = month;
-
-    return mktime(&time_formatted);
-}
-
-static bool
-util_ntp_check(void)
-{
-    struct timespec cur;
-    struct timespec target;
-    int ret = true;
-
-    target.tv_sec = util_year_to_epoch(2014, 1);
-    if (target.tv_sec < 0)
-        target.tv_sec = TIME_NTP_DEFAULT;
-
-    target.tv_nsec = 0;
-
-    if (clock_gettime(CLOCK_REALTIME, &cur) != 0) {
-        LOGE("Failed to get wall clock, errno=%d", errno);
-        return false;
-    }
-
-    if (util_timespec_cmp_lt(&cur, &target))
-        ret = false;
-
-    return ret;
-}
-
-static bool
-util_ping_cmd(const char *ipstr)
-{
-    char cmd[256];
-    int rc;
-
-    snprintf(cmd, sizeof(cmd), "ping %s -s %d -c %d -w %d >/dev/null 2>&1",
-             ipstr, DEFAULT_PING_PACKET_SIZE, DEFAULT_PING_PACKET_CNT,
-             DEFAULT_PING_TIMEOUT);
-
-    rc = target_device_execute(cmd);
-    LOGD("Ping %s result %d (cmd=%s)", ipstr, rc, cmd);
-
-    return rc;
-}
-
-static bool
-util_arping_cmd(const char *ipstr)
-{
-    char cmd[256];
-    bool ret;
-
-    snprintf(ARRAY_AND_SIZE(cmd),
-             "arping -I \"$(ip ro get %s"
-             " | cut -d' ' -f3"
-             " | sed 1q)\" -c %d -w %d %s",
-             ipstr,
-             DEFAULT_PING_PACKET_CNT,
-             DEFAULT_PING_TIMEOUT,
-             ipstr);
-
-    ret = target_device_execute(cmd);
-
-    LOGD("Arping %s result %d (cmd=%s)", ipstr, ret, cmd);
-    return ret;
-}
-
-static bool
-util_get_router_ip(struct in_addr *dest)
-{
-    FILE *f1;
-    char line[128];
-    char *ifn, *dst, *gw, *msk, *sptr;
-    int i, rc = false;
-
-    if ((f1 = fopen(PROC_NET_ROUTE, "rt"))) {
-        while(fgets(line, sizeof(line), f1)) {
-            ifn = strtok_r(line, " \t", &sptr);         // Interface name
-            dst = strtok_r(NULL, " \t", &sptr);         // Destination (base 16)
-            gw  = strtok_r(NULL, " \t", &sptr);         // Gateway (base 16)
-            for (i = 0;i < 4;i++) {
-                // Skip: Flags, RefCnt, Use, Metric
-                strtok_r(NULL, " \t", &sptr);
-            }
-            msk = strtok_r(NULL, " \t", &sptr);         // Netmask (base 16)
-            // We don't care about the rest of the values
-
-            if (!ifn || !dst || !gw || !msk) {
-                // malformatted line
-                continue;
-            }
-
-            if (!strcmp(dst, "00000000") && !strcmp(msk, "00000000")) {
-                // Our default route
-                memset(dest, 0, sizeof(*dest));
-                dest->s_addr = strtoul(gw, NULL, 16);   // Router IP
-                rc = true;
-                break;
-            }
-        }
-        fclose(f1);
-
-        if (rc) {
-            LOGD("%s: Found router IP %s", PROC_NET_ROUTE, inet_ntoa(*dest));
-        }
-        else {
-            LOGW("%s: No router IP found", PROC_NET_ROUTE);
-        }
-    }
-    else {
-        LOGE("Failed to get router IP, unable to open %s", PROC_NET_ROUTE);
-    }
-
-    return rc;
-}
-
-static int
-util_is_devmode_softwds_active(void)
-{
-    return target_device_execute("ip -d link | awk '/^[0-9]/{x=0} /g-bhaul-sta/{x=1} x' | "
-                                 "grep softwds");
-}
-
-static bool
-util_is_gretap_softwds_link(const char *ifname) {
-    char path[256];
-
-    snprintf(path, sizeof(path), "/sys/class/net/g-%s/softwds/addr", ifname);
-    return access(path, F_OK) == 0;
-}
-
-static bool
-util_get_link_ip(const char *ifname, struct in_addr *dest)
-{
-    char  line[128];
-    bool  retval;
-    FILE  *f1;
-
-    f1 = NULL;
-    retval = false;
-
-    if (util_is_gretap_softwds_link(ifname)) {
-        f1 = popen("cat /sys/class/net/g-*/softwds/ip4gre_remote_ip", "r");
-    } else {
-        f1 = popen("ip -d link | egrep gretap | "
-                   " egrep bhaul-sta | ( read a b c d; echo $c )", "r");
-    }
-
-    if (!f1) {
-        LOGE("Failed to retreive Wifi Link remote IP address");
-        goto error;
-    }
-
-    if (fgets(line, sizeof(line), f1) == NULL) {
-        LOGW("No Wifi Link remote IP address found");
-        goto error;
-    }
-
-    while(line[strlen(line)-1] == '\r' || line[strlen(line)-1] == '\n') {
-        line[strlen(line)-1] = '\0';
-    }
-
-    if (inet_pton(AF_INET, line, dest) != 1) {
-        LOGW("Failed to parse Wifi Link remote IP address (%s)", line);
-        goto error;
-    }
-
-    retval = true;
-
-  error:
-    if (f1 != NULL)
-        pclose(f1);
-
-    return retval;
-}
-
-static bool
-util_connectivity_link_check(const char *ifname)
-{
-    struct in_addr link_ip;
-
-    /* GRE uses IPs on backhaul to form tunnels that are put into bridges.
-     * SoftWDS doesn't rely on IPs so there's nothing to ping.
-     */
-    if (util_is_devmode_softwds_active())
-        return true;
-
-    if (!strstr(ifname, "bhaul-sta"))
-        return true;
-
-    if (util_get_link_ip(ifname, &link_ip)) {
-        if (util_ping_cmd(inet_ntoa(link_ip)) == false) {
-            util_arping_cmd(inet_ntoa(link_ip));
-            return false;
-        }
-    }
-    return true;
-}
-
-static bool
-util_connectivity_router_check()
-{
-    struct in_addr r_addr;
-    bool           ret;
-
-    if (util_get_router_ip(&r_addr) == false) {
-        // If we don't have a router, that's considered a failure
-        return false;
-    }
-
-    ret = util_ping_cmd(inet_ntoa(r_addr));
-    if (!ret) {
-        LOGD("Router check: ping failed, arping checking");
-        ret = util_arping_cmd(inet_ntoa(r_addr));
-    }
-    return ret;
-}
-
-static bool
-util_connectivity_internet_check() {
-    int r;
-
-    r = os_rand() % TARGET_CONNECTIVITY_CHECK_INET_ADDRS_CNT;
-    if (util_ping_cmd(util_connectivity_check_inet_addrs[r]) == false) {
-        // Try again.. Some of these DNS root servers are a little flakey
-        r = os_rand() % TARGET_CONNECTIVITY_CHECK_INET_ADDRS_CNT;
-        if (util_ping_cmd(util_connectivity_check_inet_addrs[r]) == false) {
-            return false;
-        }
-    }
-    return true;
-}
-
-/******************************************************************************
- * target device connectivity check
- *****************************************************************************/
-
-bool target_device_connectivity_check(const char *ifname,
-                                      target_connectivity_check_t *cstate,
-                                      target_connectivity_check_option_t opts)
-{
-    memset(cstate, 0 , sizeof(target_connectivity_check_t));
-
-    if (opts & LINK_CHECK) {
-        cstate->link_state = util_connectivity_link_check(ifname);
-        if (!cstate->link_state)
-            return false;
-    }
-
-    if (opts & ROUTER_CHECK) {
-        cstate->router_state = util_connectivity_router_check();
-        if (!cstate->router_state)
-            return false;
-    }
-
-    if (opts & INTERNET_CHECK) {
-        cstate->internet_state = util_connectivity_internet_check();
-        if (!cstate->internet_state)
-            return false;
-    }
-
-    if (opts & NTP_CHECK) {
-        cstate->ntp_state = util_ntp_check();
-        if (!cstate->ntp_state)
-            return false;
-    }
-
-    return true;
-}
-#endif /* !defined(CONFIG_TARGET_CM_LINUX_SUPPORT_PACKAGE) */
-
-/******************************************************************************
- * target device extender functions
- *****************************************************************************/
-
-#if !defined(CONFIG_USE_KCONFIG)
-int target_device_capabilities_get()
-{
-    return TARGET_EXTENDER_TYPE;
-}
-#endif /* !defined(CONFIG_USE_KCONFIG) */
-
-#if !defined(CONFIG_TARGET_RESTART_SCRIPT)
-bool target_device_restart_managers()
-{
-    if (access(TARGET_DISABLE_FATAL_STATE, F_OK) == 0) {
-        LOGEM("FATAL condition triggered, not restarting managers by request "
-        "(%s exists)", TARGET_DISABLE_FATAL_STATE);
-    }
-    else {
-        pid_t pid;
-        char *argv[] = {NULL} ;
-
-        LOGEM("FATAL condition triggered, restarting managers...");
-        pid = fork();
-        if (pid == 0) {
-            int rc = execvp(TARGET_MANAGER_RESTART_CMD, argv);
-            exit((rc == 0) ? 0 : 1);
-        }
-        while(1); // Sit in loop and wait to be restarted
-    }
-    return true;
-}
-#endif /* !defined(CONFIG_TARGET_RESTART_SCRIPT) */
-
-#if !defined(CONFIG_USE_KCONFIG) && !defined(CONFIG_TARGET_WATCHDOG)
-bool target_device_wdt_ping()
-{
-    char *wdt_cmd = "[ -e /usr/plume/bin/wpd ] && /usr/plume/bin/wpd --ping";
-
-    return target_device_execute(wdt_cmd);
-}
-#endif /* !defined(CONFIG_TARGET_WATCHDOG) && !defined(CONFIG_TARGET_WATCHDOG) */
-
-/******************************************************************************
- * target device functions
- *****************************************************************************/
-
-#if !defined(CONFIG_TARGET_LINUX_EXECUTE)
-bool target_device_execute(const char *cmd)
-{
-    int rc = system(cmd);
-
-    LOGD("%s cmd: %s rc = %d", __func__, cmd, rc);
-
-    if (!WIFEXITED(rc) || WEXITSTATUS(rc) != 0)
-        return false;
-
-    return true;
-}
-#endif /* !defined(CONFIG_TARGET_LINUX_EXECUTE) */

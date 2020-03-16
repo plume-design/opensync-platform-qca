@@ -24,29 +24,65 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef QCA_BSAL_H_INCLUDED
-#define QCA_BSAL_H_INCLUDED
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdbool.h>
+#include <dirent.h>
+#include <libgen.h>
+#include <ctype.h>
+#include <errno.h>
+#include <assert.h>
+#include "target.h"
+#include "log.h"
 
-int     qca_bsal_init(bsal_event_cb_t event_cb, struct ev_loop *loop);
-int     qca_bsal_cleanup(void);
+#include <stdio.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <time.h>
+#include "util.h"
 
-int     qca_bsal_iface_add(const bsal_ifconfig_t *ifcfg);
-int     qca_bsal_iface_update(const bsal_ifconfig_t *ifcfg);
-int     qca_bsal_iface_remove(const bsal_ifconfig_t *ifcfg);
+#include <linux/un.h>
 
-int     qca_bsal_client_add(const char *ifname, const uint8_t *mac_addr, const bsal_client_config_t *conf);
-int     qca_bsal_client_update(const char *ifname, const uint8_t *mac_addr, const bsal_client_config_t *conf);
-int     qca_bsal_client_remove(const char *ifname, const uint8_t *mac_addr);
+#include "mcproxy_util.h"
 
-int     qca_bsal_client_measure(const char *ifname, const uint8_t *mac_addr, int num_samples);
-int     qca_bsal_client_disconnect(const char *ifname, const uint8_t *mac_addr, bsal_disc_type_t type, uint8_t reason);
-int     qca_bsal_client_info(const char *ifname, const uint8_t *mac_addr, bsal_client_info_t *info);
+#define MODULE_ID LOG_MODULE_ID_TARGET
 
-int     qca_bsal_bss_tm_request(const char *ifname, const uint8_t *mac_addr, const bsal_btm_params_t *btm_params);
-int     qca_bsal_rrm_beacon_report_request(const char *ifname, const uint8_t *mac_addr, const bsal_rrm_params_t *rrm_params);
+bool target_set_igmp_mcproxy_params(target_mcproxy_params_t *mcparams)
+{
+    // Initialize the daemons (if already initialized then this is a no-op)
+    mcproxy_util_daemon_init(mcparams->protocol);
 
-int     qca_bsal_rrm_set_neighbor(const char *ifname, const bsal_neigh_info_t *nr);
-int     qca_bsal_rrm_remove_neighbor(const char *ifname, const bsal_neigh_info_t *nr);
-int     qca_bsal_send_action(const char *ifname, const uint8_t *mac_addr, const uint8_t *data, unsigned int data_len);
+    // Apply the config and restart the proxy
+    if (mcproxy_util_apply(mcparams) == false)
+        return false;
 
-#endif /* QCA_BSAL_H_INCLUDED */
+    return true;
+}
+
+bool target_set_igmp_mcproxy_sys_params(struct schema_IGMP_Config *iccfg)
+{
+    if (WARN_ON(mcproxy_util_update_igmp_sys_params(iccfg) == false))
+        return false;
+
+    return true;
+}
+
+bool target_set_mld_mcproxy_params(target_mcproxy_params_t *mcparams)
+{
+    // Initialize the daemons (if already initialized then this is a no-op)
+    mcproxy_util_daemon_init(mcparams->protocol);
+
+    // Apply the config and restart the proxy
+    if (mcproxy_util_apply(mcparams) == false)
+        return false;
+
+    return true;
+}
+
+bool target_set_mld_mcproxy_sys_params(struct schema_MLD_Config *mlcfg)
+{
+    if (WARN_ON(mcproxy_util_update_mld_sys_params(mlcfg) == false))
+        return false;
+
+    return true;
+}

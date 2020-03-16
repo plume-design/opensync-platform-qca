@@ -104,8 +104,13 @@ ioctl_status_t ioctl80211_device_txchainmask_get(
 
     rc = ioctl80211_get_priv_ioctl(radio_cfg->phy_name, "get_txchainsoft", &request.u.mode);
     if (!rc) {
-        LOG(WARNING, "failed to get txchainmask: ioctl not found");
-        return IOCTL_STATUS_ERROR;
+        LOG(DEBUG, "failed to get txchainsoft: ioctl not found, trying get_txchainmask");
+
+        rc = ioctl80211_get_priv_ioctl(radio_cfg->phy_name, "get_txchainmask", &request.u.mode);
+        if (!rc) {
+            LOG(WARNING, "failed to get txchainmask: ioctl not found");
+            return IOCTL_STATUS_ERROR;
+        }
     }
 
     LOG(TRACE, "Probed get_txchainsofti %x %s", request.u.mode, radio_cfg->phy_name);
