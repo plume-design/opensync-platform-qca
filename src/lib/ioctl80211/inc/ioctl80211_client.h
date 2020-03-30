@@ -34,6 +34,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "ioctl80211_api.h"
 
+/* Max size we support is 100 clients */
+#define IOCTL80211_CLIENTS_SIZE \
+    (100 * sizeof(struct ieee80211req_sta_info))
+
 typedef struct
 {
     uint64_t                        bytes_tx;

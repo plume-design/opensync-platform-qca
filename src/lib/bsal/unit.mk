@@ -31,9 +31,16 @@
 UNIT_NAME := qca_bsal
 UNIT_TYPE := LIB
 
+ifeq ($(CONFIG_PLATFORM_QCA_QSDK110),y)
+UNIT_SRC += src/bsal_qca10_2_4_csu3_11ax.c
+else
 UNIT_SRC += src/bsal_qca10_2_4_csu3.c
+endif
 
 UNIT_CFLAGS := -I$(UNIT_PATH)/inc
+ifeq ($(CONFIG_PLATFORM_QCA_QSDK110),y)
+UNIT_CFLAGS += -I$(STAGING_DIR)/usr/include/libnl3/
+endif
 UNIT_EXPORT_CFLAGS := $(UNIT_CFLAGS)
 
 UNIT_DEPS_CFLAGS := src/lib/target

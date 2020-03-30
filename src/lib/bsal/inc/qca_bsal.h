@@ -49,4 +49,8 @@ int     qca_bsal_rrm_set_neighbor(const char *ifname, const bsal_neigh_info_t *n
 int     qca_bsal_rrm_remove_neighbor(const char *ifname, const bsal_neigh_info_t *nr);
 int     qca_bsal_send_action(const char *ifname, const uint8_t *mac_addr, const uint8_t *data, unsigned int data_len);
 
+#ifdef CONFIG_PLATFORM_QCA_QSDK110
+int     qca_bsal_client_get_datarate_info(const char *ifname, const uint8_t *mac_addr, bsal_datarate_info_t *datarate);
+#endif
+
 #endif /* QCA_BSAL_H_INCLUDED */

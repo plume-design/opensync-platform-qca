@@ -31,6 +31,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <linux/types.h>
 #include <linux/wireless.h>
 
+#ifdef CONFIG_PLATFORM_QCA_QSDK110
+#include <cfg80211_nlwrapper_api.h>
+#endif
+
 #include "ioctl80211_api.h"
 
 static inline

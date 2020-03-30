@@ -44,11 +44,12 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <ctype.h>
+#include <arpa/inet.h>
+#include <dp_rate_stats_pub.h>
 
-#include "const.h"
 #include "log.h"
 #include "os.h"
-#include "kconfig.h"
 
 #include "ioctl80211.h"
 #include "ioctl80211_client.h"
@@ -56,6 +57,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define MODULE_ID LOG_MODULE_ID_IOCTL
 
 #define IOCTL80211_DATA_RATE_LEN    (32)
+#define PEER_RX_STATS 1
+#define PEER_TX_STATS 0
+
+#define OSYNC_IOCTL_LIB 1
 
 /* Copied from  qca/src/qca-wifi/umac/include/ieee80211_node.h */
 #define IEEE80211_NODE_AUTH             0x00000001          /* authorized for data */
@@ -63,83 +68,267 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define IEEE80211_NODE_ERP              0x00000004          /* ERP enabled */
 #define IEEE80211_NODE_HT               0x00000008          /* HT enabled */
 
+/*global structure to maintain stats*/
+#define PEER_STATS_FLAG 0x0001
+#define PEER_CLI_MAX 32
+
+static struct ps_uapi_ioctl  g_peer_rx_ioctl_stats[PEER_CLI_MAX];
+static struct ps_uapi_ioctl  g_peer_tx_ioctl_stats[PEER_CLI_MAX];
+uint16_t g_stainfo_len;
+uint8_t bsal_clients[IOCTL80211_CLIENTS_SIZE];
+
+#include "osync_nl80211_11ax.h"
+
+#ifndef PROC_NET_WIRELESS
+#define PROC_NET_WIRELESS       "/proc/net/wireless"
+#endif
+typedef struct iw_statistics    iwstats;
+
 typedef struct
 {
     struct ieee80211req_sta_info        sta_info;
     int32_t                             padding[3]; /* Apparently driver adds 12 Bytes!!!*/
 } ieee80211req_sta_info_t;
 
-struct weight_avg {
-    uint64_t sum;
-    uint64_t cnt;
-};
+#define LIST_STATION_CFG_ALLOC_SIZE 3*1024
+#define	QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION 74
 
-enum guard_int {
-    LONG_GUARD_INT,
-    SHORT_GUARD_INT
-};
+extern struct   socket_context sock_ctx;
+uint8_t         ieee80211_clients[IOCTL80211_CLIENTS_SIZE];
+uint16_t        g_cli_len;
 
-static inline void weight_avg_add(struct weight_avg *avg,
-                                  uint64_t value,
-                                  uint64_t count)
+#ifndef min
+#define min(x, y) ((x) < (y) ? (x) : (y))
+#else
+#error confilicting defs of min
+#endif
+
+#define PRINT(fmt, ...) \
+    do { \
+        LOGI(fmt, ##__VA_ARGS__); \
+    } while (0)
+
+#ifdef OPENSYNC_NL_SUPPORT
+int get_cli_mac_index(mac_address_t mac_addr, int peer_stats_flag)
 {
-    value *= count;
-    avg->sum += value;
-    avg->cnt += count;
+    int i;
+    int index = 0;
+    if (peer_stats_flag == 1)
+    {
+        for (i = 0; i < PEER_CLI_MAX; i++)
+        {
+            if (g_peer_rx_ioctl_stats[i].flags & PEER_STATS_FLAG)
+            {
+                if ((g_peer_rx_ioctl_stats[i].u.peer_rx_stats.set.addr[0] == (u8)mac_addr[0]) && (g_peer_rx_ioctl_stats[i].u.peer_rx_stats.set.addr[1] == (u8)mac_addr[1]) &&
+                    (g_peer_rx_ioctl_stats[i].u.peer_rx_stats.set.addr[2] == (u8)mac_addr[2]) && (g_peer_rx_ioctl_stats[i].u.peer_rx_stats.set.addr[3] == (u8)mac_addr[3]) &&
+                    (g_peer_rx_ioctl_stats[i].u.peer_rx_stats.set.addr[4] == (u8)mac_addr[4]) && (g_peer_rx_ioctl_stats[i].u.peer_rx_stats.set.addr[5] == (u8)mac_addr[5]))
+                {
+                    index = i;
+                    break;
+                }
+            } else {
+                index = i;
+                break;
+            }
+        }
+    } else {
+        for (i = 0; i < PEER_CLI_MAX; i++)
+        {
+            if (g_peer_tx_ioctl_stats[i].flags & PEER_STATS_FLAG)
+            {
+                if ((g_peer_tx_ioctl_stats[i].u.peer_tx_stats.set.addr[0] == (u8)mac_addr[0]) && (g_peer_tx_ioctl_stats[i].u.peer_tx_stats.set.addr[1] == (u8)mac_addr[1]) &&
+                    (g_peer_tx_ioctl_stats[i].u.peer_tx_stats.set.addr[2] == (u8)mac_addr[2]) && (g_peer_tx_ioctl_stats[i].u.peer_tx_stats.set.addr[3] == (u8)mac_addr[3]) &&
+                    (g_peer_tx_ioctl_stats[i].u.peer_tx_stats.set.addr[4] == (u8)mac_addr[4]) && (g_peer_tx_ioctl_stats[i].u.peer_tx_stats.set.addr[5] == (u8)mac_addr[5]))
+                {
+                    index = i;
+                    break;
+                }
+            } else {
+                index = i;
+                break;
+            }
+        }
+    }
+    return index;
+    }
+
+static void dp_peer_rx_rate_stats(uint8_t *peer_mac,
+                    uint64_t peer_cookie,
+                    void *buffer,
+                    uint32_t buffer_len)
+{
+    int index;
+    int i;
+    uint8_t is_lithium;
+    uint8_t chain, bw, max_chain, max_bw;
+    struct wlan_rx_rate_stats *rx_stats;
+    struct wlan_rx_rate_stats *tmp_rx_stats;;
+
+    rx_stats = tmp_rx_stats = (struct wlan_rx_rate_stats *)buffer;
+
+    index = get_cli_mac_index(peer_mac, PEER_RX_STATS);
+    memcpy(g_peer_rx_ioctl_stats[index].u.peer_rx_stats.set.addr, peer_mac, sizeof(g_peer_rx_ioctl_stats[index].u.peer_rx_stats.set.addr));
+    g_peer_rx_ioctl_stats[index].flags |= PEER_STATS_FLAG;
+    g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.cookie = (peer_cookie & 0xFFFFFFFF00000000) >> WLANSTATS_PEER_COOKIE_LSB;
+
+    is_lithium = (peer_cookie & WLANSTATS_COOKIE_PLATFORM_OFFSET) >> WLANSTATS_PEER_COOKIE_LSB;
+    if (is_lithium) {
+        max_chain = 8;
+        max_bw = 8;
+    } else {
+        max_chain = 4;
+        max_bw = 4;
+    }
+    for (i = 0; i < WLANSTATS_CACHE_SIZE; i++)
+    {
+        if ((int)(rx_stats->rix) != INVALID_CACHE_IDX) {
+            g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_bytes = rx_stats -> num_bytes;
+            g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_msdus = rx_stats -> num_msdus;
+            g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_mpdus = rx_stats -> num_mpdus;
+            g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_ppdus = rx_stats -> num_ppdus;
+            g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_retries = rx_stats -> num_retries;
+            g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_sgi = rx_stats -> num_sgi;
+            g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].ave_rssi = rx_stats -> avg_rssi;
+        }
+        if ((int)(tmp_rx_stats->rix) != INVALID_CACHE_IDX) {
+            for (chain = 0; chain < max_chain; chain++) {
+                for (bw = 0; bw < max_bw; bw++) {
+                    g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].ave_rssi_ant[chain][bw]= tmp_rx_stats -> avg_rssi_ant[chain][bw];
+                }
+            }
+        }
+        rx_stats = rx_stats + 1;
+        tmp_rx_stats = tmp_rx_stats + 1;
+    }
+}
+static void
+dp_peer_tx_sojourn_stats(uint8_t *peer_mac,
+                   uint64_t peer_cookie,
+                   struct wlan_tx_sojourn_stats *sojourn_stats)
+{
+    uint8_t tid;
+    int index = 0;
+
+    index = get_cli_mac_index(peer_mac, PEER_TX_STATS);
+    for (tid = 0; tid < WLAN_DATA_TID_MAX; tid++) {
+                /* change sum_sojourn_msdu data type to u64 */
+        g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.sojourn[tid].ave_sojourn_msec = sojourn_stats->avg_sojourn_msdu[tid];
+        g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.sojourn[tid].sum_sojourn_msec = sojourn_stats->sum_sojourn_msdu[tid];
+        g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.sojourn[tid].num_sojourn_mpdus = sojourn_stats->num_msdus[tid];
+    }
 }
 
-static inline uint64_t weight_avg_get(const struct weight_avg *avg)
+static void dp_peer_tx_rate_stats(uint8_t *peer_mac,
+                    uint64_t peer_cookie,
+                    void *buffer,
+                    uint32_t buffer_len)
 {
-    return avg->cnt > 0 ? avg->sum / avg->cnt : 0;
+    int index;
+    int i = 0;
+
+    struct wlan_tx_rate_stats *tx_stats;
+    struct wlan_tx_sojourn_stats *sojourn_stats;
+
+    if (buffer_len < (WLANSTATS_CACHE_SIZE *
+              sizeof(struct wlan_tx_rate_stats))
+              + sizeof(struct wlan_tx_sojourn_stats)) {
+        LOGI("invalid buffer len, return");
+        return;
+    }
+    tx_stats = (struct wlan_tx_rate_stats *)buffer;
+
+    index = get_cli_mac_index(peer_mac, PEER_TX_STATS);
+
+    memcpy(g_peer_tx_ioctl_stats[index].u.peer_tx_stats.set.addr, peer_mac, sizeof(g_peer_tx_ioctl_stats[index].u.peer_tx_stats.set.addr));
+    g_peer_tx_ioctl_stats[index].flags |= PEER_STATS_FLAG;
+    g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.cookie = (peer_cookie & 0xFFFFFFFF00000000) >> WLANSTATS_PEER_COOKIE_LSB;
+
+    for (i = 0; i < WLANSTATS_CACHE_SIZE; i++)
+    {
+        if ((int)(tx_stats->rix) != INVALID_CACHE_IDX) {
+            g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.stats[i].attempts = tx_stats->mpdu_attempts;
+            g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.stats[i].success = tx_stats->mpdu_success;
+            g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.stats[i].ppdus= tx_stats->num_ppdus;
+        }
+        tx_stats = tx_stats + 1;
+    }
+    sojourn_stats = (struct wlan_tx_sojourn_stats *)((uint8_t *)buffer + (WLANSTATS_CACHE_SIZE + sizeof(struct wlan_tx_rate_stats)));
+    dp_peer_tx_sojourn_stats(peer_mac, peer_cookie, sojourn_stats);
+    return;
 }
 
-static uint32_t mcs_to_mbps(const int mcs, const int bw,
-                            const int nss, const enum guard_int gi)
+#endif
+static void dp_peer_stats_handler(uint32_t cache_type,
+                 uint8_t *peer_mac,
+                 uint64_t peer_cookie,
+                 void *buffer,
+                 uint32_t buffer_len)
 {
-    /* The following table is precomputed from:
-     *
-     * bpsk -> 1bit
-     * qpsk -> 2bit
-     * 16-qam -> 4bit
-     * 64-qam -> 6bit
-     * 256-qam -> 8bit
-     *
-     * 20mhz -> 52 tones
-     * 40mhz -> 108 tones
-     * 80mhz -> 234 tones
-     * 160mhz -> 486 tones
-     *
-     * Once divided by 4 will get an long GI phyrate in mbps.
-     */
-    static const unsigned short bps[10][4] = {
-        /* 20mhz 40mhz 80mhz  160mhz */
-        {  26,   54,   117,   234   }, /* BPSK 1/2 */
-        {  52,   108,  234,   468   }, /* QPSK 1/2 */
-        {  78,   162,  351,   702   }, /* QPSK 3/4 */
-        {  104,  216,  468,   936   }, /* 16-QAM 1/2 */
-        {  156,  324,  702,   1404  }, /* 16-QAM 3/4 */
-        {  208,  432,  936,   1248  }, /* 16-QAM 2/3 */
-        {  234,  486,  1053,  2106  }, /* 64-QAM 3/4 */
-        {  260,  540,  1170,  2340  }, /* 64-QAM 5/6 */
-        {  312,  648,  1404,  2808  }, /* 256-QAM 3/4 */
-        {  346,  720,  1560,  3120  }, /* 256-QAM 5/6 */
-    };
-    static const unsigned short legacy[] = {
-        6, 9, 12, 18, 24, 36, 48, 54, /* OFDM */
-        1, 2, 5, 11, 2, 5, 11, /* CCK */
-    };
-    const int i = mcs < 10 ? mcs : 9;
-    const int j = bw < 4 ? bw : 3;
+    switch (cache_type) {
+    case DP_PEER_RX_RATE_STATS:
+        dp_peer_rx_rate_stats(peer_mac, peer_cookie,
+                        buffer, buffer_len);
+        break;
+    case DP_PEER_TX_RATE_STATS:
+        dp_peer_tx_rate_stats(peer_mac, peer_cookie,
+                        buffer, buffer_len);
+        break;
+    }
+}
 
-    if (nss == 0) {
-        return mcs < (int)ARRAY_SIZE(legacy) ? legacy[mcs] : legacy[0];
+void osync_peer_stats_event_callback(char *ifname,
+							uint32_t cmdid,
+							uint8_t *data,
+							size_t len)
+{
+    struct nlattr *tb_array[QCA_WLAN_VENDOR_ATTR_PEER_STATS_CACHE_MAX + 1];
+    struct nlattr *tb;
+    void *buffer = NULL;
+    uint32_t buffer_len = 0;
+    uint8_t *peer_mac;
+    uint32_t cache_type;
+    uint64_t peer_cookie;
+
+    if (cmdid != QCA_NL80211_VENDOR_SUBCMD_PEER_STATS_CACHE_FLUSH) {
+        /* ignore anyother events*/
+        return;
     }
-    else {
-        if (gi == SHORT_GUARD_INT) /* SGI gives about 11% tput gain*/
-            return (bps[i][j] * nss * 25) / 90; /* (bsp * nss / 4) * 111 / 100 */
-        else
-            return (bps[i][j] * nss) / 4;
+
+    if (nla_parse(tb_array, QCA_WLAN_VENDOR_ATTR_PEER_STATS_CACHE_MAX,
+                (struct nlattr *)data, len, NULL)) {
+        return;
     }
+
+    tb = tb_array[QCA_WLAN_VENDOR_ATTR_PEER_STATS_CACHE_TYPE];
+    if (!tb) {
+        return;
+    }
+    cache_type = nla_get_u32(tb);
+
+    tb = tb_array[QCA_WLAN_VENDOR_ATTR_PEER_STATS_CACHE_PEER_MAC];
+    if (!tb) {
+        return;
+    }
+    peer_mac = (uint8_t *)nla_data(tb);
+
+    tb = tb_array[QCA_WLAN_VENDOR_ATTR_PEER_STATS_CACHE_DATA];
+    if (tb) {
+        buffer = (void *)nla_data(tb);
+        buffer_len = nla_len(tb);
+    }
+
+    tb = tb_array[QCA_WLAN_VENDOR_ATTR_PEER_STATS_CACHE_PEER_COOKIE];
+    if (!tb) {
+        return;
+    }
+    peer_cookie = nla_get_u64(tb);
+    if (!buffer) {
+        return;
+    }
+
+    dp_peer_stats_handler(cache_type, peer_mac, peer_cookie,
+            buffer, buffer_len);
+
 }
 
 static
@@ -152,16 +341,12 @@ ioctl_status_t ioctl80211_client_stats_rx_calculate(
     struct ps_uapi_ioctl           *new_stats_rx = NULL;
     struct ps_uapi_ioctl           *old_stats_rx = NULL;
     dpp_client_stats_rx_t          *client_stats_rx = NULL;
-    struct weight_avg               avgmbps = { .sum = 0, .cnt = 0 };
 
     uint32_t                        mcs;
     uint32_t                        nss;
     uint32_t                        bw;
 
     uint32_t                        stats_index = 0;
-
-    uint32_t                        num_ppdus_delta;
-    uint32_t                        num_sgi_delta;
 
     radio_type_t                    radio_type =
         radio_cfg->type;
@@ -233,32 +418,6 @@ ioctl_status_t ioctl80211_client_stats_rx_calculate(
             bw  = ((stats_index - PS_MAX_LEGACY) / (PS_MAX_MCS * PS_MAX_NSS));
             nss = (((stats_index - PS_MAX_LEGACY) / PS_MAX_MCS) % PS_MAX_NSS) + 1;
             mcs = (stats_index - PS_MAX_LEGACY) % PS_MAX_MCS;
-        }
-
-        if (kconfig_enabled(CONFIG_QCA_RATE_HISTO_TO_EXPECTED_TPUT)) {
-            num_ppdus_delta = STATS_DELTA(
-                new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_ppdus,
-                old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_ppdus);
-
-            num_sgi_delta = STATS_DELTA(
-                new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_sgi,
-                old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_sgi);
-
-            if (num_sgi_delta > 0) {
-                weight_avg_add(
-                    &avgmbps,
-                    mcs_to_mbps(mcs, bw, nss, SHORT_GUARD_INT),
-                    num_sgi_delta);
-            }
-
-            if (num_sgi_delta < num_ppdus_delta) {
-                weight_avg_add(
-                    &avgmbps,
-                    mcs_to_mbps(mcs, bw, nss, LONG_GUARD_INT),
-                    (num_ppdus_delta - num_sgi_delta));
-            }
-
-            continue;
         }
 
         client_stats_rx =
@@ -387,20 +546,6 @@ ioctl_status_t ioctl80211_client_stats_rx_calculate(
         ds_dlist_insert_tail(&client_record->stats_rx, client_stats_rx);
     }
 
-    if (kconfig_enabled(CONFIG_QCA_RATE_HISTO_TO_EXPECTED_TPUT)) {
-        if (avgmbps.cnt) {
-            /* This overrides the "last rx rate" */
-            client_record->stats.rate_rx = weight_avg_get(&avgmbps);
-            LOG(TRACE,
-                 "Calculated %s client delta rx phyrate "MAC_ADDRESS_FORMAT
-                 " mbps=%f mpdus=%llu",
-                 radio_get_name_from_type(radio_type),
-                 MAC_ADDRESS_PRINT(data_new->info.mac),
-                 client_record->stats.rate_rx,
-                 avgmbps.cnt);
-        }
-    }
-
     return IOCTL_STATUS_OK;
 }
 
@@ -410,24 +555,58 @@ ioctl_status_t ioctl80211_clients_stats_rx_fetch(
         char                           *phyName,
         ioctl80211_client_record_t     *client_entry)
 {
-    int32_t                             rc;
-
-    struct iwreq                        request;
+    int index;
+    int i;
+    uint8_t chain, bw, max_chain, max_bw;
+    uint8_t is_lithium;
     struct ps_uapi_ioctl               *ioctl_stats = &client_entry->stats_rx;
 
     memset (ioctl_stats, 0, sizeof(*ioctl_stats));
-    memset (&request, 0, sizeof(request));
-    request.u.data.pointer = ioctl_stats;
-    request.u.data.length = PS_UAPI_IOCTL_SIZE;
+#ifdef OPENSYNC_NL_SUPPORT
+    index = get_cli_mac_index(client_entry->info.mac, PEER_RX_STATS);
+    if (!g_peer_rx_ioctl_stats[index].flags)
+        return IOCTL_STATUS_ERROR;
+#endif
 
-    ioctl_stats->cmd = PS_UAPI_IOCTL_CMD_PEER_RX_STATS;
     ioctl_stats->u.peer_rx_stats.set.addr[0] = (u8)client_entry->info.mac[0];
     ioctl_stats->u.peer_rx_stats.set.addr[1] = (u8)client_entry->info.mac[1];
     ioctl_stats->u.peer_rx_stats.set.addr[2] = (u8)client_entry->info.mac[2];
     ioctl_stats->u.peer_rx_stats.set.addr[3] = (u8)client_entry->info.mac[3];
     ioctl_stats->u.peer_rx_stats.set.addr[4] = (u8)client_entry->info.mac[4];
     ioctl_stats->u.peer_rx_stats.set.addr[5] = (u8)client_entry->info.mac[5];
-
+#ifdef OPENSYNC_NL_SUPPORT
+    is_lithium = ((g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.cookie) & WLANSTATS_COOKIE_PLATFORM_OFFSET) >> WLANSTATS_PEER_COOKIE_LSB;
+    //is_lithium = (peer_cookie & WLANSTATS_COOKIE_PLATFORM_OFFSET) >> WLANSTATS_PEER_COOKIE_LSB;
+    if (is_lithium) {
+        max_chain = 8;
+        max_bw = 8;
+    } else {
+        max_chain = 4;
+        max_bw = 4;
+    }
+    for (i = 0; i < WLANSTATS_CACHE_SIZE; i++)
+    {
+        ioctl_stats->flags = g_peer_rx_ioctl_stats[index].flags;
+        ioctl_stats->u.peer_rx_stats.get.stats[i].num_bytes = g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_bytes;
+        ioctl_stats->u.peer_rx_stats.get.stats[i].num_msdus = g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_msdus;
+        ioctl_stats->u.peer_rx_stats.get.stats[i].num_mpdus = g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_mpdus;
+        ioctl_stats->u.peer_rx_stats.get.stats[i].num_ppdus = g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_ppdus;
+        ioctl_stats->u.peer_rx_stats.get.stats[i].num_retries = g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_retries;
+        ioctl_stats->u.peer_rx_stats.get.stats[i].num_sgi = g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_sgi;
+        ioctl_stats->u.peer_rx_stats.get.stats[i].ave_rssi = g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].ave_rssi;
+        for (chain = 0; chain < max_chain; chain++) {
+            for (bw = 0; bw < max_bw; bw++) {
+                ioctl_stats->u.peer_rx_stats.get.stats[i].ave_rssi_ant[chain][bw] = g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].ave_rssi_ant[chain][bw];
+            }
+        }
+    }
+#else
+    int32_t                             rc;
+    struct iwreq                        request;
+    memset (&request, 0, sizeof(request));
+	request.u.data.pointer = ioctl_stats;
+	request.u.data.length = PS_UAPI_IOCTL_SIZE;
+	ioctl_stats->cmd = PS_UAPI_IOCTL_CMD_PEER_RX_STATS;
     rc = 
         ioctl80211_request_send(
                 ioctl80211_fd_get(),
@@ -459,7 +638,7 @@ ioctl_status_t ioctl80211_clients_stats_rx_fetch(
             strerror(errno));
         return IOCTL_STATUS_ERROR;
     }
-
+#endif
     /* Set current stats cookie () */
     client_entry->stats_cookie = ioctl_stats->u.peer_rx_stats.get.cookie;
 
@@ -497,7 +676,6 @@ ioctl_status_t ioctl80211_client_stats_tx_calculate(
     struct ps_uapi_ioctl           *new_stats_tx = NULL;
     struct ps_uapi_ioctl           *old_stats_tx = NULL;
     dpp_client_stats_tx_t          *client_stats_tx = NULL;
-    struct weight_avg               avgmbps = { .sum = 0, .cnt = 0 };
 
     uint32_t                        mcs;
     uint32_t                        nss;
@@ -567,17 +745,6 @@ ioctl_status_t ioctl80211_client_stats_tx_calculate(
             bw  = ((stats_index - PS_MAX_LEGACY) / (PS_MAX_MCS * PS_MAX_NSS));
             nss = (((stats_index - PS_MAX_LEGACY) / PS_MAX_MCS) % PS_MAX_NSS) + 1;
             mcs = (stats_index - PS_MAX_LEGACY) % PS_MAX_MCS;
-        }
-
-        if (kconfig_enabled(CONFIG_QCA_RATE_HISTO_TO_EXPECTED_TPUT)) {
-            weight_avg_add(
-                    &avgmbps,
-                    mcs_to_mbps(mcs, bw, nss, LONG_GUARD_INT),
-                    STATS_DELTA(
-                        new_stats_tx->u.peer_tx_stats.get.stats[stats_index].ppdus,
-                        old_stats_tx->u.peer_tx_stats.get.stats[stats_index].ppdus));
-
-            continue;
         }
 
         client_stats_tx =
@@ -790,20 +957,6 @@ ioctl_status_t ioctl80211_client_stats_tx_calculate(
 
     ds_dlist_insert_tail(&client_record->tid_record_list, record);
 
-    if (kconfig_enabled(CONFIG_QCA_RATE_HISTO_TO_EXPECTED_TPUT)) {
-        if (avgmbps.cnt) {
-            /* This overrides the "last tx rate" */
-            client_record->stats.rate_tx = weight_avg_get(&avgmbps);
-            LOG(TRACE,
-                 "Calculated %s client delta tx phyrate "MAC_ADDRESS_FORMAT
-                 " mbps=%f ppdus=%llu",
-                 radio_get_name_from_type(radio_type),
-                 MAC_ADDRESS_PRINT(data_new->info.mac),
-                 client_record->stats.rate_tx,
-                 avgmbps.cnt);
-        }
-    }
-
     return IOCTL_STATUS_OK;
 }
 
@@ -813,23 +966,49 @@ ioctl_status_t ioctl80211_clients_stats_tx_fetch(
         char                           *phyName,
         ioctl80211_client_record_t      *client_entry)
 {
-    int32_t                             rc;
-
-    struct iwreq                        request;
+    int                                 index;
+    uint8_t                             tid;
+    int                                 i;
     struct ps_uapi_ioctl               *ioctl_stats = &client_entry->stats_tx;
 
     memset (ioctl_stats, 0, sizeof(*ioctl_stats));
-    memset (&request, 0, sizeof(request));
-    request.u.data.pointer = ioctl_stats;
-    request.u.data.length = PS_UAPI_IOCTL_SIZE;
+#ifdef OPENSYNC_NL_SUPPORT
+    index = get_cli_mac_index(client_entry->info.mac, PEER_TX_STATS);
+    if (!(g_peer_tx_ioctl_stats[index].flags & PEER_STATS_FLAG))
+        return IOCTL_STATUS_ERROR;
+#endif
 
-    ioctl_stats->cmd = PS_UAPI_IOCTL_CMD_PEER_TX_STATS;
     ioctl_stats->u.peer_tx_stats.set.addr[0] = (u8)client_entry->info.mac[0];
     ioctl_stats->u.peer_tx_stats.set.addr[1] = (u8)client_entry->info.mac[1];
     ioctl_stats->u.peer_tx_stats.set.addr[2] = (u8)client_entry->info.mac[2];
     ioctl_stats->u.peer_tx_stats.set.addr[3] = (u8)client_entry->info.mac[3];
     ioctl_stats->u.peer_tx_stats.set.addr[4] = (u8)client_entry->info.mac[4];
     ioctl_stats->u.peer_tx_stats.set.addr[5] = (u8)client_entry->info.mac[5];
+
+#ifdef OPENSYNC_NL_SUPPORT
+    for (i = 0; i < WLANSTATS_CACHE_SIZE; i++)
+    {
+        ioctl_stats->flags = g_peer_tx_ioctl_stats[index].flags;
+        ioctl_stats->u.peer_tx_stats.get.stats[i].attempts = g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.stats[i].attempts;
+        ioctl_stats->u.peer_tx_stats.get.stats[i].success = g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.stats[i].success;
+        ioctl_stats->u.peer_tx_stats.get.stats[i].ppdus = g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.stats[i].ppdus;
+    }
+
+    for (tid = 0; tid < WLAN_DATA_TID_MAX; tid++)
+    {
+        ioctl_stats->u.peer_tx_stats.get.sojourn[tid].ave_sojourn_msec = g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.sojourn[tid].ave_sojourn_msec;
+        ioctl_stats->u.peer_tx_stats.get.sojourn[tid].sum_sojourn_msec = g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.sojourn[tid].sum_sojourn_msec;
+        ioctl_stats->u.peer_tx_stats.get.sojourn[tid].num_sojourn_mpdus = g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.sojourn[tid].num_sojourn_mpdus;
+    }
+#else
+
+    int32_t                             rc;
+    struct iwreq                        request;
+    memset (&request, 0, sizeof(request));
+	request.u.data.pointer = ioctl_stats;
+	request.u.data.length = PS_UAPI_IOCTL_SIZE;
+
+    ioctl_stats->cmd = PS_UAPI_IOCTL_CMD_PEER_TX_STATS;
 
     rc = 
         ioctl80211_request_send(
@@ -862,6 +1041,7 @@ ioctl_status_t ioctl80211_clients_stats_tx_fetch(
             strerror(errno));
         return IOCTL_STATUS_ERROR;
     }
+#endif
 
     return IOCTL_STATUS_OK;
 }
@@ -892,7 +1072,7 @@ ioctl_status_t ioctl80211_client_stats_calculate(
          && (new_stats->frames_rx < old_stats->frames_rx)
         )
     {
-        memset(old_stats, 0, sizeof(*old_stats));
+        memset(old_stats, 0, sizeof(ioctl80211_peer_stats_t));
     }
 
     client_record->stats.bytes_tx =
@@ -1146,7 +1326,6 @@ ioctl_status_t ioctl80211_peer_stats_calculate(
     }
 
     if (new_stats->rate_tx) {
-        /* Can be overridden with histogram derived average phyrate */
         client_record->stats.rate_tx = new_stats->rate_tx;
         client_record->stats.rate_tx /= 1000;
 
@@ -1159,7 +1338,6 @@ ioctl_status_t ioctl80211_peer_stats_calculate(
     }
 
     if (new_stats->rate_rx) {
-        /* Can be overridden with histogram derived average phyrate */
         client_record->stats.rate_rx = new_stats->rate_rx;
         client_record->stats.rate_rx /= 1000;
 
@@ -1183,24 +1361,10 @@ ioctl_status_t ioctl80211_clients_stats_fetch(
     int32_t                         rc;
     ioctl80211_client_stats_t      *stats_entry = &client_entry->stats.client;
 
-    struct iwreq                    request;
     struct ieee80211req_sta_stats   ieee80211_client_stats;
 
-    memset (&ieee80211_client_stats, 0, sizeof(ieee80211_client_stats));
-    memset (&request, 0, sizeof(request));
-    request.u.data.pointer = &ieee80211_client_stats;
-    request.u.data.length = sizeof(ieee80211_client_stats);
+    rc = osync_nl80211_clients_stats_fetch(radio_type,ifName,client_entry,&ieee80211_client_stats);
 
-    memcpy (ieee80211_client_stats.is_u.macaddr,
-            client_entry->info.mac,
-            sizeof(ieee80211_client_stats.is_u.macaddr));
-
-    rc = 
-        ioctl80211_request_send(
-                ioctl80211_fd_get(),
-                ifName,
-                IEEE80211_IOCTL_STA_STATS,
-                &request);
     if (0 > rc)
     {
         LOG(WARNING,
@@ -1291,6 +1455,18 @@ ioctl_status_t ioctl80211_clients_stats_fetch(
     return IOCTL_STATUS_OK;
 }
 
+void stainfo_cb(struct cfg80211_data *buffer)
+{
+    uint32_t    len = buffer->length;
+
+    if (len < sizeof(struct ieee80211req_sta_info)) {
+        return;
+    }
+
+    memcpy((ieee80211_clients + g_cli_len), buffer->data, len);
+    g_cli_len += len;
+}
+
 static
 ioctl_status_t ioctl80211_clients_list_fetch(
         radio_entry_t              *radio_cfg,
@@ -1300,12 +1476,10 @@ ioctl_status_t ioctl80211_clients_list_fetch(
 {
     ioctl_status_t                  status;
     int32_t                         rc;
+    uint32_t                        length = 0;
     ioctl80211_client_record_t     *client_entry = NULL;
     radio_type_t                    radio_type;
 
-    struct iwreq                    request;
-
-    uint8_t                         ieee80211_clients[IOCTL80211_CLIENTS_SIZE];
     ssize_t                         ieee80211_client_offset = 0;
     struct ieee80211req_sta_info   *ieee80211_client = NULL;
 
@@ -1315,6 +1489,41 @@ ioctl_status_t ioctl80211_clients_list_fetch(
         return IOCTL_STATUS_ERROR;
     }
     memset (ieee80211_clients, 0, sizeof(ieee80211_clients));
+    g_cli_len = 0;
+
+#if OPENSYNC_NL_SUPPORT
+    struct cfg80211_data            buffer;
+    uint8_t                        *buf;
+
+    buf = malloc(LIST_STATION_CFG_ALLOC_SIZE);
+    if (!buf) {
+        LOGI("%s: Unable to allocate memory for station list\n", __func__);
+        return IOCTL_STATUS_ERROR;
+    }
+
+    buffer.data         = buf;
+    buffer.length       = LIST_STATION_CFG_ALLOC_SIZE;
+    buffer.callback     = &stainfo_cb;
+    buffer.parse_data   = 0;
+    rc = wifi_cfg80211_send_generic_command(&(sock_ctx.cfg80211_ctxt),
+            QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION,
+            QCA_NL80211_VENDOR_SUBCMD_LIST_STA, ifName,
+            (char *)&buffer, buffer.length);
+    if (0 > rc) {
+        free(buf);
+        LOG(ERR,
+            "Parsing %s %s client stats (Failed to get info '%s')",
+            radio_get_name_from_type(radio_type),
+            ifName,
+            strerror(errno));
+        return IOCTL_STATUS_ERROR;
+    }
+
+    length = buffer.length;
+    LOGD("%s: length - %u\n", __func__, length);
+    free(buf);
+#else
+    struct iwreq                    request;
 
     memset (&request, 0, sizeof(request));
     request.u.data.pointer = ieee80211_clients;
@@ -1335,8 +1544,12 @@ ioctl_status_t ioctl80211_clients_list_fetch(
         return IOCTL_STATUS_ERROR;
     }
 
+    length = request.u.data.length;
+    LOGD("%s: length - %u\n", __func__, length);
+#endif
+
     for (   ieee80211_client_offset = 0;
-            request.u.data.length - ieee80211_client_offset >= (int)sizeof(*ieee80211_client);)
+            length - ieee80211_client_offset >= (int)sizeof(*ieee80211_client);)
     {
         ieee80211_client =
             (struct ieee80211req_sta_info *)
@@ -1377,7 +1590,9 @@ ioctl_status_t ioctl80211_clients_list_fetch(
             radio_get_name_from_type(radio_type),
             client_entry->stats.client.rssi);
 
-        STRSCPY(client_entry->info.ifname, ifName);
+        strlcpy(client_entry->info.ifname,
+                ifName,
+                sizeof(client_entry->info.ifname));
         LOG(TRACE,
             "Parsed %s client IFNAME %s",
             radio_get_name_from_type(radio_type),
@@ -1459,13 +1674,6 @@ error:
     return IOCTL_STATUS_OK;
 }
 
-struct ioctl80211_vap_stats
-{   
-    struct ieee80211_stats          vap_stats;
-    struct ieee80211_mac_stats      vap_unicast_stats;
-    struct ieee80211_mac_stats      vap_multicast_stats;
-};
-
 static
 ioctl_status_t ioctl80211_peer_stats_fetch(
         radio_type_t                radio_type,
@@ -1473,7 +1681,6 @@ ioctl_status_t ioctl80211_peer_stats_fetch(
         ioctl80211_client_record_t *client_entry)
 {
     int32_t                         rc;
-    struct ifreq                    if_req;
     ioctl80211_peer_stats_t        *stats_entry = &client_entry->stats.peer;
 
     struct ioctl80211_vap_stats     vap_stats;
@@ -1489,16 +1696,7 @@ ioctl_status_t ioctl80211_peer_stats_fetch(
      */
     memset (&vap_stats, 0, sizeof(vap_stats));
 
-    memset (&if_req, 0, sizeof(if_req));
-    STRSCPY(if_req.ifr_name, ifName);
-    if_req.ifr_data = (caddr_t) &vap_stats;
-
-    /* Initiate Atheros stats fetch */
-    rc =
-        ioctl(
-                ioctl80211_fd_get(),
-                SIOCG80211STATS,
-                &if_req);
+    rc = osync_nl80211_peer_stats_fetch(ifName,&vap_stats);
     if (0 > rc)
     {
         LOG(ERR,
@@ -1608,11 +1806,9 @@ ioctl_status_t ioctl80211_peer_list_fetch(
         ds_dlist_t                 *client_list)
 {
     ioctl_status_t                  status;
-    int32_t                         rc;
     ioctl80211_client_record_t     *client_entry = NULL;
     radio_type_t                    radio_type;
     unsigned char                   sig8;
-    struct iwreq                    request;
 
     radio_type = radio_cfg->type;
 
@@ -1640,7 +1836,67 @@ ioctl_status_t ioctl80211_peer_list_fetch(
         radio_get_name_from_type(radio_type),
         MAC_ADDRESS_PRINT(client_entry->info.mac));
 
+#ifdef OPENSYNC_NL_SUPPORT
+    iwstats *          stats;
+    FILE *    f;
+    char      buf[256];
+    char *    bp;
+    int       t;
+
+    f = fopen(PROC_NET_WIRELESS, "r");
+    if(f==NULL)
+        return -1;
+
+    stats = (iwstats*)malloc(sizeof(iwstats));
+    if(stats == NULL)
+        return -1;
+    while(fgets(buf,255,f))
+    {
+            bp=buf;
+            while(*bp&&isspace(*bp))
+                    bp++;
+            if(strncmp(bp,radio_cfg->if_name,strlen(radio_cfg->if_name))==0 && bp[strlen(radio_cfg->if_name)]==':')
+            {
+                    bp=strchr(bp,':');
+                    bp++;
+
+                    bp = strtok(bp, " ");
+                    sscanf(bp, "%X", &t);
+                    stats->status = (unsigned short) t;
+                    bp = strtok(NULL, " ");
+                    if(strchr(bp,'.') != NULL)
+                            stats->qual.updated |= 1;
+                    sscanf(bp, "%d", &t);
+                    stats->qual.qual = (unsigned char) t;
+                    bp = strtok(NULL, " ");
+                    if(strchr(bp,'.') != NULL)
+                            stats->qual.updated |= 2;
+                    sscanf(bp, "%d", &t);
+                    stats->qual.level = (unsigned char) t;
+
+                    bp = strtok(NULL, " ");
+                    if(strchr(bp,'.') != NULL)
+                            stats->qual.updated += 4;
+                    sscanf(bp, "%d", &t);
+                    stats->qual.noise = (unsigned char) t;
+                    printf("%s \n",bp);
+
+                    bp = strtok(NULL, " ");
+                    sscanf(bp, "%d", &stats->discard.nwid);
+                    bp = strtok(NULL, " ");
+                    sscanf(bp, "%d", &stats->discard.code);
+                    bp = strtok(NULL, " ");
+                    sscanf(bp, "%d", &stats->discard.misc);
+                    fclose(f);
+            }
+    }
+    fclose(f);
+    sig8  = stats->qual.level;
+    sig8 -= stats->qual.noise;
+#else
     struct  iw_statistics       request_stats;
+    struct iwreq                request;
+    int32_t                     rc;
     memset (&request_stats, 0, sizeof(request_stats));
     request.u.data.pointer = (caddr_t) &request_stats;
     request.u.data.length = sizeof(request_stats);
@@ -1664,6 +1920,7 @@ ioctl_status_t ioctl80211_peer_list_fetch(
     /* Note: This relies on 8-bit unsigned int wraparound */
     sig8 = request_stats.qual.level;
     sig8 -= request_stats.qual.noise;
+#endif
 
     client_entry->stats.peer.rssi = sig8;
 
@@ -1672,7 +1929,9 @@ ioctl_status_t ioctl80211_peer_list_fetch(
         radio_get_name_from_type(radio_type),
         client_entry->stats.peer.rssi);
 
-    STRSCPY(client_entry->info.ifname, ifName);
+    strlcpy(client_entry->info.ifname,
+            ifName,
+            sizeof(client_entry->info.ifname));
 
     LOG(TRACE,
             "Parsed %s peer IFNAME %s",

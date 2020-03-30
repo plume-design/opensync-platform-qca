@@ -52,7 +52,12 @@ typedef uint64_t u64;
 typedef uint32_t u32;
 typedef uint16_t u16;
 typedef uint8_t  u8;
+
+#ifdef CONFIG_PLATFORM_QCA_QSDK110
+#include "ps_uapi_11ax.h"
+#else
 #include "ps_uapi.h"
+#endif
 
 #ifndef ARCH_X86
 /*

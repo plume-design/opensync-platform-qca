@@ -33,12 +33,19 @@ UNIT_SRC := $(TARGET_COMMON_SRC)
 
 # Platform specific target library sources
 UNIT_SRC_PLATFORM := $(OVERRIDE_DIR)
-UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_ioctl_init.c
+ifeq ($(CONFIG_PLATFORM_QCA_QSDK110),y)
+UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_ioctl_stats_11ax.c
+UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_qca_11ax.c
+UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/wiphy_info_11ax.c
+else
 UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_ioctl_stats.c
 UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_qca.c
+UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/wiphy_info.c
+endif
+
+UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_ioctl_init.c
 UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_switch.c
 UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_mcproxy.c
-UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/wiphy_info.c
 UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/hostapd_util.c
 UNIT_SRC_TOP += $(OVERRIDE_DIR)/ecm_util.c
 UNIT_SRC_TOP += $(OVERRIDE_DIR)/ssdk_util.c
