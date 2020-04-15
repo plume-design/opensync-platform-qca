@@ -10,7 +10,7 @@ config QCA_SDK_PATH
 
 config QCA_RATE_HISTO_TO_EXPECTED_TPUT
     bool "use mcs histograms to compute expected throughput phyrates"
-    default n
+    default y
     help
         This makes sense only for 11ac and older devices which
         originally were intended to report mcs histograms. Some of
@@ -37,6 +37,13 @@ config QSDK_VERSION
     hex
     default 0x0502 if PLATFORM_QCA_QSDK52
     default 0x0503 if PLATFORM_QCA_QSDK53
+    default 0x1100 if PLATFORM_QCA_QSDK110
     default 0
 
+config QCA_USE_SYSUPGRADE
+    bool "Use sysupgrade for upgrades"
+    default n
+    help
+        This is a default OpenSync upgrade layer implementation for QCA
+        based devices.
 endif

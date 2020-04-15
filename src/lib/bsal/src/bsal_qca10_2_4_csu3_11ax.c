@@ -101,7 +101,7 @@ struct socket_context sock_ctx;
 static bsal_event_cb_t      _bsal_event_cb      = NULL;
 static int                  _bsal_netlink_fd    = -1;
 static int                  _bsal_rt_netlink_fd = -1;
-static int                  _bsal_ioctl_fd      = -1;
+int                         _bsal_ioctl_fd      = -1;
 
 static struct ev_loop       *_ev_loop           = NULL;
 static struct ev_io         _evio;
@@ -517,7 +517,7 @@ static void qca_bsal_event_process(void)
         return;
     }
 
-    strncpy(event->ifname, ifname, BSAL_IFNAME_LEN);
+    STRSCPY(event->ifname, ifname);
 
     switch (bsev->type) {
 
@@ -739,15 +739,19 @@ int qca_bsal_client_get_datarate_info(
         bsal_datarate_info_t *datarate)
 {
     struct ieee80211req_athdbg      athdbg;
-    struct iwreq                    iwreq;
-    int                             result;
+    int                             result = 0;
 
     memset(&athdbg, 0, sizeof(athdbg));
     athdbg.cmd = IEEE80211_DBGREQ_BSTEERING_GET_DATARATE_INFO;
+    athdbg.needs_reply = DBGREQ_REPLY_IS_REQUIRED;
     memcpy(&athdbg.dstmac, mac_addr, sizeof(athdbg.dstmac));
+#ifdef OPENSYNC_NL_SUPPORT
+    send_nl_command(&sock_ctx, ifname, &athdbg, sizeof(athdbg), NULL, QCA_NL80211_VENDOR_SUBCMD_DBGREQ);
+#else
+    struct iwreq                    iwreq;
 
     memset(&iwreq, 0, sizeof(iwreq));
-    strncpy(iwreq.ifr_name, ifname, sizeof(iwreq.ifr_name) - 1);
+    STRSCPY(iwreq.ifr_name, ifname);
     iwreq.u.data.pointer = (void *)&athdbg;
     iwreq.u.data.length  = sizeof(athdbg);
 
@@ -756,7 +760,7 @@ int qca_bsal_client_get_datarate_info(
     if (result < 0) {
         return result;
     }
-
+#endif
     datarate->max_chwidth = athdbg.data.bsteering_datarate_info.max_chwidth;
     datarate->max_streams = athdbg.data.bsteering_datarate_info.num_streams;
     datarate->phy_mode = athdbg.data.bsteering_datarate_info.phymode;
@@ -944,8 +948,8 @@ static bool qca_bss_tm_request(
     }
 
     // Build the hostapd bss_tm_req command
-    // PIR-12246: Remove "bss_term=1,0". It is hardcoded to "0202020202020202" inside hostapd code,
-    //            causing "Error/Malformed" BSS Transition Request packets
+    // Don't use "bss_term=1,0", since it is hardcoded to "0202020202020202" inside
+    // hostapd code, causing "Error/Malformed" BSS Transition Request packets
     snprintf(btm_req_cmd, sizeof(btm_req_cmd),
              "%s %s valid_int=%hhu pref=%hhu abridged=%hhu disassoc_imminent=%hhu",
              client_mac, (strlen(neigh_list) ? neigh_list : ""),

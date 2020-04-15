@@ -49,13 +49,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "wiphy_info.h"
 #include "util.h"
 
-#define MAX_BUF_SIZE 4096
-
-/* external data */
-extern char g_channel_buf_0[MAX_BUF_SIZE];
-extern char g_channel_buf_1[MAX_BUF_SIZE];
-extern char g_channel_buf_2[MAX_BUF_SIZE];
-
 /* local types */
 enum {
     CHAN_2GHZ = 1 << 0,
@@ -216,23 +209,18 @@ static int
 identify_band_wlanconfig2(const char *ifname,
                       const char **band)
 {
-    char buffer[MAX_BUF_SIZE];
-    char *buf;
     char *line;
     char *chan;
     int flags = 0;
+    char *buf = NULL;
 
-    buf = buffer;
-    memset(buffer, 0, sizeof(buffer));
+    buf = strexa("exttool", "--interface", ifname, "--list");
+    if (!buf)
+        return -EOPNOTSUPP;
 
-    if (!(strcmp(ifname, "wifi0")))
-        memcpy(buffer, g_channel_buf_0, sizeof(buffer));
-    else if (!(strcmp(ifname, "wifi1")))
-        memcpy(buffer, g_channel_buf_1, sizeof(buffer));
-    else if (!(strcmp(ifname, "wifi2")))
-        memcpy(buffer, g_channel_buf_2, sizeof(buffer));
-
-    while ((line = strsep(&buf, "\n"))) {
+    while ((line = strsep(&buf, "\r\n"))) {
+        if (!(strsep(&line, " ")))
+            continue;
         if (!(chan = strsep(&line, " ")))
             continue;
 
@@ -392,10 +380,7 @@ wiphy_info_init_ifname(const char *ifname)
     if (WARN_ON(!info->band))
         return -1;
 
-    if (strstr(info->band, "5G") == info->band)
-        info->mode = "11ac";
-    else
-        info->mode = "11n";
+    info->mode = "11ax";
 
     if (!strcmp(info->band, "2.4G"))
         STRSCPY(g_wiphy_2ghz_ifname, ifname);

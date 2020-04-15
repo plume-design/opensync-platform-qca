@@ -129,16 +129,12 @@ struct socket_context {
 
 extern uint16_t g_stainfo_len;
 extern uint8_t bsal_clients[IOCTL80211_CLIENTS_SIZE];
-
-#define MAX_BUF_SIZE 4096
-extern char g_channel_buf_0[MAX_BUF_SIZE];
-extern char g_channel_buf_1[MAX_BUF_SIZE];
-extern char g_channel_buf_2[MAX_BUF_SIZE];
+extern int  _bsal_ioctl_fd;
 
 int readcmd(char *buf, size_t buflen, void (*xfrm)(char *), const char *fmt, ...);
 
 int ether_mac2string(char *mac_string, const uint8_t mac[IEEE80211_ADDR_LEN]);
-int ether_string2mac( uint8_t mac[IEEE80211_ADDR_LEN], const char *mac_addr);
+int ether_string2mac(uint8_t mac[IEEE80211_ADDR_LEN], const char *mac_addr);
 long long int power (int index, int exponent);
 void print_hex_buffer(void *buf, int len);
 int start_event_thread (struct socket_context *sock_ctx);
@@ -152,13 +148,14 @@ int do_forkexec(const char *file, const char **argv, void (*xfrm)(char *), char 
 
 #if defined (OSYNC_IOCTL_LIB) && (OSYNC_IOCTL_LIB == 0)
 static int
-qca_bsal_bs_enable( int fd, const char *ifname, bool enable );
+qca_bsal_bs_enable(int fd, const char *ifname, bool enable);
 static inline int
-osync_nl80211_bsal_bs_enable( int fd, const char *ifname, bool enable )	{
-	struct ieee80211req_athdbg      athdbg;
+osync_nl80211_bsal_bs_enable(int fd, const char *ifname, bool enable)
+{
+    struct ieee80211req_athdbg      athdbg;
 
     // set band steering
-    memset( &athdbg, 0, sizeof( athdbg ) );
+    memset(&athdbg, 0, sizeof(athdbg));
     athdbg.cmd = IEEE80211_DBGREQ_BSTEERING_ENABLE;
     athdbg.data.bsteering_enable = enable;
 
@@ -167,36 +164,35 @@ osync_nl80211_bsal_bs_enable( int fd, const char *ifname, bool enable )	{
 #else
     int                             ret;
     struct iwreq                    iwreq;
-    memset( &iwreq, 0, sizeof( iwreq ) );
-    strncpy( iwreq.ifr_name, ifname, sizeof( iwreq.ifr_name ) - 1 );
-    iwreq.u.data.pointer = ( void * )&athdbg;
-    iwreq.u.data.length  = sizeof( athdbg );
+    memset(&iwreq, 0, sizeof(iwreq));
+    STRSCPY(iwreq.ifr_name, ifname);
+    iwreq.u.data.pointer = (void *)&athdbg;
+    iwreq.u.data.length  = sizeof(athdbg);
 
-    ret = ioctl( fd, IEEE80211_IOCTL_DBGREQ, &iwreq );
-    if( ret < 0 && errno != EALREADY ) {
-        LOGE( "Failed to set %s enable to %d, errno %d,(%s)",
-                            ifname, enable, errno, strerror( errno ) );
+    ret = ioctl(fd, IEEE80211_IOCTL_DBGREQ, &iwreq);
+    if(ret < 0 && errno != EALREADY) {
+        LOGE("Failed to set %s enable to %d, errno %d,(%s)",
+                ifname, enable, errno, strerror(errno));
         return -1;
     }
 #endif
     // set band steering events
-    memset( &athdbg, 0, sizeof( athdbg ) );
+    memset(&athdbg, 0, sizeof(athdbg));
     athdbg.cmd = IEEE80211_DBGREQ_BSTEERING_ENABLE_EVENTS;
     athdbg.data.bsteering_enable = enable;
 
 #ifdef OPENSYNC_NL_SUPPORT
     send_nl_command(&sock_ctx, ifname, &athdbg, sizeof(athdbg), NULL, QCA_NL80211_VENDOR_SUBCMD_DBGREQ);
 #else
-    memset( &iwreq, 0, sizeof( iwreq ) );
-    strncpy( iwreq.ifr_name, ifname, sizeof( iwreq.ifr_name ) - 1 );
-    iwreq.u.data.pointer = ( void * )&athdbg;
-    iwreq.u.data.length  = sizeof( athdbg );
+    memset(&iwreq, 0, sizeof(iwreq));
+    STRSCPY(iwreq.ifr_name, ifname);
+    iwreq.u.data.pointer = (void *)&athdbg;
+    iwreq.u.data.length  = sizeof(athdbg);
 
-
-    ret = ioctl( fd, IEEE80211_IOCTL_DBGREQ, &iwreq );
-    if(ret < 0 && enable && errno != EALREADY ) {
-        LOGE( "Failed to set %s events enable to %d, errno %d,(%s)",
-                                        ifname, enable, errno, strerror( errno ) );
+    ret = ioctl(fd, IEEE80211_IOCTL_DBGREQ, &iwreq);
+    if(ret < 0 && enable && errno != EALREADY) {
+        LOGE("Failed to set %s events enable to %d, errno %d,(%s)",
+                ifname, enable, errno, strerror(errno));
         return -1;
     }
 
@@ -205,12 +201,13 @@ osync_nl80211_bsal_bs_enable( int fd, const char *ifname, bool enable )	{
 }
 
 static inline int
-osync_nl80211_bsal_bs_config( int fd, const bsal_ifconfig_t *ifcfg, bool enable )	{
+osync_nl80211_bsal_bs_config(int fd, const bsal_ifconfig_t *ifcfg, bool enable)
+{
     struct ieee80211req_athdbg      athdbg;
     int                             index;
 
     // Have to disable before config parameters can be set
-    if( qca_bsal_bs_enable( fd, ifcfg->ifname, false ) < 0 ) {
+    if(qca_bsal_bs_enable(fd, ifcfg->ifname, false) < 0) {
         return -1;
     }
 
@@ -219,7 +216,7 @@ osync_nl80211_bsal_bs_config( int fd, const bsal_ifconfig_t *ifcfg, bool enable 
     }
 
     // Band steering parameters
-    memset( &athdbg, 0, sizeof( athdbg ) );
+    memset(&athdbg, 0, sizeof(athdbg));
     athdbg.cmd = IEEE80211_DBGREQ_BSTEERING_SET_PARAMS;
     athdbg.data.bsteering_param.utilization_sample_period         = ifcfg->chan_util_check_sec;
     athdbg.data.bsteering_param.utilization_average_num_samples   = ifcfg->chan_util_avg_count;
@@ -241,21 +238,21 @@ osync_nl80211_bsal_bs_config( int fd, const bsal_ifconfig_t *ifcfg, bool enable 
 #else
     int                             ret;
     struct iwreq                    iwreq;
-    memset( &iwreq, 0, sizeof( iwreq ) );
-    strncpy( iwreq.ifr_name, ifcfg->ifname, sizeof( iwreq.ifr_name ) - 1 );
-    iwreq.u.data.pointer = ( void * )&athdbg;
-    iwreq.u.data.length  = sizeof( athdbg );
+    memset(&iwreq, 0, sizeof(iwreq));
+    STRSCPY(iwreq.ifr_name, ifcfg->ifname);
+    iwreq.u.data.pointer = (void *)&athdbg;
+    iwreq.u.data.length  = sizeof(athdbg);
 
-    ret = ioctl( fd, IEEE80211_IOCTL_DBGREQ, &iwreq );
-    if( ret < 0 ) {
+    ret = ioctl(fd, IEEE80211_IOCTL_DBGREQ, &iwreq);
+    if(ret < 0) {
         LOGE("Failed to set %s config, errno %d,(%s)",
-                                ifcfg->ifname, errno, strerror( errno ) );
+              ifcfg->ifname, errno, strerror(errno));
         return -1;
     }
 #endif
 
     // Band steering debug parameters
-    memset( &athdbg, 0, sizeof( athdbg ) );
+    memset(&athdbg, 0, sizeof(athdbg));
     athdbg.cmd = IEEE80211_DBGREQ_BSTEERING_SET_DBG_PARAMS;
     athdbg.data.bsteering_dbg_param.raw_chan_util_log_enable    = ifcfg->debug.raw_chan_util;
     athdbg.data.bsteering_dbg_param.raw_rssi_log_enable         = ifcfg->debug.raw_rssi;
@@ -263,49 +260,49 @@ osync_nl80211_bsal_bs_config( int fd, const bsal_ifconfig_t *ifcfg, bool enable 
 #ifdef OPENSYNC_NL_SUPPORT
     send_nl_command(&sock_ctx, ifcfg->ifname, &athdbg, sizeof(athdbg), NULL, QCA_NL80211_VENDOR_SUBCMD_DBGREQ);
 #else
-    memset( &iwreq, 0, sizeof( iwreq ) );
-    strncpy( iwreq.ifr_name, ifcfg->ifname, sizeof( iwreq.ifr_name ) - 1 );
-    iwreq.u.data.pointer = ( void * )&athdbg;
-    iwreq.u.data.length  = sizeof( athdbg );
+    memset(&iwreq, 0, sizeof(iwreq));
+    STRSCPY(iwreq.ifr_name, ifcfg->ifname);
+    iwreq.u.data.pointer = (void *)&athdbg;
+    iwreq.u.data.length  = sizeof(athdbg);
 
-    ret = ioctl( fd, IEEE80211_IOCTL_DBGREQ, &iwreq );
-    if( ret < 0 ) {
-        LOGE( "Failed to set %s DBG config, errno %d,(%s)",
-                                    ifcfg->ifname, errno, strerror( errno ) );
+    ret = ioctl(fd, IEEE80211_IOCTL_DBGREQ, &iwreq);
+    if(ret < 0) {
+        LOGE("Failed to set %s DBG config, errno %d,(%s)",
+              ifcfg->ifname, errno, strerror(errno));
         return -1;
     }
 #endif
-    return qca_bsal_bs_enable( fd, ifcfg->ifname, true );
+    return qca_bsal_bs_enable(fd, ifcfg->ifname, true);
 
 }
 
 static inline int
-osync_nl80211_bsal_acl_mac( int fd, const char *ifname, const uint8_t *mac_addr, bool add )
+osync_nl80211_bsal_acl_mac(int fd, const char *ifname, const uint8_t *mac_addr, bool add)
 {
-	struct sockaddr         saddr;
+    struct sockaddr         saddr;
 
-    memset( &saddr, 0, sizeof( saddr ) );
-    memcpy( &saddr.sa_data, mac_addr, BSAL_MAC_ADDR_LEN );
+    memset(&saddr, 0, sizeof(saddr));
+    memcpy(&saddr.sa_data, mac_addr, BSAL_MAC_ADDR_LEN);
 #ifdef OPENSYNC_NL_SUPPORT
     int                     cno = add ? QCA_NL80211_VENDORSUBCMD_ADDMAC
-                                        : QCA_NL80211_VENDORSUBCMD_DELMAC;
+                                      : QCA_NL80211_VENDORSUBCMD_DELMAC;
 #else
     int 					ret;
     struct iwreq            iwreq;
     int                     ino = add ? IEEE80211_IOCTL_ADDMAC
-                                        : IEEE80211_IOCTL_DELMAC;
+                                      : IEEE80211_IOCTL_DELMAC;
 
-    memset( &iwreq, 0, sizeof( iwreq ) );
-    strncpy( iwreq.ifr_name, ifname, sizeof( iwreq.ifr_name ) - 1 );
-    memcpy( iwreq.u.name, &saddr, sizeof( saddr ) );
+    memset(&iwreq, 0, sizeof(iwreq));
+    STRSCPY(iwreq.ifr_name, ifname);
+    memcpy(iwreq.u.name, &saddr, sizeof(saddr));
 #endif
 #ifdef OPENSYNC_NL_SUPPORT
     send_nl_command(&sock_ctx, ifname, &saddr, BSAL_MAC_ADDR_LEN, NULL, cno);
 #else
-    ret = ioctl( fd, ino, &iwreq );
-	if( ret < 0 ) {
-        LOGE( "ioctl(IEEE80211_DBGREQ_BSTEERING_SET_CLI_PARAMS) failed, " \
-              " and returned errno = %d (%s)", errno, strerror( errno ) );
+    ret = ioctl(fd, ino, &iwreq);
+    if(ret < 0) {
+        LOGE("ioctl(IEEE80211_DBGREQ_BSTEERING_SET_CLI_PARAMS) failed, " \
+             " and returned errno = %d (%s)", errno, strerror(errno));
     }
 #endif
 
@@ -313,12 +310,12 @@ osync_nl80211_bsal_acl_mac( int fd, const char *ifname, const uint8_t *mac_addr,
 }
 
 static inline int
-osync_nl80211_bsal_bs_client_config( int fd, const char *ifname, const uint8_t *mac_addr, const bsal_client_config_t *conf )
+osync_nl80211_bsal_bs_client_config(int fd, const char *ifname, const uint8_t *mac_addr, const bsal_client_config_t *conf)
 {
-	struct ieee80211req_athdbg      athdbg;
+    struct ieee80211req_athdbg      athdbg;
     int                             ret = 0;
 
-    memset( &athdbg, 0, sizeof( athdbg ) );
+    memset(&athdbg, 0, sizeof(athdbg));
     athdbg.cmd = IEEE80211_DBGREQ_ACL_SET_CLI_PARAMS;
     memcpy(&athdbg.dstmac, mac_addr, sizeof(athdbg.dstmac));
 
@@ -339,15 +336,15 @@ osync_nl80211_bsal_bs_client_config( int fd, const char *ifname, const uint8_t *
 #else
 
     struct iwreq                    iwreq;
-    memset (&iwreq, 0, sizeof( iwreq ) );
-    strncpy( iwreq.ifr_name, ifname, sizeof( iwreq.ifr_name ) - 1 );
-    iwreq.u.data.pointer = ( void * )&athdbg;
-    iwreq.u.data.length  = sizeof( athdbg );
+    memset (&iwreq, 0, sizeof(iwreq));
+    STRSCPY(iwreq.ifr_name, ifname);
+    iwreq.u.data.pointer = (void *)&athdbg;
+    iwreq.u.data.length  = sizeof(athdbg);
 
-    ret = ioctl( fd, IEEE80211_IOCTL_DBGREQ, &iwreq );
-    if( ret < 0 ) {
-        LOGE( "ioctl(IEEE80211_DBGREQ_BSTEERING_SET_CLI_PARAMS) failed, " \
-              " and returned errno = %d (%s)", errno, strerror( errno ) );
+    ret = ioctl(fd, IEEE80211_IOCTL_DBGREQ, &iwreq);
+    if(ret < 0) {
+        LOGE("ioctl(IEEE80211_DBGREQ_BSTEERING_SET_CLI_PARAMS) failed, " \
+             " and returned errno = %d (%s)", errno, strerror(errno));
     }
 #endif
     return ret;
@@ -365,6 +362,51 @@ static inline void bsal_stainfo_cb(struct cfg80211_data *buffer)
     memcpy((bsal_clients + g_stainfo_len), buffer->data, len);
     g_stainfo_len += len;
 }
+
+static inline int
+qca_bsal_client_stats(const char *ifname,
+                      const uint8_t *mac_addr,
+                      bsal_client_info_t *info)
+{
+    struct ieee80211req_sta_stats stats = {0};
+    const struct ieee80211_nodestats *ns = &stats.is_stats;
+
+    memcpy(stats.is_u.macaddr, mac_addr, IEEE80211_ADDR_LEN);
+#if OPENSYNC_NL_SUPPORT
+    struct cfg80211_data            buffer;
+    int                             msg;
+
+    buffer.data = (uint8_t *)&stats;
+    buffer.length = sizeof(stats);
+    buffer.callback = NULL;
+    buffer.parse_data = 0;
+    msg = wifi_cfg80211_send_generic_command(&(sock_ctx.cfg80211_ctxt),
+            QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION,
+            QCA_NL80211_VENDOR_SUBCMD_STA_STATS,
+            ifname, (char *)&buffer, LIST_STATION_CFG_ALLOC_SIZE);
+    if (msg < 0) {
+        LOGE("%s: Unable to get STA Stats", ifname);
+        return -1;
+    }
+#else
+    struct iwreq iwr;
+
+    memset(&iwr, 0, sizeof(iwr));
+    STRSCPY(iwr.ifr_name, ifname);
+    iwr.u.data.pointer = (void *)&stats;
+    iwr.u.data.length = sizeof(stats);
+
+    if (ioctl(_bsal_ioctl_fd, IEEE80211_IOCTL_STA_STATS, &iwr) < 0) {
+        LOGE("%s IEEE80211_IOCTL_STA_STATS", ifname);
+        return -1;
+    }
+#endif
+    info->tx_bytes = ns->ns_tx_bytes;
+    info->rx_bytes = ns->ns_rx_bytes;
+
+    return 0;
+}
+
 static inline int
 osync_nl80211_sta_info(const char *ifname, const uint8_t *mac_addr, bsal_client_info_t *info)
 {
@@ -416,44 +458,44 @@ osync_nl80211_sta_info(const char *ifname, const uint8_t *mac_addr, bsal_client_
     int                             ret;
 
     len = 24*1024;
-    if( !( buf = malloc( len )) ) {
-        LOGE( "Failed to allocate memory for STA list!" );
+    if(!(buf = malloc(len))) {
+        LOGE("Failed to allocate memory for STA list!");
         return -1;
     }
 
-    memset( &iwreq, 0, sizeof( iwreq ) );
-    strncpy( iwreq.ifr_name, ifname, sizeof( iwreq.ifr_name ) - 1 );
-    iwreq.u.data.pointer = ( void * )buf;
+    memset(&iwreq, 0, sizeof(iwreq));
+    STRSCPY(iwreq.ifr_name, ifname);
+    iwreq.u.data.pointer = (void *)buf;
     iwreq.u.data.length  = len;
     iwreq.u.data.flags   = 0;
 
-    ret = ioctl( _bsal_ioctl_fd, IEEE80211_IOCTL_STA_INFO, &iwreq );
-    if( ret < 0 ) {
-        LOGE( "%s: Failed to get station list, errno = %d (%s)",
-                                            ifname, errno, strerror( errno ) );
-        free( buf );
+    ret = ioctl(_bsal_ioctl_fd, IEEE80211_IOCTL_STA_INFO, &iwreq);
+    if(ret < 0) {
+        LOGE("%s: Failed to get station list, errno = %d (%s)",
+              ifname, errno, strerror(errno));
+        free(buf);
         return -1;
     }
-    else if( ret > 0 ) {
+    else if(ret > 0) {
         // Wasn't enough space, let's realloc
         len = ret;
-        free( buf );
-        if( !( buf = malloc( len )) ) {
-            LOGE( "Failed to allocate memory for STA list! (%d bytes)", len );
+        free(buf);
+        if(!(buf = malloc(len))) {
+            LOGE("Failed to allocate memory for STA list! (%d bytes)", len);
             return -1;
         }
 
-        memset( &iwreq, 0, sizeof( iwreq ) );
-        strncpy( iwreq.ifr_name, ifname, sizeof( iwreq.ifr_name ) - 1 );
-        iwreq.u.data.pointer = ( void * )buf;
+        memset(&iwreq, 0, sizeof(iwreq));
+        STRSCPY(iwreq.ifr_name, ifname);
+        iwreq.u.data.pointer = (void *)buf;
         iwreq.u.data.length  = len;
         iwreq.u.data.flags   = 0;
 
-        ret = ioctl( _bsal_ioctl_fd, IEEE80211_IOCTL_STA_INFO, &iwreq );
-        if( ret < 0 ) {
-            LOGE( "%s: Failed to get station list, errno = %d (%s)",
-                                            ifname, errno, strerror( errno ) );
-            free( buf );
+        ret = ioctl(_bsal_ioctl_fd, IEEE80211_IOCTL_STA_INFO, &iwreq);
+        if(ret < 0) {
+            LOGE("%s: Failed to get station list, errno = %d (%s)",
+                  ifname, errno, strerror(errno));
+            free(buf);
             return -1;
         }
     }
@@ -462,10 +504,10 @@ osync_nl80211_sta_info(const char *ifname, const uint8_t *mac_addr, bsal_client_
     }
 #endif
     p = buf;
-    while( len >= sizeof( *sta ) ) {
-        sta = ( struct ieee80211req_sta_info * )p;
+    while(len >= sizeof(*sta)) {
+        sta = (struct ieee80211req_sta_info *)p;
 
-        if( memcmp( sta->isi_macaddr, mac_addr, sizeof( sta->isi_macaddr ) ) == 0 ) {
+        if(memcmp(sta->isi_macaddr, mac_addr, sizeof(sta->isi_macaddr)) == 0) {
             found = true;
             break;
         }
@@ -490,42 +532,44 @@ osync_nl80211_sta_info(const char *ifname, const uint8_t *mac_addr, bsal_client_
         }
     }
 #ifndef OPENSYNC_NL_SUPPORT
-    free( buf );
+    free(buf);
 #endif
+    if (info->connected)
+        qca_bsal_client_stats(ifname, mac_addr, info);
+
     return 0;
 }
 static inline int
-osync_nl80211_bsal_client_measure(const char *ifname, const uint8_t *mac_addr, int num_samples )
+osync_nl80211_bsal_client_measure(const char *ifname, const uint8_t *mac_addr, int num_samples)
 {
-	struct ieee80211req_athdbg      athdbg;
+    struct ieee80211req_athdbg      athdbg;
 
-    memset( &athdbg, 0, sizeof( athdbg ) );
+    memset(&athdbg, 0, sizeof(athdbg));
     athdbg.cmd = IEEE80211_DBGREQ_BSTEERING_GET_RSSI;
-    memcpy( &athdbg.dstmac, mac_addr, sizeof( athdbg.dstmac ) );
+    memcpy(&athdbg.dstmac, mac_addr, sizeof(athdbg.dstmac));
     athdbg.data.bsteering_rssi_num_samples = num_samples;
 
 #ifdef OPENSYNC_NL_SUPPORT
     return send_nl_command(&sock_ctx, ifname, &athdbg, sizeof(athdbg), NULL, QCA_NL80211_VENDOR_SUBCMD_DBGREQ);
 #else
     struct iwreq                    iwreq;
-    memset( &iwreq, 0, sizeof( iwreq ) );
-    strncpy( iwreq.ifr_name, ifname, sizeof( iwreq.ifr_name ) - 1 );
-    iwreq.u.data.pointer = ( void * )&athdbg;
-    iwreq.u.data.length  = sizeof( athdbg );
-    return ioctl( _bsal_ioctl_fd, IEEE80211_IOCTL_DBGREQ, &iwreq );
+    memset(&iwreq, 0, sizeof(iwreq));
+    STRSCPY(iwreq.ifr_name, ifname);
+    iwreq.u.data.pointer = (void *)&athdbg;
+    iwreq.u.data.length  = sizeof(athdbg);
+    return ioctl(_bsal_ioctl_fd, IEEE80211_IOCTL_DBGREQ, &iwreq);
 #endif
 }
 #endif
 #if defined (OSYNC_IOCTL_LIB) && (OSYNC_IOCTL_LIB == 2)
-# define strdupa(s)                               \
-  (__extension__                                  \
-    ({                                        \
-      const char *__old = (s);                            \
-      size_t __len = strlen (__old) + 1;                      \
-      char *__new = (char *) __builtin_alloca (__len);                \
-      (char *) memcpy (__new, __old, __len);                      \
+# define strdupa(s)                                    \
+  (__extension__                                       \
+    ({                                                 \
+      const char *__old = (s);                         \
+      size_t __len = strlen (__old) + 1;               \
+      char *__new = (char *) __builtin_alloca (__len); \
+      (char *) memcpy (__new, __old, __len);           \
     }))
-
 
 #include <string.h>
 #include "util.h"
@@ -565,7 +609,7 @@ osync_nl80211_init(struct ev_loop *loop)
     return 0;
 #else
     g_ioctl80211_sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if( 0 >= g_ioctl80211_sock_fd)
+    if(0 >= g_ioctl80211_sock_fd)
     {
         LOG(ERR,"Initializing ioctl80211"
             "(Failed to open IOCTL socket)");
@@ -587,8 +631,7 @@ osync_nl80211_close(struct ev_loop *loop)
 }
 
 #ifdef OPENSYNC_NL_SUPPORT
-static int send_get_command(const char *ifname, void *buf,
-        size_t buflen, int cmd)
+static int send_get_command(const char *ifname, void *buf, size_t buflen, int cmd)
 {
     int msg;
     struct cfg80211_data buffer;
@@ -610,9 +653,8 @@ static int send_get_command(const char *ifname, void *buf,
 }
 #endif
 static
-ioctl_status_t  ioctl80211_radio_type_get (
-        char                       *ifName,
-        radio_type_t               *type);
+ioctl_status_t ioctl80211_radio_type_get(char         *ifName,
+                                         radio_type_t *type);
 void
 rtrimnl(char *str);
 void
@@ -646,25 +688,25 @@ util_iwconfig_get_opmode(const char *device_vif_ifname, unsigned int *opmode, in
 
 static inline int
 osync_nl80211_interfaces_get(int	sock_fd,
-        char                    *ifname,
-        char                    *args[],
-        int                     radio_type)
+            char                    *ifname,
+            char                    *args[],
+            int                     radio_type)
 {
-	ioctl_status_t                  status;
+    ioctl_status_t                  status;
     struct iwreq                    request;
     ioctl80211_interface_t         *interface = NULL;
     ioctl80211_interfaces_t        *interfaces =
         (ioctl80211_interfaces_t *) args[IOCTL80211_IFNAME_ARG];
 
     interface = &interfaces->phy[interfaces->qty];
-    strcpy(interface->ifname, ifname);
+    STRSCPY(interface->ifname, ifname);
     memset (&request, 0, sizeof(request));
 
 #ifdef OPENSYNC_NL_SUPPORT
-	int 							mode;
+    int	         mode;
     unsigned int opmode;
 
-	util_iwconfig_get_opmode(interface->ifname, &opmode, sizeof(opmode));
+    util_iwconfig_get_opmode(interface->ifname, &opmode, sizeof(opmode));
     if (opmode == IEEE80211_M_HOSTAP)
         mode = IW_MODE_MASTER;
     else
@@ -674,7 +716,7 @@ osync_nl80211_interfaces_get(int	sock_fd,
     switch (mode)
     {
 #else
-    int32_t                         rc;
+    int32_t rc;
     rc =
         ioctl80211_request_send(
                 ioctl80211_fd_get(),
@@ -689,8 +731,7 @@ osync_nl80211_interfaces_get(int	sock_fd,
         return IOCTL_STATUS_OK;
     }
 
-	LOG(ERR,
-             "osync_nl80211_interfaces_get: mode value:%d",
+    LOG(ERR, "osync_nl80211_interfaces_get: mode value:%d",
              request.u.mode);
     /* Check for STA or AP interfaces */
     interface->sta = false;
@@ -748,7 +789,7 @@ osync_nl80211_interfaces_get(int	sock_fd,
                 interface->mac[3],interface->mac[4],interface->mac[5],
                 interface->ifname);
 #else
-	memset (&request, 0, sizeof(request));
+    memset (&request, 0, sizeof(request));
     rc =
         ioctl80211_request_send(
                 ioctl80211_fd_get(),
@@ -766,7 +807,7 @@ osync_nl80211_interfaces_get(int	sock_fd,
     memcpy (interface->mac,
             &((struct sockaddr)request.u.ap_addr).sa_data[0],
             sizeof(interface->mac));
-	LOG(ERR,
+    LOG(ERR,
              "osync_nl80211_interfaces_get: mac :%s",
              interface->mac);
 #endif
@@ -781,16 +822,15 @@ osync_nl80211_interfaces_get(int	sock_fd,
 
     memset (interface->essid, 0, sizeof(interface->essid));
 #ifdef OPENSYNC_NL_SUPPORT
-	send_nl_command(&sock_ctx, ifname, interface->essid, sizeof(interface->essid),
+    send_nl_command(&sock_ctx, ifname, interface->essid, sizeof(interface->essid),
                 NULL, QCA_NL80211_VENDORSUBCMD_GET_SSID);
-	LOGD("osync_nl80211_interfaces_get ssid :%s", interface->essid);
+    LOGD("osync_nl80211_interfaces_get ssid :%s", interface->essid);
 #else
-	memset (&request, 0, sizeof(request));
+    memset (&request, 0, sizeof(request));
     request.u.data.pointer = interface->essid;
     request.u.data.length = sizeof(interface->essid);
 
-	LOG(ERR,
-             "osync_nl80211_interfaces_get: ssid :%s",
+    LOG(ERR, "osync_nl80211_interfaces_get: ssid :%s",
              interface->essid);
 
     rc =
@@ -852,87 +892,82 @@ osync_nl80211_radio_type_get(char	*ifName,
         radio_type_t               *type)
 {
 #ifdef OPENSYNC_NL_SUPPORT
-	char *line;
-	int c;
-	bool has_upper = false;
-	bool has_lower = false;
-	bool has_24g = false;
-	char *chan;
-    char *buf;
-    char buffer[MAX_BUF_SIZE];
+    char *line;
+    int c;
+    bool has_upper = false;
+    bool has_lower = false;
+    bool has_24g = false;
+    char *chan;
+    char *keyword = NULL;
+    char *buf = NULL;
+    char cmd[128];
+    const char *phy = NULL;
 
-    buf = buffer;
-    memset(buffer, 0, sizeof(buffer));
-
-    if (!(strcmp(ifName, "wifi0")))
-        memcpy(buffer, g_channel_buf_0, sizeof(buffer));
-    else if (!(strcmp(ifName, "wifi1")))
-        memcpy(buffer, g_channel_buf_1, sizeof(buffer));
-    else if (!(strcmp(ifName, "wifi2")))
-        memcpy(buffer, g_channel_buf_2, sizeof(buffer));
-    else
+    snprintf(cmd, sizeof(cmd), "/sys/class/net/%s/parent", ifName);
+    phy = strexa("cat", cmd) ?: "0";
+    buf = strexa("exttool", "--interface", phy, "--list");
+    if (!buf)
         return IOCTL_STATUS_ERROR;
 
-	while ((line = strsep(&buf, "\n"))) {
+    while ((line = strsep(&buf, "\n"))) {
+        if (!(keyword = strsep(&line, " ")))
+            continue;
         if (!(chan = strsep(&line, " ")))
             continue;
 
-		c = atoi(chan);
-		if(c < 100)
-			has_lower = true;
-	    if(c > 100)
-			has_upper = true;
+        c = atoi(chan);
+        if(c < 100)
+            has_lower = true;
+        if(c > 100)
+            has_upper = true;
 
-	    if (c >= 1 && c <= 20)
-			has_24g = true;
+        if (c >= 1 && c <= 20)
+            has_24g = true;
 
-		if (has_24g) {
-			*type = RADIO_TYPE_2G;
-			break;
-		}
-	    else if (has_upper && has_lower) {
-			*type = RADIO_TYPE_5G;
-		}
-		else if (has_lower) {
+        if (has_24g) {
+            *type = RADIO_TYPE_2G;
+            break;
+        }
+        else if (has_upper && has_lower) {
+            *type = RADIO_TYPE_5G;
+        }
+        else if (has_lower) {
             *type = RADIO_TYPE_5GL;
         }
         else if (has_upper) {
             *type = RADIO_TYPE_5GU;
         } else {
-		    LOG(ERR,"Parsing %s radio type (Invalid type)",	ifName);
+		    LOG(ERR,"Parsing %s radio type (Invalid type)",	phy);
 	        return IOCTL_STATUS_ERROR;
         }
     }
-
 #if 0
-	char buf[64];
+    char buf[64];
     if (WARN(-1 == util_exec_read(rtrimnl, buf, sizeof(buf),
-			"cfg80211tool", ifName, "get_mode"),
-			"%s: failed to get cfg80211tool '%s': %d (%s)",
-			ifName, "get_mode", errno, strerror(errno))) {
-		return -1;
-	}
+                        "cfg80211tool", ifName, "get_mode"),
+                        "%s: failed to get cfg80211tool '%s': %d (%s)",
+                        ifName, "get_mode", errno, strerror(errno))) {
+        return -1;
+    }
 
-	LOG(ERR,
-            "buf val:%s\n",
-             buf);
+    LOG(ERR, "buf val:%s\n", buf);
 
-	if (		(NULL != strstr(buf, "a"))
-			||	(NULL != strstr(buf, "a"))
-			||		(NULL != strstr(buf, "a"))
-       )	{
-	struct ieee80211req_chaninfo    chaninfo;
+    if ((NULL != strstr(buf, "a"))
+        ||	(NULL != strstr(buf, "a"))
+        ||		(NULL != strstr(buf, "a"))
+        ) {
+    struct ieee80211req_chaninfo    chaninfo;
     int list_alloc_size = 3*1024;
-	const typeof(chaninfo.ic_chans[0]) *chan;
+    const typeof(chaninfo.ic_chans[0]) *chan;
     uint32_t                        channel;
 
-	LOG(ERR,"inside if:%d\n",5);
-	memset (&chaninfo, 0, sizeof(chaninfo));
+    LOG(ERR,"inside if:%d\n",5);
+    memset (&chaninfo, 0, sizeof(chaninfo));
     send_nl_command(&sock_ctx, ifName, &chaninfo, list_alloc_size,
                 NULL, QCA_NL80211_VENDOR_SUBCMD_LIST_CHAN);
 #endif
 #else
-	int rc;
+    int rc;
     struct iwreq		request;
     memset (&request, 0, sizeof(request));
     rc = ioctl80211_request_send(
@@ -941,7 +976,7 @@ osync_nl80211_radio_type_get(char	*ifName,
                 SIOCGIWNAME,
                 &request);
 
-	if (0 > rc)
+    if (0 > rc)
     {
         LOG(ERR,
              "Parsing %s radio type (Failed to get protocol)",
@@ -949,18 +984,19 @@ osync_nl80211_radio_type_get(char	*ifName,
         return IOCTL_STATUS_ERROR;
     }
 
-	if (    (NULL != strstr(request.u.name, "802.11a"))
+    if ((NULL != strstr(request.u.name, "802.11a"))
          || (NULL != strstr(request.u.name, "802.11na"))
          || (NULL != strstr(request.u.name, "802.11ac"))
-	   )	{
-		struct ieee80211req_chaninfo    chaninfo;
+        )
+    {
+        struct ieee80211req_chaninfo    chaninfo;
 
         request.u.data.pointer = &chaninfo;
         request.u.data.length  = sizeof(chaninfo);
-		const typeof(chaninfo.ic_chans[0]) *chan;
+        const typeof(chaninfo.ic_chans[0]) *chan;
         uint32_t                        channel;
 
-		memset (&chaninfo, 0, sizeof(chaninfo));
+        memset (&chaninfo, 0, sizeof(chaninfo));
         memset (&request, 0, sizeof(request));
 
         request.u.data.pointer = &chaninfo;
@@ -973,7 +1009,7 @@ osync_nl80211_radio_type_get(char	*ifName,
                     IEEE80211_IOCTL_GETCHANINFO,
                     &request);
 
-		if (0 > rc)
+        if (0 > rc)
         {
             LOG(ERR,
                 "Parsing %s radio type (Failed to get chaninfo)",
@@ -981,7 +1017,7 @@ osync_nl80211_radio_type_get(char	*ifName,
             return IOCTL_STATUS_ERROR;
         }
 
-	/* Decode chanels present on radio and derive type */
+        /* Decode channels present on radio and derive type */
         bool has_upper = false;
         bool has_lower = false;
         uint32_t i;
@@ -1031,11 +1067,11 @@ osync_nl80211_get_essid(int sock_fd, const char *ifname, char *dest, int dest_le
 #ifdef OPENSYNC_NL_SUPPORT
     send_nl_command(&sock_ctx, ifname, dest, dest_len,
                 NULL, QCA_NL80211_VENDORSUBCMD_GET_SSID);
-	LOG(ERR,
+    LOG(ERR,
              "osync_nl80211_get_essid :%s",
              dest);
 #else
-	int32_t                         rc;
+    int32_t                         rc;
     struct iwreq                    request;
 
     if (sock_fd < 0) {
@@ -1056,7 +1092,7 @@ osync_nl80211_get_essid(int sock_fd, const char *ifname, char *dest, int dest_le
         LOGE("ioctl80211_get_essid() failed to get ESSID for '%s', rc = %d", ifname, rc);
         return IOCTL_STATUS_ERROR;
     }
-	LOG(ERR,
+    LOG(ERR,
              "osync_nl80211_get_essid : Exit");
 #endif
     return IOCTL_STATUS_OK;
@@ -1070,11 +1106,11 @@ static int
 util_qca_set_int(const char *ifname, const char *iwprivname, int v)
 {
     char arg[16];
-	char command[32] = "--";
+    char command[32] = "--";
     strcat(command,iwprivname);
 
     const char *argv[] = { "cfg80211tool.1", "-i", ifname, "-h", "none", "--START_CMD", command, "--value0", arg,
-                             "--RESPONSE", command, "--END_CMD", NULL };
+                           "--RESPONSE", command, "--END_CMD", NULL };
     char c;
 
     snprintf(arg, sizeof(arg), "%d", v);
@@ -1116,7 +1152,7 @@ ioctl80211_radio_stats_set_iwparam(
 #endif
 static inline int
 osync_nl80211_ioctl80211_radio_tx_stats_enable(
-		radio_entry_t              *radio_cfg,
+        radio_entry_t              *radio_cfg,
         bool                        status)
 {
 #ifdef OPENSYNC_NL_SUPPORT
@@ -1145,7 +1181,7 @@ osync_nl80211_ioctl80211_radio_tx_stats_enable(
 
 static inline void
 osync_nl80211_ioctl80211_radio_stats_set_iwparam(
-		radio_entry_t              *radio_cfg,
+        radio_entry_t              *radio_cfg,
         ifname_t                    if_name)
 {
 #ifdef OPENSYNC_NL_SUPPORT
@@ -1185,11 +1221,11 @@ osync_nl80211_fast_scan_enable(const char *ifname, struct ieee80211req_athdbg  *
                 ifname,
                 IEEE80211_IOCTL_DBGREQ,
                 &iwreq);
-	if (rc < 0) {
+    if (rc < 0) {
         return IOCTL_STATUS_ERROR;
     }
 #endif
-	return 0;
+    return 0;
 }
 #endif
 #if defined (OSYNC_IOCTL_LIB) && (OSYNC_IOCTL_LIB == 1)
@@ -1199,9 +1235,9 @@ osync_nl80211_clients_stats_fetch (
         radio_type_t                radio_type,
         char                       *ifName,
         ioctl80211_client_record_t *client_entry,
-		struct ieee80211req_sta_stats *ieee80211_client_stats)
+        struct ieee80211req_sta_stats *ieee80211_client_stats)
 {
-	int								rc = 0;
+    int								rc = 0;
 
     memset (ieee80211_client_stats, 0, sizeof(struct ieee80211req_sta_stats));
 #ifdef OPENSYNC_NL_SUPPORT
@@ -1217,10 +1253,9 @@ osync_nl80211_clients_stats_fetch (
     request.u.data.pointer = ieee80211_client_stats;
     request.u.data.length = sizeof(struct ieee80211req_sta_stats);
 
-    memcpy (ieee80211_client_stats->is_u.macaddr,
+    memcpy(ieee80211_client_stats->is_u.macaddr,
             client_entry->info.mac,
             sizeof(ieee80211_client_stats->is_u.macaddr));
-
 
     rc =
         ioctl80211_request_send(
@@ -1229,22 +1264,22 @@ osync_nl80211_clients_stats_fetch (
                 IEEE80211_IOCTL_STA_STATS,
                 &request);
 #endif
-	return rc;
+    return rc;
 }
 
 static inline int
-osync_nl80211_peer_stats_fetch (
+osync_nl80211_peer_stats_fetch(
         char                       *ifName,
-		struct ioctl80211_vap_stats *vap_stats)
+        struct ioctl80211_vap_stats *vap_stats)
 {
-	int								rc = 0;
+    int								rc = 0;
 #ifdef OPENSYNC_NL_SUPPORT
     send_nl_command(&sock_ctx, ifName, vap_stats, sizeof(struct ioctl80211_vap_stats), NULL,
                                QCA_NL80211_VENDOR_SUBCMD_80211STATS);
 #else
     struct ifreq                    if_req;
     memset (&if_req, 0, sizeof(if_req));
-    strncpy(if_req.ifr_name, ifName, sizeof(if_req.ifr_name));
+    STRSCPY(if_req.ifr_name, ifName);
     if_req.ifr_data = (caddr_t) vap_stats;
     /* Initiate Atheros stats fetch **/
     rc =
@@ -1253,7 +1288,7 @@ osync_nl80211_peer_stats_fetch (
                 SIOCG80211STATS,
                 &if_req);
 #endif
-	return rc;
+    return rc;
 }
 #endif
 #if defined (OSYNC_IOCTL_LIB) && (OSYNC_IOCTL_LIB == 4)
@@ -1294,14 +1329,13 @@ qca_get_int(const char *ifname, const char *iwprivname, int *v)
 }
 
 static inline int
-nl80211_device_txchainmask_get(
-								radio_entry_t              *radio_cfg,
-								dpp_device_txchainmask_t   *txchainmask)
+nl80211_device_txchainmask_get(radio_entry_t              *radio_cfg,
+                                dpp_device_txchainmask_t   *txchainmask)
 {
-	int32_t                         rc;
+    int32_t rc;
 
 #ifdef OPENSYNC_NL_SUPPORT
-	int txchain_type;
+    int txchain_type;
 
     rc = qca_get_int(radio_cfg->phy_name, "get_txchainsoft", &txchain_type);
     if (!rc) {
@@ -1312,16 +1346,19 @@ nl80211_device_txchainmask_get(
     txchainmask->type = radio_cfg->type;
     txchainmask->value = txchain_type;
 #else
-    struct iwreq                    request;
+    struct iwreq request;
 
     memset (&request, 0, sizeof(request));
 
     rc = ioctl80211_get_priv_ioctl(radio_cfg->phy_name, "get_txchainsoft", &request.u.mode);
     if (!rc) {
-        LOG(WARNING, "failed to get txchainmask: ioctl not found");
-        return IOCTL_STATUS_ERROR;
+        LOG(DEBUG, "failed to get txchainsoft: ioctl not found, trying get_txchainmask");
+        rc = ioctl80211_get_priv_ioctl(radio_cfg->phy_name, "get_txchainmask", &request.u.mode);
+        if (!rc) {
+            LOG(WARNING, "failed to get txchainmask: ioctl not found");
+            return IOCTL_STATUS_ERROR;
+        }
     }
-
     LOG(TRACE, "Probed get_txchainsofti %x %s", request.u.mode, radio_cfg->phy_name);
 
     rc =
@@ -1348,7 +1385,7 @@ nl80211_device_txchainmask_get(
             radio_get_name_from_type(txchainmask->type),
             txchainmask->value);
 #endif
-	return IOCTL_STATUS_OK;
+    return IOCTL_STATUS_OK;
 }
 #endif
 #if defined (OSYNC_IOCTL_LIB) && (OSYNC_IOCTL_LIB == 5)
@@ -1381,36 +1418,37 @@ int send_scan_req(struct socket_context *sock_ctx, const char *ifname, void *buf
 #ifdef OPENSYNC_NL_SUPPORT
 static void  bss_info_handler(struct cfg80211_data *buffer)
 {
-	memcpy(g_iw_scan_results + res_len, buffer->data,buffer->length);
-	res_len += buffer->length;
-	g_iw_scan_results_size += buffer->length;
-
+    memcpy(g_iw_scan_results + res_len, buffer->data,buffer->length);
+    res_len += buffer->length;
+    g_iw_scan_results_size += buffer->length;
 }
 #endif
 static inline int
-osync_nl80211_scan_results_fetch(radio_entry_t *radio_cfg_ctx, int res_len)
+osync_nl80211_scan_results_fetch(radio_entry_t *radio_cfg_ctx)
 {
 #ifdef OPENSYNC_NL_SUPPORT
+    int msg;
+    int list_alloc_size;
+    list_alloc_size = 3*1024;
+    struct cfg80211_data buffer;
+    uint8_t *buf = malloc(list_alloc_size);
 
-	int list_alloc_size;
-	list_alloc_size = 3*1024;
-	struct cfg80211_data buffer;
-	uint8_t *buf = malloc(list_alloc_size);
-	int len = list_alloc_size;
+    buffer.data = buf;
+    buffer.length = list_alloc_size;
+    buffer.callback = bss_info_handler;
+    buffer.parse_data = 0;
+    msg = wifi_cfg80211_send_generic_command(&(sock_ctx.cfg80211_ctxt),
+            QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION,
+            QCA_NL80211_VENDOR_SUBCMD_LIST_SCAN, radio_cfg_ctx->if_name, (char *)&buffer, list_alloc_size);
+    if (msg < 0) {
+        LOG(ERR,"Failed to send NL scan command");
+        return -1;
+    }
 
-	buffer.data = buf;
-	buffer.length = list_alloc_size;
-	buffer.callback = bss_info_handler;
-	buffer.parse_data = 0;
-	wifi_cfg80211_send_generic_command(&(sock_ctx.cfg80211_ctxt),
-			QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION,
-			QCA_NL80211_VENDOR_SUBCMD_LIST_SCAN, radio_cfg_ctx->if_name, (char *)&buffer, list_alloc_size);
-
-	free(buf);
-return len;
-
+    free(buf);
+    return buffer.length;
 #else
-	int rc;
+    int rc;
     struct iwreq                    request;
     memset (&request, 0, sizeof(request));
     request.u.data.pointer = g_iw_scan_results;
@@ -1435,26 +1473,26 @@ return len;
 static inline int
 osync_nl80211_scan_channel(char *ifname, struct iw_scan_req *iw_scan_options ,int iw_scan_flags)
 {
-	int		rc;
+    int rc;
 #ifdef OPENSYNC_NL_SUPPORT
-        rc = send_scan_req(&sock_ctx, ifname, iw_scan_options, sizeof(struct iw_scan_req), NULL,
-                0);
+    rc = send_scan_req(&sock_ctx, ifname, iw_scan_options, sizeof(struct iw_scan_req), NULL, 0);
 #else
-        struct iwreq                    request;
-        memset (&request, 0, sizeof(request));
+    struct iwreq request;
 
-        request.u.data.pointer = iw_scan_options;
-        request.u.data.length = sizeof(struct iw_scan_req);
-        request.u.data.flags = iw_scan_flags;
-        /* Initiate wireless scanning **/
-        rc =
-            ioctl80211_request_send(
-                    ioctl80211_fd_get(),
-                    ifname,
-                    SIOCSIWSCAN,
-                    &request);
+    memset(&request, 0, sizeof(request));
+
+    request.u.data.pointer = iw_scan_options;
+    request.u.data.length = sizeof(struct iw_scan_req);
+    request.u.data.flags = iw_scan_flags;
+    /* Initiate wireless scanning **/
+    rc =
+        ioctl80211_request_send(
+            ioctl80211_fd_get(),
+            ifname,
+            SIOCSIWSCAN,
+            &request);
 #endif
-		return rc;
+    return rc;
 }
 #endif
 #endif /* IOCTL80211_NETLINK_11AX_H_INCLUDED */

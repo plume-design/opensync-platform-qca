@@ -140,7 +140,7 @@ void parse_channel_survey_stats_cb(struct cfg80211_data *arg)
     return;
 }
 
-int ioctl80211_survey_results_get(
+ioctl_status_t ioctl80211_survey_results_get(
         radio_entry_t              *radio_cfg,
         uint32_t                   *chan_list,
         uint32_t                    chan_num,

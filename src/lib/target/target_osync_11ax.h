@@ -93,10 +93,7 @@ static inline char *qca_getmac(const char *vif, char *buf, int len)
 
     memset(buf, 0, len);
 
-    /* PIR-12826: Once this ticket is solved this
-     * workaround can be removed. This avoids
-     * clash with BM which uses same driver ACL.
-     */
+    /* FIXME: this avoids clash with BM which uses same driver ACL */
     if (strstr(vif, "home-ap-"))
             return buf;
 
@@ -192,7 +189,7 @@ static inline bool qca_get_ht_mode(const char *vif, char *htmode, int htmode_len
         return false;
     p++;
 
-    strlcpy(htmode, p, htmode_len);
+    strscpy(htmode, p, htmode_len);
     return true;
 }
 

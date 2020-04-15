@@ -44,7 +44,7 @@ UNIT_SRC += ioctl80211_scan_11ax.c
 UNIT_SRC += ioctl80211_client_11ax.c
 UNIT_SRC += ioctl80211_radio_11ax.c
 UNIT_SRC += ioctl80211_device_11ax.c
-ifeq ($(BUILD_CAPACITY_QUEUE_STATS),y)
+ifeq ($(CONFIG_SM_CAPACITY_QUEUE_STATS),y)
 UNIT_SRC += ioctl80211_capacity_11ax.c
 endif
 else

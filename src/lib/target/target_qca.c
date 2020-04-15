@@ -1520,10 +1520,7 @@ util_iwpriv_getmac(const char *vif, char *buf, int len)
 
     memset(buf, 0, len);
 
-    /* PIR-12826: Once this ticket is solved this
-     * workaround can be removed. This avoids
-     * clash with BM which uses same driver ACL.
-     */
+    /* FIXME: this avoids clash with BM which uses same driver ACL */
     if (strstr(vif, "home-ap-"))
         return buf;
 
@@ -2432,8 +2429,12 @@ util_csa_war_update_rconf_channel(const char *phy, int chan)
     int err;
     if ((system(get)))
         return;
-    LOGE("Updating Radio::channel on CSA Rx leaf. This must be fixed with CAES-600.");
-    LOGE("Do not attempt to remove or lower the severity of this message");
+
+    /* FIXME: This is a deficiency in the API which is bound to ovsdb
+     * and the ambiguity of Wifi_Radio_Config channel with regard to
+     * possible STA uplink.
+     */
+    LOGI("%s: overriding with channel %d on CSA Rx leaf", phy, chan);
     if ((err = system(cmd)))
         LOGEM("%s: system(%s) failed: %d, expect topology deviation", phy, cmd, err);
 }
@@ -3458,7 +3459,7 @@ target_radio_config_set2(const struct schema_Wifi_Radio_Config *rconf,
                     if (util_csa_start(phy, vif, rconf->hw_mode, rconf->freq_band, rconf->ht_mode, rconf->channel))
                         LOGW("%s: failed to start csa: %d (%s)", phy, errno, strerror(errno));
                     else if (util_radio_config_only_channel_changed(changed))
-                        return true;
+                        goto report;
                 }
              } else {
                 LOGI("%s: no ap vaps, channel %d will be set on first vap if possible",
@@ -3513,6 +3514,7 @@ target_radio_config_set2(const struct schema_Wifi_Radio_Config *rconf,
 
     util_thermal_sys_recalc_tx_chainmask();
     util_cb_phy_state_update(phy);
+report:
     util_cb_delayed_update(UTIL_CB_PHY, phy);
 
     return true;

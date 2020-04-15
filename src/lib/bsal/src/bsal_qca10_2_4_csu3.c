@@ -1221,8 +1221,8 @@ static bool qca_bss_tm_request(
     }
 
     // Build the hostapd bss_tm_req command
-    // PIR-12246: Remove "bss_term=1,0". It is hardcoded to "0202020202020202" inside hostapd code,
-    //            causing "Error/Malformed" BSS Transition Request packets
+    // Don't use "bss_term=1,0", since it is hardcoded to "0202020202020202" inside
+    // hostapd code, causing "Error/Malformed" BSS Transition Request packets
     snprintf(btm_req_cmd, sizeof(btm_req_cmd),
              "%s %s valid_int=%hhu pref=%hhu abridged=%hhu disassoc_imminent=%hhu",
              client_mac, (strlen(neigh_list) ? neigh_list : ""),

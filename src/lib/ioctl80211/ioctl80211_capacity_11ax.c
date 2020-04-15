@@ -131,7 +131,7 @@ ioctl_status_t ioctl80211_capacity_radio_stats_get(
 	rc = osync_nl80211_peer_stats_fetch(radio_cfg->if_name,&vap_stats);
 #else
         memset (&if_req, 0, sizeof(if_req));
-        strncpy(if_req.ifr_name, interface->ifname, sizeof(if_req.ifr_name));
+        STRSCPY(if_req.ifr_name, interface->ifname);
         if_req.ifr_data = (caddr_t) &vap_stats;
 
         /* Initiate Atheros stats fetch */

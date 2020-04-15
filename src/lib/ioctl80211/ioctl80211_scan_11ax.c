@@ -98,6 +98,16 @@ static ioctl80211_phymodee_t g_ioctl80211_phymode_table[] =
     { "IEEE80211_MODE_11AC_VHT160",     RADIO_CHAN_WIDTH_160MHZ},
     { "IEEE80211_MODE_11AC_VHT80_80",   RADIO_CHAN_WIDTH_80_PLUS_80MHZ},
 #endif
+    { "IEEE80211_MODE_11AXG_HE20",   RADIO_CHAN_WIDTH_20MHZ},
+    { "IEEE80211_MODE_11AXA_HE40PLUS",   RADIO_CHAN_WIDTH_40MHZ_ABOVE},
+    { "IEEE80211_MODE_11AXA_HE40MINUS",  RADIO_CHAN_WIDTH_40MHZ_BELOW},
+    { "IEEE80211_MODE_11AXG_HE40PLUS",   RADIO_CHAN_WIDTH_40MHZ_ABOVE},
+    { "IEEE80211_MODE_11AXG_HE40MINUS",  RADIO_CHAN_WIDTH_40MHZ_BELOW},
+    { "IEEE80211_MODE_11AXA_HE40",   RADIO_CHAN_WIDTH_40MHZ},
+    { "IEEE80211_MODE_11AXG_HE40",   RADIO_CHAN_WIDTH_40MHZ},
+    { "IEEE80211_MODE_11AXA_HE80",   RADIO_CHAN_WIDTH_80MHZ},
+    { "IEEE80211_MODE_11AXA_HE160",   RADIO_CHAN_WIDTH_160MHZ},
+    { "IEEE80211_MODE_11AXA_HE80_80",   RADIO_CHAN_WIDTH_80_PLUS_80MHZ},
 };
 
 typedef struct {
@@ -495,9 +505,10 @@ void ioctl80211_scan_results_fetch(EV_P_ ev_timer *w, int revents)
     /* Reset global storage for every scan! */
     memset (&g_iw_scan_results, 0, sizeof(g_iw_scan_results));
     g_iw_scan_results_size = 0;
+    res_len = 0;
 
     /* Try to read the results */
-    rc = osync_nl80211_scan_results_fetch(radio_cfg_ctx, res_len);
+    rc = osync_nl80211_scan_results_fetch(radio_cfg_ctx);
     if (0 > rc)
     {
         /* Scanning is still in progress ... come back later */
@@ -541,7 +552,6 @@ void ioctl80211_scan_results_fetch(EV_P_ ev_timer *w, int revents)
 
     /* Mark results scan_status */
     scan_status = true;
-    g_iw_scan_results_size = rc;
 
 exit:
     ioctl80211_scan_result_timer_set(w, false);
@@ -709,7 +719,7 @@ ioctl_status_t ioctl80211_scan_results_get(
             iw_event = (struct iw_event *) ptr;
 
             /* Malformed stream or end of buffer */
-            if (len < iw_event->len) {
+            if (len < iw_event->len || 0 == iw_event->len) {
                 break;
             }
 

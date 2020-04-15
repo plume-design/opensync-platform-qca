@@ -43,6 +43,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <linux/wireless.h>
 
 #include "log.h"
+#include "util.h"
 
 #include "ioctl80211.h"
 #include "ioctl80211_scan.h"
@@ -132,8 +133,7 @@ int ioctl80211_request_send(
         return IOCTL_STATUS_ERROR;
     }
 
-    strncpy(request->ifr_name, ifname, IFNAMSIZ);
-    request->ifr_name[IFNAMSIZ - 1] = '\0';
+    STRSCPY(request->ifr_name, ifname);
 
     return (ioctl(sock_fd, command, request));
 };
@@ -256,7 +256,7 @@ static int ioctl80211_get_priv_ioctl_list(
 
         priv = new;
         memset(&wrq, 0, sizeof(wrq));
-        strncpy(wrq.ifr_name, ifname, IFNAMSIZ);
+        STRSCPY(wrq.ifr_name, ifname);
         wrq.u.data.pointer = (void *)priv;
         wrq.u.data.length = n;
         rc = ioctl(ioctl80211_fd_get(), SIOCGIWPRIV, &wrq);

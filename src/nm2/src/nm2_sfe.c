@@ -177,7 +177,7 @@ void nm2_l2uf_init(void)
     ev_io_init(&l2uf_watcher, nm2_l2uf_process, rc, EV_READ);
     ev_io_start(EV_DEFAULT, &l2uf_watcher);
 
-    LOG(NOTICE, "l2uf: [WAR ESW-4476] SFE client roaming mitigation initialized.");
+    LOG(NOTICE, "l2uf: SFE client roaming mitigation initialized.");
 
     return;
 
