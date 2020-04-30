@@ -257,8 +257,19 @@ bool mcproxy_util_write_config(target_mcproxy_params_t *proxy_param)
     {
         fprintf(f, "\"%s\" ", proxy_param->dwnstrm_ifs[dwstr_cnt]);
     }
-
     fprintf(f, ";\n");
+
+    /* Specify filter table */
+    fprintf(f, "table allways {\n");
+    fprintf(f, "         (*|*)\n");
+    fprintf(f, "};\n");
+
+    /* Specify instance rule matching statement*/
+    for (dwstr_cnt = 0; dwstr_cnt < proxy_param->num_dwnstrifs; dwstr_cnt++)
+    {
+        fprintf(f, "pinstance proxy_%s downstream \"%s\" in blacklist table allways;\n",
+                    s_prtcl, proxy_param->dwnstrm_ifs[dwstr_cnt]);
+    }
 
     fclose(f);
     return true;

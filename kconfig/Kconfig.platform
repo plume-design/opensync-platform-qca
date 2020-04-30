@@ -46,4 +46,14 @@ config QCA_USE_SYSUPGRADE
     help
         This is a default OpenSync upgrade layer implementation for QCA
         based devices.
+
+config QCA_USE_GRE_NSS
+    bool "Use NSS accelerated GRE tunnel"
+    default n
+    depends on !INET_GRE_USE_GRETAP
+    help
+        Add support for the NSS GRE (For NSS based QCA platforms only).
+        Uses the inet_nssgre_t class as the default GRE implementation.
+        This options redefines the inet_gre_new() function to return
+        a inet_nssgre_t class.
 endif

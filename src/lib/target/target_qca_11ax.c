@@ -94,12 +94,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <opensync-hapd.h>
 
 #define MODULE_ID LOG_MODULE_ID_TARGET
-#define DFS_CHAN_MAX 32
 
 /******************************************************************************
  * Driver-dependant feature compatibility
  *****************************************************************************/
-int dfs_state[DFS_CHAN_MAX][2];
 enum {
     IEEE80211_EV_DUMMY_CSA_RX = 0xffff,
     IEEE80211_EV_DUMMY_CHANNEL_LIST_UPDATED = 0xfffe,
@@ -154,11 +152,6 @@ static struct schema_Wifi_VIF_Config *g_vconfs;
 static int g_num_rconfs;
 static int g_num_vconfs;
 
-/* Storing channels list for each radio(wifi0, wifi1 & wifi2) */
-static char g_channel_buf_0[4096]; /* wifi0 */
-static char g_channel_buf_1[4096]; /* wifi1 */
-static char g_channel_buf_2[4096]; /* wifi2 */
-
 /******************************************************************************
  * Generic helpers
  *****************************************************************************/
@@ -179,7 +172,6 @@ static char g_channel_buf_2[4096]; /* wifi2 */
             err || strcmp(str, buf); \
         })
 
-void dfs_state_update(const void *data, int state);
 #include "target_osync_11ax.h"
 
 void
@@ -2615,40 +2607,14 @@ util_nl_parse_iwevcustom(const char *ifname,
         case IEEE80211_EV_CHANNEL_LIST_UPDATED:
             return util_nl_parse_iwevcustom_channel_list_updated(ifname, data, iwp->length);
         case IEEE80211_EV_RADAR_DETECTED:
-            dfs_state_update(data, IEEE80211_EV_RADAR_DETECTED);
             return util_nl_parse_iwevcustom_radar_detected(ifname, data, iwp->length);
         case IEEE80211_EV_CAC_STARTED:
-            dfs_state_update(data, IEEE80211_EV_CAC_STARTED);
-            break;
         case IEEE80211_EV_CAC_COMPLETED:
-            dfs_state_update(data, IEEE80211_EV_CAC_COMPLETED);
-            break;
         case IEEE80211_EV_NOL_STARTED:
-             dfs_state_update(data, IEEE80211_EV_NOL_STARTED);
-             break;
         case IEEE80211_EV_NOL_FINISHED:
-            dfs_state_update(data, IEEE80211_EV_NOL_FINISHED);
-            break;
         default:
             LOGT("%s: Unknown event on interface [%s]", __func__, ifname);
             break;
-    }
-}
-
-void dfs_state_update(const void *data, int state)
-{
-    const char *chan;
-    int i;
-    int channel;
-
-    chan = data;
-
-    channel = atoi(chan);
-    for (i = 0; i < DFS_CHAN_MAX; i++) {
-        if (dfs_state[i][0] == channel) {
-            dfs_state[i][1] = state;
-            break;
-        }
     }
 }
 
@@ -2843,7 +2809,7 @@ util_policy_get_min_hw_mode(const char *vif)
  *****************************************************************************/
 
 static const char *
-util_radio_channel_state(const char *line, int state)
+util_radio_channel_state(const char *line)
 {
    /* key = channel number, value = { "state": "allowed" }
     * channel states:
@@ -2856,130 +2822,16 @@ util_radio_channel_state(const char *line, int state)
     if (!strstr(line, " DFS"))
         return"{\"state\":\"allowed\"}";
 
-    if (state == IEEE80211_EV_NOL_FINISHED)
+    if (strstr(line, " DFS_NOP_FINISHED"))
         return "{\"state\": \"nop_finished\"}";
-    if (state ==  IEEE80211_EV_NOL_STARTED)
+    if (strstr(line, " DFS_NOP_STARTED"))
         return "{\"state\": \"nop_started\"}";
-    if (state == IEEE80211_EV_CAC_STARTED)
+    if (strstr(line, " DFS_CAC_STARTED"))
         return "{\"state\": \"cac_started\"}";
-    if (state == IEEE80211_EV_CAC_COMPLETED)
+    if (strstr(line, " DFS_CAC_COMPLETED"))
         return "{\"state\": \"cac_completed\"}";
 
     return "{\"state\": \"nop_started\"}";
-}
-
-static void
-create_temp_iface(const char *phy)
-{
-#ifdef OPENSYNC_NL_SUPPORT
-    char phy_name[128];
-    const char *p = NULL;
-    snprintf(phy_name, sizeof(phy_name), "/sys/class/net/%s/phy80211/name", phy);
-
-    p = strexa("cat", phy_name) ?: "0";
-
-    if (E("wlanconfig", "temp0", "create", "wlandev", phy, "wlanmode", "ap", "-cfg80211")) {
-        LOGI("%s: failed to create vif: %d (%s)", "temp0", errno, strerror(errno));
-    }
-    if(E("iw","phy", p, "interface", "add", "temp0", "type", "__ap")) {
-        LOGI("%s: failed to create vif: %d (%s)", "temp0", errno, strerror(errno));
-        return false;
-    }
-#else
-    if (E("wlanconfig", "temp0", "create", "wlandev", phy, "wlanmode", "ap")) {
-        LOGW("%s: failed to create vif: %d (%s)", "temp0", errno, strerror(errno));
-        return false;
-    }
-#endif
-}
-
-static void 
-delete_temp_iface(const char *vif)
-{
-#ifdef OPENSYNC_NL_SUPPORT
-    if (E("wlanconfig", vif, "destroy", "-cfg80211"))
-        LOGW("%s: failed to destroy: %d (%s)", vif, errno, strerror(errno));
-#else
-    if (E("wlanconfig", vif, "destroy"))
-        LOGW("%s: failed to destroy: %d (%s)", vif, errno, strerror(errno));
-#endif
-}
-
-static int
-util_radio_dfs_state_init(const char *if_name)
-{
-    char buffer[4096];
-    char *buf;
-    char cmd[128];
-    char *chan, *line;
-    int i = 0;
-    int err;
-
-    buf = buffer;
-    create_temp_iface(if_name);
-    snprintf(cmd, sizeof(cmd), CONFIG_INSTALL_PREFIX"/bin/channel_dfs.sh temp0");
-    system(cmd);
-    delete_temp_iface("temp0");
-    memset(buffer, 0, sizeof(buffer));
-
-    if (!(strcmp(if_name, "wifi0"))) {
-        err = readcmd(g_channel_buf_0, sizeof(g_channel_buf_0), 0, "cat /tmp/channel_dfs3.txt");
-        if (err) {
-            LOGW("%s: readcmd() failed: %d (%s)", if_name, errno, strerror(errno));
-            return 0;
-        }
-        memcpy(buffer, g_channel_buf_0, sizeof(buffer));
-    } else if (!(strcmp(if_name, "wifi1"))) {
-        err = readcmd(g_channel_buf_1, sizeof(g_channel_buf_1), 0, "cat /tmp/channel_dfs3.txt");
-        if (err) {
-            LOGW("%s: readcmd() failed: %d (%s)", if_name, errno, strerror(errno));
-            return 0;
-        }
-        memcpy(buffer, g_channel_buf_1, sizeof(buffer));
-    } else if (!(strcmp(if_name, "wifi2"))) {
-        err = readcmd(g_channel_buf_2, sizeof(g_channel_buf_2), 0, "cat /tmp/channel_dfs3.txt");
-        if (err) {
-            LOGW("%s: readcmd() failed: %d (%s)", if_name, errno, strerror(errno));
-            return 0;
-        }
-        memcpy(buffer, g_channel_buf_2, sizeof(buffer));
-    } else {
-        system("rm /tmp/channel_dfs3.txt");
-        return 0;
-    }
-
-    system("rm /tmp/channel_dfs3.txt");
-    /* No need to fill dfs_state table for 2.4G radio */
-    if (!(strcmp(if_name, "wifi1")))
-        return 0;
-
-    while ((line = strsep(&buf, "\n"))) {
-        if (!(chan = strsep(&line, " ")))
-            continue;
-        dfs_state[i][0] = atoi(chan);
-        dfs_state[i][1] = IEEE80211_EV_NOL_STARTED;
-        i++;
-        if (i >= DFS_CHAN_MAX)
-            break;
-    }
-
-    for(; i < DFS_CHAN_MAX; i++)
-        dfs_state[i][0] = 0;
-
-    return 1;
-}
-
-static int
-util_radio_get_channel_index(int channel)
-{
-    int i;
-
-    for (i = 0; i < DFS_CHAN_MAX; i++) {
-        if (dfs_state[i][0] == channel) {
-            break;
-        }
-    }
-    return i;
 }
 
 static bool
@@ -3118,23 +2970,22 @@ util_radio_channel_list_get(const char *phy, struct schema_Wifi_Radio_State *rst
     char buffer[4096];
     char *buf;
     char *line;
+    int err;
     int channel;
 
     buf = buffer;
-    memset(buffer, 0, sizeof(buffer));
 
-    if (!(strcmp(phy, "wifi0")))
-        memcpy(buffer, g_channel_buf_0, sizeof(buffer));
-    else if (!(strcmp(phy, "wifi1")))
-        memcpy(buffer, g_channel_buf_1, sizeof(buffer));
-    else if (!(strcmp(phy, "wifi2")))
-        memcpy(buffer, g_channel_buf_2, sizeof(buffer));
+    err = readcmd(buffer, sizeof(buffer), 0, "exttool --interface %s --list", phy);
+    if (err) {
+        LOGW("%s: readcmd() failed: %d (%s)", phy, errno, strerror(errno));
+        return;
+    }
 
     while ((line = strsep(&buf, "\n")) != NULL) {
         LOGD("%s line: |%s|", phy, line);
-        if (sscanf(line, "%d", &channel) == 1) {
+        if (sscanf(line, "chan %d", &channel) == 1) {
             rstate->allowed_channels[rstate->allowed_channels_len++] = channel;
-            SCHEMA_KEY_VAL_APPEND(rstate->channels, F("%d", channel), util_radio_channel_state(line, dfs_state[util_radio_get_channel_index(channel)][1]));
+            SCHEMA_KEY_VAL_APPEND(rstate->channels, F("%d", channel), util_radio_channel_state(line));
         }
     }
 
@@ -3556,7 +3407,7 @@ target_radio_config_set2(const struct schema_Wifi_Radio_Config *rconf,
                     if (util_csa_start(phy, vif, rconf->hw_mode, rconf->freq_band, rconf->ht_mode, rconf->channel))
                         LOGW("%s: failed to start csa: %d (%s)", phy, errno, strerror(errno));
                     else if (util_radio_config_only_channel_changed(changed))
-                        return true;
+                        goto report;
                 }
              } else {
                 LOGI("%s: no ap vaps, channel %d will be set on first vap if possible",
@@ -3615,6 +3466,7 @@ target_radio_config_set2(const struct schema_Wifi_Radio_Config *rconf,
 
     util_thermal_sys_recalc_tx_chainmask();
     util_cb_phy_state_update(phy);
+report:
     util_cb_delayed_update(UTIL_CB_PHY, phy);
 
     return true;
@@ -4383,11 +4235,6 @@ target_radio_init(const struct target_radio_ops *ops)
 
     rops = *ops;
     target_radio_config_init_check_runtime();
-
-    if (!util_radio_dfs_state_init("wifi0"))
-        LOGE("%s: failed to read channels on wifi0", __func__);
-    if (!util_radio_dfs_state_init("wifi1"))
-        LOGE("%s: failed to read channels on wifi1", __func__);
 
     if (wiphy_info_init()) {
         LOGE("%s: failed to initialize wiphy info", __func__);

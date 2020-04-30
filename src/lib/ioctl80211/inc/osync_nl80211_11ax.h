@@ -1407,7 +1407,7 @@ int send_scan_req(struct socket_context *sock_ctx, const char *ifname, void *buf
                 QCA_NL80211_VENDOR_SUBCMD_TRIGGER_SCAN,
                 cmd, ifname, (char *)&buffer, buflen);
         if (msg < 0) {
-            printf("Could not send NL command\n");
+            LOG(ERR,"Could not send NL scan command");
             return -1;
         }
         return buffer.length;

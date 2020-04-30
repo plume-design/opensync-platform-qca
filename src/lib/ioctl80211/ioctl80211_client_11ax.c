@@ -2010,7 +2010,6 @@ ioctl_status_t ioctl80211_peer_list_fetch(
                             stats->qual.updated += 4;
                     sscanf(bp, "%d", &t);
                     stats->qual.noise = (unsigned char) t;
-                    printf("%s \n",bp);
 
                     bp = strtok(NULL, " ");
                     sscanf(bp, "%d", &stats->discard.nwid);
@@ -2018,7 +2017,6 @@ ioctl_status_t ioctl80211_peer_list_fetch(
                     sscanf(bp, "%d", &stats->discard.code);
                     bp = strtok(NULL, " ");
                     sscanf(bp, "%d", &stats->discard.misc);
-                    fclose(f);
             }
     }
     fclose(f);

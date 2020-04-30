@@ -1,5 +1,3 @@
-#!/bin/sh
-
 # Copyright (c) 2015, Plume Design Inc. All rights reserved.
 # 
 # Redistribution and use in source and binary forms, with or without
@@ -24,8 +22,8 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+UNIT_CFLAGS += -I$(OVERRIDE_DIR)/inc
 
-wlanconfig $1 list chan | sed 's/Channel/\n/g' | grep Mhz | awk -F" " '{print $1,$4}' > /tmp/channel_dfs1.txt
-cat /tmp/channel_dfs1.txt | sed 's/Mhz//g' > /tmp/channel_dfs2.txt
-cat /tmp/channel_dfs2.txt | sed 's/*~/DFS/g' > /tmp/channel_dfs3.txt
-rm /tmp/channel_dfs1.txt /tmp/channel_dfs2.txt
+ifdef CONFIG_QCA_USE_GRE_NSS
+UNIT_SRC_TOP += $(OVERRIDE_DIR)/src/inet_nssgre.c
+endif
