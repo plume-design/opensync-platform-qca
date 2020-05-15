@@ -59,8 +59,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define MODULE_ID LOG_MODULE_ID_IOCTL
 
 #define IOCTL80211_DATA_RATE_LEN    (32)
-#define PEER_RX_STATS 1
-#define PEER_TX_STATS 0
+#define PEER_RX_STATS 0
+#define PEER_TX_STATS 1
 
 #define OSYNC_IOCTL_LIB 1
 
@@ -74,8 +74,18 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define PEER_STATS_FLAG 0x0001
 #define PEER_CLI_MAX 32
 
-static struct ps_uapi_ioctl  g_peer_rx_ioctl_stats[PEER_CLI_MAX];
-static struct ps_uapi_ioctl  g_peer_tx_ioctl_stats[PEER_CLI_MAX];
+typedef struct
+{
+    mac_address_t mac_addr;
+    uint64_t cookie;
+    uint32_t flags;
+    uint64_t sum;
+    uint64_t cnt;
+} weighted_phyrate;
+
+static weighted_phyrate g_peer_rx_phyrate[PEER_CLI_MAX];
+static weighted_phyrate g_peer_tx_phyrate[PEER_CLI_MAX];
+
 uint16_t g_stainfo_len;
 uint8_t bsal_clients[IOCTL80211_CLIENTS_SIZE];
 
@@ -134,68 +144,20 @@ static inline uint64_t weight_avg_get(const struct weight_avg *avg)
     return avg->cnt > 0 ? avg->sum / avg->cnt : 0;
 }
 
-static uint32_t mcs_to_mbps(const int mcs, const int bw,
-                            const int nss, const enum guard_int gi)
-{
-    /* The following table is precomputed from:
-     *
-     * bpsk -> 1bit
-     * qpsk -> 2bit
-     * 16-qam -> 4bit
-     * 64-qam -> 6bit
-     * 256-qam -> 8bit
-     *
-     * 20mhz -> 52 tones
-     * 40mhz -> 108 tones
-     * 80mhz -> 234 tones
-     * 160mhz -> 486 tones
-     *
-     * Once divided by 4 will get an long GI phyrate in mbps.
-     */
-    static const unsigned short bps[10][4] = {
-        /* 20mhz 40mhz 80mhz  160mhz */
-        {  26,   54,   117,   234   }, /* BPSK 1/2 */
-        {  52,   108,  234,   468   }, /* QPSK 1/2 */
-        {  78,   162,  351,   702   }, /* QPSK 3/4 */
-        {  104,  216,  468,   936   }, /* 16-QAM 1/2 */
-        {  156,  324,  702,   1404  }, /* 16-QAM 3/4 */
-        {  208,  432,  936,   1248  }, /* 16-QAM 2/3 */
-        {  234,  486,  1053,  2106  }, /* 64-QAM 3/4 */
-        {  260,  540,  1170,  2340  }, /* 64-QAM 5/6 */
-        {  312,  648,  1404,  2808  }, /* 256-QAM 3/4 */
-        {  346,  720,  1560,  3120  }, /* 256-QAM 5/6 */
-    };
-    static const unsigned short legacy[] = {
-        6, 9, 12, 18, 24, 36, 48, 54, /* OFDM */
-        1, 2, 5, 11, 2, 5, 11, /* CCK */
-    };
-    const int i = mcs < 10 ? mcs : 9;
-    const int j = bw < 4 ? bw : 3;
-
-    if (nss == 0) {
-        return mcs < (int)ARRAY_SIZE(legacy) ? legacy[mcs] : legacy[0];
-    }
-    else {
-        if (gi == SHORT_GUARD_INT) /* SGI gives about 11% tput gain*/
-            return (bps[i][j] * nss * 25) / 90; /* (bsp * nss / 4) * 111 / 100 */
-        else
-            return (bps[i][j] * nss) / 4;
-    }
-}
 #ifdef OPENSYNC_NL_SUPPORT
 int get_cli_mac_index(mac_address_t mac_addr, int peer_stats_flag)
 {
     int i;
     int index = 0;
-    if (peer_stats_flag == 1)
+    if (peer_stats_flag == PEER_RX_STATS)
     {
         for (i = 0; i < PEER_CLI_MAX; i++)
         {
-            if (g_peer_rx_ioctl_stats[i].flags & PEER_STATS_FLAG)
+            if (g_peer_rx_phyrate[i].flags & PEER_STATS_FLAG)
             {
-                if ((g_peer_rx_ioctl_stats[i].u.peer_rx_stats.set.addr[0] == (u8)mac_addr[0]) && (g_peer_rx_ioctl_stats[i].u.peer_rx_stats.set.addr[1] == (u8)mac_addr[1]) &&
-                    (g_peer_rx_ioctl_stats[i].u.peer_rx_stats.set.addr[2] == (u8)mac_addr[2]) && (g_peer_rx_ioctl_stats[i].u.peer_rx_stats.set.addr[3] == (u8)mac_addr[3]) &&
-                    (g_peer_rx_ioctl_stats[i].u.peer_rx_stats.set.addr[4] == (u8)mac_addr[4]) && (g_peer_rx_ioctl_stats[i].u.peer_rx_stats.set.addr[5] == (u8)mac_addr[5]))
+                if ((g_peer_rx_phyrate[i].mac_addr[0] == (u8)mac_addr[0]) && (g_peer_rx_phyrate[i].mac_addr[1] == (u8)mac_addr[1]) &&
+                    (g_peer_rx_phyrate[i].mac_addr[2] == (u8)mac_addr[2]) && (g_peer_rx_phyrate[i].mac_addr[3] == (u8)mac_addr[3]) &&
+                    (g_peer_rx_phyrate[i].mac_addr[4] == (u8)mac_addr[4]) && (g_peer_rx_phyrate[i].mac_addr[5] == (u8)mac_addr[5]))
                 {
                     index = i;
                     break;
@@ -205,14 +167,16 @@ int get_cli_mac_index(mac_address_t mac_addr, int peer_stats_flag)
                 break;
             }
         }
-    } else {
+    }
+    else if (peer_stats_flag == PEER_TX_STATS)
+    {
         for (i = 0; i < PEER_CLI_MAX; i++)
         {
-            if (g_peer_tx_ioctl_stats[i].flags & PEER_STATS_FLAG)
+            if (g_peer_tx_phyrate[i].flags & PEER_STATS_FLAG)
             {
-                if ((g_peer_tx_ioctl_stats[i].u.peer_tx_stats.set.addr[0] == (u8)mac_addr[0]) && (g_peer_tx_ioctl_stats[i].u.peer_tx_stats.set.addr[1] == (u8)mac_addr[1]) &&
-                    (g_peer_tx_ioctl_stats[i].u.peer_tx_stats.set.addr[2] == (u8)mac_addr[2]) && (g_peer_tx_ioctl_stats[i].u.peer_tx_stats.set.addr[3] == (u8)mac_addr[3]) &&
-                    (g_peer_tx_ioctl_stats[i].u.peer_tx_stats.set.addr[4] == (u8)mac_addr[4]) && (g_peer_tx_ioctl_stats[i].u.peer_tx_stats.set.addr[5] == (u8)mac_addr[5]))
+                if ((g_peer_tx_phyrate[i].mac_addr[0] == (u8)mac_addr[0]) && (g_peer_tx_phyrate[i].mac_addr[1] == (u8)mac_addr[1]) &&
+                    (g_peer_tx_phyrate[i].mac_addr[2] == (u8)mac_addr[2]) && (g_peer_tx_phyrate[i].mac_addr[3] == (u8)mac_addr[3]) &&
+                    (g_peer_tx_phyrate[i].mac_addr[4] == (u8)mac_addr[4]) && (g_peer_tx_phyrate[i].mac_addr[5] == (u8)mac_addr[5]))
                 {
                     index = i;
                     break;
@@ -223,8 +187,9 @@ int get_cli_mac_index(mac_address_t mac_addr, int peer_stats_flag)
             }
         }
     }
+
     return index;
-    }
+}
 
 static void dp_peer_rx_rate_stats(uint8_t *peer_mac,
                     uint64_t peer_cookie,
@@ -233,62 +198,23 @@ static void dp_peer_rx_rate_stats(uint8_t *peer_mac,
 {
     int index;
     int i;
-    uint8_t is_lithium;
-    uint8_t chain, bw, max_chain, max_bw;
     struct wlan_rx_rate_stats *rx_stats;
-    struct wlan_rx_rate_stats *tmp_rx_stats;;
 
-    rx_stats = tmp_rx_stats = (struct wlan_rx_rate_stats *)buffer;
+    rx_stats = (struct wlan_rx_rate_stats *)buffer;
 
     index = get_cli_mac_index(peer_mac, PEER_RX_STATS);
-    memcpy(g_peer_rx_ioctl_stats[index].u.peer_rx_stats.set.addr, peer_mac, sizeof(g_peer_rx_ioctl_stats[index].u.peer_rx_stats.set.addr));
-    g_peer_rx_ioctl_stats[index].flags |= PEER_STATS_FLAG;
-    g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.cookie = (peer_cookie & 0xFFFFFFFF00000000) >> WLANSTATS_PEER_COOKIE_LSB;
+    memcpy(g_peer_rx_phyrate[index].mac_addr, peer_mac, sizeof(g_peer_rx_phyrate[index].mac_addr));
+    g_peer_rx_phyrate[index].flags |= PEER_STATS_FLAG;
+    g_peer_rx_phyrate[index].cookie = (peer_cookie & 0xFFFFFFFF00000000) >> WLANSTATS_PEER_COOKIE_LSB;
 
-    is_lithium = (peer_cookie & WLANSTATS_COOKIE_PLATFORM_OFFSET) >> WLANSTATS_PEER_COOKIE_LSB;
-    if (is_lithium) {
-        max_chain = 8;
-        max_bw = 8;
-    } else {
-        max_chain = 4;
-        max_bw = 4;
-    }
     for (i = 0; i < WLANSTATS_CACHE_SIZE; i++)
     {
-        if ((int)(rx_stats->rix) != INVALID_CACHE_IDX) {
-            g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_bytes = rx_stats -> num_bytes;
-            g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_msdus = rx_stats -> num_msdus;
-            g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_mpdus = rx_stats -> num_mpdus;
-            g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_ppdus = rx_stats -> num_ppdus;
-            g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_retries = rx_stats -> num_retries;
-            g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_sgi = rx_stats -> num_sgi;
-            g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].ave_rssi = rx_stats -> avg_rssi;
-        }
-        if ((int)(tmp_rx_stats->rix) != INVALID_CACHE_IDX) {
-            for (chain = 0; chain < max_chain; chain++) {
-                for (bw = 0; bw < max_bw; bw++) {
-                    g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].ave_rssi_ant[chain][bw]= tmp_rx_stats -> avg_rssi_ant[chain][bw];
-                }
-            }
+        if ((int)(rx_stats->rix) != INVALID_CACHE_IDX)
+        {
+            g_peer_rx_phyrate[index].sum += rx_stats->rate * rx_stats->num_ppdus;
+            g_peer_rx_phyrate[index].cnt += rx_stats->num_ppdus;
         }
         rx_stats = rx_stats + 1;
-        tmp_rx_stats = tmp_rx_stats + 1;
-    }
-}
-static void
-dp_peer_tx_sojourn_stats(uint8_t *peer_mac,
-                   uint64_t peer_cookie,
-                   struct wlan_tx_sojourn_stats *sojourn_stats)
-{
-    uint8_t tid;
-    int index = 0;
-
-    index = get_cli_mac_index(peer_mac, PEER_TX_STATS);
-    for (tid = 0; tid < WLAN_DATA_TID_MAX; tid++) {
-                /* change sum_sojourn_msdu data type to u64 */
-        g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.sojourn[tid].ave_sojourn_msec = sojourn_stats->avg_sojourn_msdu[tid];
-        g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.sojourn[tid].sum_sojourn_msec = sojourn_stats->sum_sojourn_msdu[tid];
-        g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.sojourn[tid].num_sojourn_mpdus = sojourn_stats->num_msdus[tid];
     }
 }
 
@@ -301,7 +227,6 @@ static void dp_peer_tx_rate_stats(uint8_t *peer_mac,
     int i = 0;
 
     struct wlan_tx_rate_stats *tx_stats;
-    struct wlan_tx_sojourn_stats *sojourn_stats;
 
     if (buffer_len < (WLANSTATS_CACHE_SIZE *
               sizeof(struct wlan_tx_rate_stats))
@@ -313,21 +238,20 @@ static void dp_peer_tx_rate_stats(uint8_t *peer_mac,
 
     index = get_cli_mac_index(peer_mac, PEER_TX_STATS);
 
-    memcpy(g_peer_tx_ioctl_stats[index].u.peer_tx_stats.set.addr, peer_mac, sizeof(g_peer_tx_ioctl_stats[index].u.peer_tx_stats.set.addr));
-    g_peer_tx_ioctl_stats[index].flags |= PEER_STATS_FLAG;
-    g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.cookie = (peer_cookie & 0xFFFFFFFF00000000) >> WLANSTATS_PEER_COOKIE_LSB;
+    memcpy(g_peer_tx_phyrate[index].mac_addr, peer_mac, sizeof(g_peer_tx_phyrate[index].mac_addr));
+    g_peer_tx_phyrate[index].flags |= PEER_STATS_FLAG;
+    g_peer_tx_phyrate[index].cookie = (peer_cookie & 0xFFFFFFFF00000000) >> WLANSTATS_PEER_COOKIE_LSB;
 
     for (i = 0; i < WLANSTATS_CACHE_SIZE; i++)
     {
-        if ((int)(tx_stats->rix) != INVALID_CACHE_IDX) {
-            g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.stats[i].attempts = tx_stats->mpdu_attempts;
-            g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.stats[i].success = tx_stats->mpdu_success;
-            g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.stats[i].ppdus= tx_stats->num_ppdus;
+        if ((int)(tx_stats->rix) != INVALID_CACHE_IDX)
+        {
+            g_peer_tx_phyrate[index].sum += tx_stats->rate * tx_stats->num_ppdus;
+            g_peer_tx_phyrate[index].cnt += tx_stats->num_ppdus;
         }
         tx_stats = tx_stats + 1;
     }
-    sojourn_stats = (struct wlan_tx_sojourn_stats *)((uint8_t *)buffer + (WLANSTATS_CACHE_SIZE + sizeof(struct wlan_tx_rate_stats)));
-    dp_peer_tx_sojourn_stats(peer_mac, peer_cookie, sojourn_stats);
+
     return;
 }
 
@@ -412,250 +336,25 @@ ioctl_status_t ioctl80211_client_stats_rx_calculate(
         ioctl80211_client_record_t *data_old,
         dpp_client_record_t        *client_record)
 {
-    struct ps_uapi_ioctl           *new_stats_rx = NULL;
-    struct ps_uapi_ioctl           *old_stats_rx = NULL;
-    dpp_client_stats_rx_t          *client_stats_rx = NULL;
-    struct weight_avg               avgmbps = { .sum = 0, .cnt = 0 };
-    uint32_t                        mcs;
-    uint32_t                        nss;
-    uint32_t                        bw;
+    int index;
+    radio_type_t radio_type = radio_cfg->type;
 
-    uint32_t                        stats_index = 0;
-    uint32_t                        num_ppdus_delta;
-    uint32_t                        num_sgi_delta;
-    radio_type_t                    radio_type =
-        radio_cfg->type;
-
-    /* MCS/NSS/BW rate table and indexes that should be used for supported rates
-       ----------------------------------------------
-       | type | bw         | nss        |  mcs
-       ----------------------------------------------
-       | OFDM | 0 (20MHz)  | 0 (legacy) |  0 - 6M
-       |      |            |            |  1 - 9M
-       |      |            |            |  2 - 12M
-       |      |            |            |  3 - 18M
-       |      |            |            |  4 - 24M
-       |      |            |            |  5 - 36M
-       |      |            |            |  6 - 48M
-       |      |            |            |  7 - 54M
-       ----------------------------------------------
-       | CCK  | 0 (20MHz)  | 0 (legacy) |  8 - L1M
-       |      |            |            |  9 - L2M
-       |      |            |            | 10 - L5.5M
-       |      |            |            | 11 - L11M
-       |      |            |            | 12 - S2M
-       |      |            |            | 13 - S5.5M
-       |      |            |            | 14 - S11M"
-       ----------------------------------------------
-       | VHT  | 0 (20MHz)  | 1 (chain1) |  1 - HT/VHT
-       |      | 1 (40MHz)  | ...        |  2 - HT/VHT
-       |      | 2 (80MHz)  | 8 (chain8) |  3 - HT/VHT
-       |      | 3 (160MHz) |            |  4 - HT/VHT
-       |      |            |            |  5 - HT/VHT
-       |      |            |            |  6 - HT/VHT
-       |      |            |            |  7 - HT/VHT
-       |      |            |            |  8 - VHT
-       |      |            |            |  9 - VHT
-       ----------------------------------------------
-       NOTE: The size of this table on 4x4 can be big - we could send only non zero elements!
-     */
-    for (stats_index = 0; stats_index < PS_MAX_ALL; stats_index++)
+    index = get_cli_mac_index(data_new->info.mac, PEER_RX_STATS);
+    if (g_peer_rx_phyrate[index].cnt != 0)
     {
-        new_stats_rx = &data_new->stats_rx;
-        old_stats_rx = &data_old->stats_rx;
-
-        /* Skip unchanged entries*/
-        if (    !(STATS_DELTA(
-                        new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_bytes,
-                        old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_bytes))
-                && !(STATS_DELTA(
-                        new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_msdus,
-                        old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_msdus))
-                && !(STATS_DELTA(
-                        new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_mpdus,
-                        old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_mpdus))
-                && !(STATS_DELTA(
-                        new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_ppdus,
-                        old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_ppdus))
-                && !(STATS_DELTA(
-                        new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_retries,
-                        old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_retries))
-           ) {
-            continue;
-        }
-
-        if (stats_index < PS_MAX_LEGACY) {
-            mcs = stats_index;
-            nss = 0;
-            bw  = 0;
-        }
-        else {
-            bw  = ((stats_index - PS_MAX_LEGACY) / (PS_MAX_MCS * PS_MAX_NSS));
-            nss = (((stats_index - PS_MAX_LEGACY) / PS_MAX_MCS) % PS_MAX_NSS) + 1;
-            mcs = (stats_index - PS_MAX_LEGACY) % PS_MAX_MCS;
-        }
-        if (kconfig_enabled(CONFIG_QCA_RATE_HISTO_TO_EXPECTED_TPUT)) {
-            num_ppdus_delta = STATS_DELTA(
-                new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_ppdus,
-                old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_ppdus);
-
-            num_sgi_delta = STATS_DELTA(
-                new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_sgi,
-                old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_sgi);
-
-            if (num_sgi_delta > 0) {
-                weight_avg_add(
-                    &avgmbps,
-                    mcs_to_mbps(mcs, bw, nss, SHORT_GUARD_INT),
-                    num_sgi_delta);
-            }
-
-            if (num_sgi_delta < num_ppdus_delta) {
-                weight_avg_add(
-                    &avgmbps,
-                    mcs_to_mbps(mcs, bw, nss, LONG_GUARD_INT),
-                    (num_ppdus_delta - num_sgi_delta));
-            }
-
-            continue;
-        }
-        client_stats_rx =
-            dpp_client_stats_rx_record_alloc();
-        if (NULL == client_stats_rx) {
-            LOG(ERR,
-                    "Updating %s interface client stats rx"
-                    "(Failed to allocate memory)",
-                    radio_get_name_from_type(radio_type));
-            return IOCTL_STATUS_ERROR;
-        }
-
-        client_stats_rx->mcs = mcs;
-        client_stats_rx->nss = nss;
-        client_stats_rx->bw  = bw;
-
-        client_stats_rx->bytes =
-            STATS_DELTA(
-                    new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_bytes,
-                    old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_bytes);
-        LOG(TRACE,
-            "Calculated %s client delta stats_rx for "MAC_ADDRESS_FORMAT" "
-            "index=%d [%d, %d, %d] bytes=%"PRIu64" (delta=%u=new=%u-old=%u)",
-            radio_get_name_from_type(radio_type),
-            MAC_ADDRESS_PRINT(data_new->info.mac),
-            stats_index, client_stats_rx->bw, client_stats_rx->nss, client_stats_rx->mcs,
-            client_stats_rx->bytes,
-            STATS_DELTA(
-                new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_bytes,
-                old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_bytes),
-            new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_bytes,
-            old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_bytes);
-
-        client_stats_rx->msdu =
-            STATS_DELTA(
-                    new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_msdus,
-                    old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_msdus);
-        LOG(TRACE,
-            "Calculated %s client delta stats_rx for "MAC_ADDRESS_FORMAT" "
-            "index=%d [%d, %d, %d] msdu=%"PRIu64" (delta=%u=new=%u-old=%u)",
-            radio_get_name_from_type(radio_type),
-            MAC_ADDRESS_PRINT(data_new->info.mac),
-            stats_index, client_stats_rx->bw, client_stats_rx->nss, client_stats_rx->mcs,
-            client_stats_rx->msdu,
-            STATS_DELTA(
-                new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_msdus,
-                old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_msdus),
-            new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_msdus,
-            old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_msdus);
-
-        client_stats_rx->mpdu =
-            STATS_DELTA(
-                    new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_mpdus,
-                    old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_mpdus);
-        LOG(TRACE,
-            "Calculated %s client delta stats_rx for "MAC_ADDRESS_FORMAT" "
-            "index=%d [%d, %d, %d] mpdu=%"PRIu64" (delta=%u=new=%u-old=%u)",
-            radio_get_name_from_type(radio_type),
-            MAC_ADDRESS_PRINT(data_new->info.mac),
-            stats_index, client_stats_rx->bw, client_stats_rx->nss, client_stats_rx->mcs,
-            client_stats_rx->mpdu,
-            STATS_DELTA(
-                new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_mpdus,
-                old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_mpdus),
-            new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_mpdus,
-            old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_mpdus);
-
-        client_stats_rx->ppdu =
-            STATS_DELTA(
-                    new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_ppdus,
-                    old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_ppdus);
-        LOG(TRACE,
-            "Calculated %s client delta stats_rx for "MAC_ADDRESS_FORMAT" "
-            "index=%d [%d, %d, %d] ppdu=%"PRIu64" (delta=%u=new=%u-old=%u)",
-            radio_get_name_from_type(radio_type),
-            MAC_ADDRESS_PRINT(data_new->info.mac),
-            stats_index, client_stats_rx->bw, client_stats_rx->nss, client_stats_rx->mcs,
-            client_stats_rx->ppdu,
-            STATS_DELTA(
-                new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_ppdus,
-                old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_ppdus),
-            new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_ppdus,
-            old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_ppdus);
-
-        client_stats_rx->retries =
-            STATS_DELTA(
-                    new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_retries,
-                    old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_retries);
-        LOG(TRACE,
-            "Calculated %s client delta stats_rx for "MAC_ADDRESS_FORMAT" "
-            "index=%d [%d, %d, %d] retries=%"PRIu64" (delta=%u=new=%u-old=%u)",
-            radio_get_name_from_type(radio_type),
-            MAC_ADDRESS_PRINT(data_new->info.mac),
-            stats_index, client_stats_rx->bw, client_stats_rx->nss, client_stats_rx->mcs,
-            client_stats_rx->retries,
-            STATS_DELTA(
-                new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_retries,
-                old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_retries),
-            new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_retries,
-            old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_retries);
-
-        /* We are not collecting them currently */
-        client_stats_rx->errors = 0;
-
-        /* RSSI is already averaged by driver */
-        client_stats_rx->rssi = new_stats_rx->u.peer_rx_stats.get.stats[stats_index].ave_rssi;
-        if ( ! IOCTL80211_IS_RSSI_VALID(client_stats_rx->rssi))
-        {
-            LOG(WARNING, "Invalid RSSI value received from driver: %d. "
-                         "Will assume new RSSI == old RSSI.",
-                          client_stats_rx->rssi);
-
-            client_stats_rx->rssi = 0;
-        }
+        /* This overrides the "last rx rate" */
+        client_record->stats.rate_rx = ((g_peer_rx_phyrate[index].sum / g_peer_rx_phyrate[index].cnt) / 1000);
 
         LOG(TRACE,
-            "Calculated %s client delta stats_rx for "MAC_ADDRESS_FORMAT
-            " index=%d [%d, %d, %d] rssi=%d (new=%u-old=%u)",
+            "Calculated %s client delta rx phyrate "MAC_ADDRESS_FORMAT
+            " mbps=%f mpdus=%"PRIu64"",
             radio_get_name_from_type(radio_type),
             MAC_ADDRESS_PRINT(data_new->info.mac),
-            stats_index, client_stats_rx->bw, client_stats_rx->nss, client_stats_rx->mcs,
-            client_stats_rx->rssi,
-            new_stats_rx->u.peer_rx_stats.get.stats[stats_index].ave_rssi,
-            old_stats_rx->u.peer_rx_stats.get.stats[stats_index].ave_rssi);
+            client_record->stats.rate_rx,
+            g_peer_rx_phyrate[index].cnt);
+        g_peer_rx_phyrate[index].sum = 0;
+        g_peer_rx_phyrate[index].cnt = 0;
 
-        ds_dlist_insert_tail(&client_record->stats_rx, client_stats_rx);
-    }
-    if (kconfig_enabled(CONFIG_QCA_RATE_HISTO_TO_EXPECTED_TPUT)) {
-        if (avgmbps.cnt) {
-            /* This overrides the "last rx rate" */
-            client_record->stats.rate_rx = weight_avg_get(&avgmbps);
-            LOG(TRACE,
-                 "Calculated %s client delta rx phyrate "MAC_ADDRESS_FORMAT
-                 " mbps=%f mpdus=%llu",
-                 radio_get_name_from_type(radio_type),
-                 MAC_ADDRESS_PRINT(data_new->info.mac),
-                 client_record->stats.rate_rx,
-                 avgmbps.cnt);
-        }
     }
     return IOCTL_STATUS_OK;
 }
@@ -667,53 +366,26 @@ ioctl_status_t ioctl80211_clients_stats_rx_fetch(
         ioctl80211_client_record_t     *client_entry)
 {
     int index;
-    int i;
-    uint8_t chain, bw, max_chain, max_bw;
-    uint8_t is_lithium;
-    struct ps_uapi_ioctl               *ioctl_stats = &client_entry->stats_rx;
 
-    memset (ioctl_stats, 0, sizeof(*ioctl_stats));
 #ifdef OPENSYNC_NL_SUPPORT
     index = get_cli_mac_index(client_entry->info.mac, PEER_RX_STATS);
-    if (!g_peer_rx_ioctl_stats[index].flags)
+    if (!g_peer_rx_phyrate[index].flags)
         return IOCTL_STATUS_ERROR;
-#endif
+    client_entry->stats_cookie = g_peer_rx_phyrate[index].cookie;
+#else
 
+    int32_t                             rc;
+    struct iwreq                        request;
+    struct ps_uapi_ioctl               *ioctl_stats = &client_entry->stats_rx;
+
+    memset(ioctl_stats, 0, sizeof(*ioctl_stats));
     ioctl_stats->u.peer_rx_stats.set.addr[0] = (u8)client_entry->info.mac[0];
     ioctl_stats->u.peer_rx_stats.set.addr[1] = (u8)client_entry->info.mac[1];
     ioctl_stats->u.peer_rx_stats.set.addr[2] = (u8)client_entry->info.mac[2];
     ioctl_stats->u.peer_rx_stats.set.addr[3] = (u8)client_entry->info.mac[3];
     ioctl_stats->u.peer_rx_stats.set.addr[4] = (u8)client_entry->info.mac[4];
     ioctl_stats->u.peer_rx_stats.set.addr[5] = (u8)client_entry->info.mac[5];
-#ifdef OPENSYNC_NL_SUPPORT
-    is_lithium = ((g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.cookie) & WLANSTATS_COOKIE_PLATFORM_OFFSET) >> WLANSTATS_PEER_COOKIE_LSB;
-    //is_lithium = (peer_cookie & WLANSTATS_COOKIE_PLATFORM_OFFSET) >> WLANSTATS_PEER_COOKIE_LSB;
-    if (is_lithium) {
-        max_chain = 8;
-        max_bw = 8;
-    } else {
-        max_chain = 4;
-        max_bw = 4;
-    }
-    for (i = 0; i < WLANSTATS_CACHE_SIZE; i++)
-    {
-        ioctl_stats->flags = g_peer_rx_ioctl_stats[index].flags;
-        ioctl_stats->u.peer_rx_stats.get.stats[i].num_bytes = g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_bytes;
-        ioctl_stats->u.peer_rx_stats.get.stats[i].num_msdus = g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_msdus;
-        ioctl_stats->u.peer_rx_stats.get.stats[i].num_mpdus = g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_mpdus;
-        ioctl_stats->u.peer_rx_stats.get.stats[i].num_ppdus = g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_ppdus;
-        ioctl_stats->u.peer_rx_stats.get.stats[i].num_retries = g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_retries;
-        ioctl_stats->u.peer_rx_stats.get.stats[i].num_sgi = g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].num_sgi;
-        ioctl_stats->u.peer_rx_stats.get.stats[i].ave_rssi = g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].ave_rssi;
-        for (chain = 0; chain < max_chain; chain++) {
-            for (bw = 0; bw < max_bw; bw++) {
-                ioctl_stats->u.peer_rx_stats.get.stats[i].ave_rssi_ant[chain][bw] = g_peer_rx_ioctl_stats[index].u.peer_rx_stats.get.stats[i].ave_rssi_ant[chain][bw];
-            }
-        }
-    }
-#else
-    int32_t                             rc;
-    struct iwreq                        request;
+
     memset (&request, 0, sizeof(request));
 	request.u.data.pointer = ioctl_stats;
 	request.u.data.length = PS_UAPI_IOCTL_SIZE;
@@ -749,33 +421,12 @@ ioctl_status_t ioctl80211_clients_stats_rx_fetch(
             strerror(errno));
         return IOCTL_STATUS_ERROR;
     }
-#endif
     /* Set current stats cookie () */
     client_entry->stats_cookie = ioctl_stats->u.peer_rx_stats.get.cookie;
+#endif
 
     return IOCTL_STATUS_OK;
 }
-
-/* There are 4 TIDS mapped to each Access category */
-static radio_queue_type_t ioctl80211_tid_ac_index_get[CLIENT_MAX_TID_RECORDS] = {
-    RADIO_QUEUE_TYPE_BE,      /* 0 */
-    RADIO_QUEUE_TYPE_BK,      /* 1 */
-    RADIO_QUEUE_TYPE_BK,      /* 2 */
-    RADIO_QUEUE_TYPE_BE,      /* 3 */
-    RADIO_QUEUE_TYPE_VI,      /* 4 */
-    RADIO_QUEUE_TYPE_VI,      /* 5 */
-    RADIO_QUEUE_TYPE_VO,      /* 6 */
-    RADIO_QUEUE_TYPE_VO,      /* 7 */
-
-    RADIO_QUEUE_TYPE_BE,      /* 8 */
-    RADIO_QUEUE_TYPE_BK,      /* 9 */
-    RADIO_QUEUE_TYPE_BK,      /* 10 */
-    RADIO_QUEUE_TYPE_BE,      /* 11 */
-    RADIO_QUEUE_TYPE_VI,      /* 12 */
-    RADIO_QUEUE_TYPE_VI,      /* 13 */
-    RADIO_QUEUE_TYPE_VO,      /* 14 */
-    RADIO_QUEUE_TYPE_VO,      /* 15 */
-};
 
 static
 ioctl_status_t ioctl80211_client_stats_tx_calculate(
@@ -784,310 +435,23 @@ ioctl_status_t ioctl80211_client_stats_tx_calculate(
         ioctl80211_client_record_t *data_old,
         dpp_client_record_t        *client_record)
 {
-    struct ps_uapi_ioctl           *new_stats_tx = NULL;
-    struct ps_uapi_ioctl           *old_stats_tx = NULL;
-    dpp_client_stats_tx_t          *client_stats_tx = NULL;
-    struct weight_avg               avgmbps = { .sum = 0, .cnt = 0 };
-    uint32_t                        mcs;
-    uint32_t                        nss;
-    uint32_t                        bw;
+    int                             index;
+    radio_type_t                    radio_type = radio_cfg->type;
 
-    uint32_t                        stats_index = 0;
-
-    radio_type_t                    radio_type = 
-        radio_cfg->type;
-
-    /* MCS/NSS/BW rate table and indexes that should be used for supported rates
-       ----------------------------------------------
-       | type | bw         | nss        |  mcs
-       ----------------------------------------------
-       | OFDM | 0 (20MHz)  | 0 (legacy) |  0 - 6M
-       |      |            |            |  1 - 9M
-       |      |            |            |  2 - 12M
-       |      |            |            |  3 - 18M
-       |      |            |            |  4 - 24M
-       |      |            |            |  5 - 36M
-       |      |            |            |  6 - 48M
-       |      |            |            |  7 - 54M
-       ----------------------------------------------
-       | CCK  | 0 (20MHz)  | 0 (legacy) |  8 - L1M
-       |      |            |            |  9 - L2M
-       |      |            |            | 10 - L5.5M
-       |      |            |            | 11 - L11M
-       |      |            |            | 12 - S2M
-       |      |            |            | 13 - S5.5M
-       |      |            |            | 14 - S11M"
-       ----------------------------------------------
-       | VHT  | 0 (20MHz)  | 1 (chain1) |  1 - HT/VHT
-       |      | 1 (40MHz)  | ...        |  2 - HT/VHT
-       |      | 2 (80MHz)  | 8 (chain8) |  3 - HT/VHT
-       |      | 3 (160MHz) |            |  4 - HT/VHT
-       |      |            |            |  5 - HT/VHT
-       |      |            |            |  6 - HT/VHT
-       |      |            |            |  7 - HT/VHT
-       |      |            |            |  8 - VHT
-       |      |            |            |  9 - VHT
-       ----------------------------------------------
-       NOTE: The size of this table on 4x4 can be big - we could send only non zero elements!
-     */
-    for (stats_index = 0; stats_index < PS_MAX_ALL; stats_index++)
+    index = get_cli_mac_index(data_new->info.mac, PEER_TX_STATS);
+    if (g_peer_tx_phyrate[index].cnt != 0)
     {
-        new_stats_tx = &data_new->stats_tx;
-        old_stats_tx = &data_old->stats_tx;
-
-        /* Skip unchanged entries*/
-        if (    !(STATS_DELTA(
-                        new_stats_tx->u.peer_tx_stats.get.stats[stats_index].attempts,
-                        old_stats_tx->u.peer_tx_stats.get.stats[stats_index].attempts))
-                && !(STATS_DELTA(
-                        new_stats_tx->u.peer_tx_stats.get.stats[stats_index].success,
-                        old_stats_tx->u.peer_tx_stats.get.stats[stats_index].success))
-           )
-        {
-            continue;
-        }
-
-        if (stats_index < PS_MAX_LEGACY) {
-            mcs = stats_index;
-            nss = 0;
-            bw  = 0;
-        }
-        else {
-            bw  = ((stats_index - PS_MAX_LEGACY) / (PS_MAX_MCS * PS_MAX_NSS));
-            nss = (((stats_index - PS_MAX_LEGACY) / PS_MAX_MCS) % PS_MAX_NSS) + 1;
-            mcs = (stats_index - PS_MAX_LEGACY) % PS_MAX_MCS;
-        }
-        if (kconfig_enabled(CONFIG_QCA_RATE_HISTO_TO_EXPECTED_TPUT)) {
-            weight_avg_add(
-                    &avgmbps,
-                    mcs_to_mbps(mcs, bw, nss, LONG_GUARD_INT),
-                    STATS_DELTA(
-                        new_stats_tx->u.peer_tx_stats.get.stats[stats_index].ppdus,
-                        old_stats_tx->u.peer_tx_stats.get.stats[stats_index].ppdus));
-
-            continue;
-        }
-        client_stats_tx =
-            dpp_client_stats_tx_record_alloc();
-        if (NULL == client_stats_tx) {
-            LOG(ERR,
-                    "Updating %s interface client stats tx"
-                    "(Failed to allocate memory)",
-                    radio_get_name_from_type(radio_type));
-            return IOCTL_STATUS_ERROR;
-        }
-
-        client_stats_tx->mcs = mcs;
-        client_stats_tx->nss = nss;
-        client_stats_tx->bw  = bw;
-
-        /* Tx stats collected are approximation due to driver Tx handling :
-
-           We send to the driver a
-           - list of rates (lets use just 2 for example) that the driver should use
-           - how many times each rate should be tried and (we shall make it 1)
-           - the list of MPDUs that should be sent (lets say 10)
-
-           1. Firstly it sends 10 frames but succeeds to send (ack) only 2
-           (real attempts 10, success 2)
-           2. Because try is 1 it goes to the next rate and succeeds to send i
-           remaining 8 (real attempts 18, success 10 )
-           3. Since we get completion at the end with report tries_count 1,
-           success 10 we can only estimate what was happening on each rate
-           based on what was send and retrieved to/from driver
-
-           Because try was 1 rate was changed (we configured it to 1) and based on number
-           of sent packets (10) we mark first rate attempts 10 and success 0
-           (worst case since we do not know what happened. Then we move to next rate where
-           success reported is 10 and we mark attempts also as 10 (we do not know how many
-           successes were in previous rate)
-
-           rate     estimated               real
-           attempts    success     attempts    success
-           1        10          0           10          2
-           2        10          10          8           8
-           total    20                      18
-
-           Same example but different success count in reality gives us different counts
-           but we estimated it the same
-
-           rate     estimated               real
-           attempts    success     attempts    success
-           1        10          0           10          8
-           2        10          10          2           2
-           total    20                      12
-           stats_entry->mpdu =
-           ioctl_stats->u.peer_tx_stats.get.stats[stats_index].attempts;
-           stats_entry->ppdu =
-           ioctl_stats->u.peer_tx_stats.get.stats[stats_index].ppdus;
-
-         */
-        /* We are not collecting them currently */
-        client_stats_tx->bytes = 0;
-        client_stats_tx->msdu = 0;
-        client_stats_tx->errors = 0;
-
-        client_stats_tx->mpdu =
-            STATS_DELTA(
-                    new_stats_tx->u.peer_tx_stats.get.stats[stats_index].attempts,
-                    old_stats_tx->u.peer_tx_stats.get.stats[stats_index].attempts);
+        /* This overrides the "last tx rate" */
+        client_record->stats.rate_tx = ((g_peer_tx_phyrate[index].sum / g_peer_tx_phyrate[index].cnt) / 1000);
         LOG(TRACE,
-            "Calculated %s client delta stats_tx for "MAC_ADDRESS_FORMAT" "
-            "index=%d [%d, %d, %d] mpdu=%"PRIu64" (delta=%u=new=%u-old=%u)",
+            "Calculated %s client delta tx phyrate "MAC_ADDRESS_FORMAT
+            " mbps=%f ppdus=%"PRIu64"",
             radio_get_name_from_type(radio_type),
             MAC_ADDRESS_PRINT(data_new->info.mac),
-            stats_index, client_stats_tx->bw, client_stats_tx->nss, client_stats_tx->mcs,
-            client_stats_tx->mpdu,
-            STATS_DELTA(
-                new_stats_tx->u.peer_tx_stats.get.stats[stats_index].attempts,
-                old_stats_tx->u.peer_tx_stats.get.stats[stats_index].attempts),
-            new_stats_tx->u.peer_tx_stats.get.stats[stats_index].attempts,
-            old_stats_tx->u.peer_tx_stats.get.stats[stats_index].attempts);
-
-        client_stats_tx->ppdu =
-            STATS_DELTA(
-                    new_stats_tx->u.peer_tx_stats.get.stats[stats_index].ppdus,
-                    old_stats_tx->u.peer_tx_stats.get.stats[stats_index].ppdus);
-        LOG(TRACE,
-            "Calculated %s client delta stats_tx for "MAC_ADDRESS_FORMAT" "
-            "index=%d [%d, %d, %d] ppdu=%"PRIu64" (delta=%u=new=%u-old=%u)",
-            radio_get_name_from_type(radio_type),
-            MAC_ADDRESS_PRINT(data_new->info.mac),
-            stats_index, client_stats_tx->bw, client_stats_tx->nss, client_stats_tx->mcs,
-            client_stats_tx->ppdu,
-            STATS_DELTA(
-                new_stats_tx->u.peer_tx_stats.get.stats[stats_index].ppdus,
-                old_stats_tx->u.peer_tx_stats.get.stats[stats_index].ppdus),
-            new_stats_tx->u.peer_tx_stats.get.stats[stats_index].ppdus,
-            old_stats_tx->u.peer_tx_stats.get.stats[stats_index].ppdus);
-
-        /* Retry is worst case estimation between each attempts and successes */
-        client_stats_tx->retries =
-            STATS_DELTA(
-                    (new_stats_tx->u.peer_tx_stats.get.stats[stats_index].attempts -
-                     new_stats_tx->u.peer_tx_stats.get.stats[stats_index].success),
-                    (old_stats_tx->u.peer_tx_stats.get.stats[stats_index].attempts -
-                     old_stats_tx->u.peer_tx_stats.get.stats[stats_index].success));
-
-        LOG(TRACE,
-            "Calculated %s client delta stats_tx for "MAC_ADDRESS_FORMAT" "
-            "index=%d [%d, %d, %d] retries=%"PRIu64" (delta=%u=new=%u-old=%u)",
-            radio_get_name_from_type(radio_type),
-            MAC_ADDRESS_PRINT(data_new->info.mac),
-            stats_index, client_stats_tx->bw, client_stats_tx->nss, client_stats_tx->mcs,
-            client_stats_tx->retries,
-            STATS_DELTA(
-                (new_stats_tx->u.peer_tx_stats.get.stats[stats_index].attempts -
-                 new_stats_tx->u.peer_tx_stats.get.stats[stats_index].success),
-                (old_stats_tx->u.peer_tx_stats.get.stats[stats_index].attempts -
-                 old_stats_tx->u.peer_tx_stats.get.stats[stats_index].success)),
-            (new_stats_tx->u.peer_tx_stats.get.stats[stats_index].attempts -
-             new_stats_tx->u.peer_tx_stats.get.stats[stats_index].success),
-            (old_stats_tx->u.peer_tx_stats.get.stats[stats_index].attempts -
-             old_stats_tx->u.peer_tx_stats.get.stats[stats_index].success));
-
-        ds_dlist_insert_tail(&client_record->stats_tx, client_stats_tx);
-    }
-
-    dpp_client_tid_record_list_t   *record = NULL;
-    dpp_client_stats_tid_t         *client_stats_tid = NULL;
-
-    /* Add new measurement for every convert */
-    record =
-        dpp_client_tid_record_alloc();
-    if (NULL == record)
-    {
-        LOG(ERR,
-                "Updating %s interface client tid stats "
-                "(Failed to allocate memory)",
-                radio_get_name_from_type(radio_type));
-        return IOCTL_STATUS_ERROR;
-    }
-
-    for (stats_index = 0; stats_index < PS_MAX_TID; stats_index++)
-    {
-        new_stats_tx = &data_new->stats_tx;
-        old_stats_tx = &data_old->stats_tx;
-        client_stats_tid = &record->entry[stats_index];
-
-        /* Skip unchanged entries*/
-        if (    !(STATS_DELTA(
-                        new_stats_tx->u.peer_tx_stats.get.sojourn[stats_index].sum_sojourn_msec,
-                        old_stats_tx->u.peer_tx_stats.get.sojourn[stats_index].sum_sojourn_msec))
-                && !(STATS_DELTA(
-                        new_stats_tx->u.peer_tx_stats.get.sojourn[stats_index].num_sojourn_mpdus,
-                        old_stats_tx->u.peer_tx_stats.get.sojourn[stats_index].num_sojourn_mpdus))
-           )
-        {
-            continue;
-        }
-
-        client_stats_tid->ac = ioctl80211_tid_ac_index_get[stats_index];
-        client_stats_tid->tid = stats_index;
-        client_stats_tid->ewma_time_ms = 
-            new_stats_tx->u.peer_tx_stats.get.sojourn[stats_index].ave_sojourn_msec;
-
-        LOG(TRACE,
-            "Calculated %s client delta stats_tid for "MAC_ADDRESS_FORMAT" "
-            "index [%d] %s ewma %"PRIu64" ",
-            radio_get_name_from_type(radio_type),
-            MAC_ADDRESS_PRINT(data_new->info.mac),
-            client_stats_tid->tid,
-            radio_get_queue_name_from_type(client_stats_tid->ac),
-            client_stats_tid->ewma_time_ms);
-
-        client_stats_tid->sum_time_ms =
-            STATS_DELTA(
-                    new_stats_tx->u.peer_tx_stats.get.sojourn[stats_index].sum_sojourn_msec,
-                    old_stats_tx->u.peer_tx_stats.get.sojourn[stats_index].sum_sojourn_msec);
-        LOG(TRACE,
-            "Calculated %s client delta stats_tid for "MAC_ADDRESS_FORMAT" "
-            "index [%d] %s time %"PRIu64" (delta=%"PRIu64"=new=%"PRIu64"-old=%"PRIu64")",
-            radio_get_name_from_type(radio_type),
-            MAC_ADDRESS_PRINT(data_new->info.mac),
-            client_stats_tid->tid,
-            radio_get_queue_name_from_type(client_stats_tid->ac),
-            client_stats_tid->sum_time_ms,
-            STATS_DELTA(
-                new_stats_tx->u.peer_tx_stats.get.sojourn[stats_index].sum_sojourn_msec,
-                old_stats_tx->u.peer_tx_stats.get.sojourn[stats_index].sum_sojourn_msec),
-            new_stats_tx->u.peer_tx_stats.get.sojourn[stats_index].sum_sojourn_msec,
-            old_stats_tx->u.peer_tx_stats.get.sojourn[stats_index].sum_sojourn_msec);
-
-        client_stats_tid->num_msdus =
-            STATS_DELTA(
-                    new_stats_tx->u.peer_tx_stats.get.sojourn[stats_index].num_sojourn_mpdus,
-                    old_stats_tx->u.peer_tx_stats.get.sojourn[stats_index].num_sojourn_mpdus);
-        LOG(TRACE,
-            "Calculated %s client delta stats_tid for "MAC_ADDRESS_FORMAT" "
-            "index [%d] %s num %"PRIu64" (delta=%u=new=%u-old=%u)",
-            radio_get_name_from_type(radio_type),
-            MAC_ADDRESS_PRINT(data_new->info.mac),
-            client_stats_tid->tid,
-            radio_get_queue_name_from_type(client_stats_tid->ac),
-            client_stats_tid->num_msdus,
-            STATS_DELTA(
-                new_stats_tx->u.peer_tx_stats.get.sojourn[stats_index].num_sojourn_mpdus,
-                old_stats_tx->u.peer_tx_stats.get.sojourn[stats_index].num_sojourn_mpdus),
-            new_stats_tx->u.peer_tx_stats.get.sojourn[stats_index].num_sojourn_mpdus,
-            old_stats_tx->u.peer_tx_stats.get.sojourn[stats_index].num_sojourn_mpdus);
-    }
-
-    record->timestamp_ms = get_timestamp();
-
-    ds_dlist_insert_tail(&client_record->tid_record_list, record);
-    if (kconfig_enabled(CONFIG_QCA_RATE_HISTO_TO_EXPECTED_TPUT)) {
-        if (avgmbps.cnt) {
-            /* This overrides the "last tx rate" */
-            client_record->stats.rate_tx = weight_avg_get(&avgmbps);
-            LOG(TRACE,
-                 "Calculated %s client delta tx phyrate "MAC_ADDRESS_FORMAT
-                 " mbps=%f ppdus=%llu",
-                 radio_get_name_from_type(radio_type),
-                 MAC_ADDRESS_PRINT(data_new->info.mac),
-                 client_record->stats.rate_tx,
-                 avgmbps.cnt);
-        }
+            client_record->stats.rate_tx,
+            g_peer_tx_phyrate[index].cnt);
+        g_peer_tx_phyrate[index].sum = 0;
+        g_peer_tx_phyrate[index].cnt = 0;
     }
     return IOCTL_STATUS_OK;
 }
@@ -1098,17 +462,14 @@ ioctl_status_t ioctl80211_clients_stats_tx_fetch(
         char                           *phyName,
         ioctl80211_client_record_t      *client_entry)
 {
+#ifndef OPENSYNC_NL_SUPPORT
     int                                 index;
     uint8_t                             tid;
-    int                                 i;
     struct ps_uapi_ioctl               *ioctl_stats = &client_entry->stats_tx;
+    int32_t                             rc;
+    struct iwreq                        request;
 
     memset (ioctl_stats, 0, sizeof(*ioctl_stats));
-#ifdef OPENSYNC_NL_SUPPORT
-    index = get_cli_mac_index(client_entry->info.mac, PEER_TX_STATS);
-    if (!(g_peer_tx_ioctl_stats[index].flags & PEER_STATS_FLAG))
-        return IOCTL_STATUS_ERROR;
-#endif
 
     ioctl_stats->u.peer_tx_stats.set.addr[0] = (u8)client_entry->info.mac[0];
     ioctl_stats->u.peer_tx_stats.set.addr[1] = (u8)client_entry->info.mac[1];
@@ -1117,25 +478,6 @@ ioctl_status_t ioctl80211_clients_stats_tx_fetch(
     ioctl_stats->u.peer_tx_stats.set.addr[4] = (u8)client_entry->info.mac[4];
     ioctl_stats->u.peer_tx_stats.set.addr[5] = (u8)client_entry->info.mac[5];
 
-#ifdef OPENSYNC_NL_SUPPORT
-    for (i = 0; i < WLANSTATS_CACHE_SIZE; i++)
-    {
-        ioctl_stats->flags = g_peer_tx_ioctl_stats[index].flags;
-        ioctl_stats->u.peer_tx_stats.get.stats[i].attempts = g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.stats[i].attempts;
-        ioctl_stats->u.peer_tx_stats.get.stats[i].success = g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.stats[i].success;
-        ioctl_stats->u.peer_tx_stats.get.stats[i].ppdus = g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.stats[i].ppdus;
-    }
-
-    for (tid = 0; tid < WLAN_DATA_TID_MAX; tid++)
-    {
-        ioctl_stats->u.peer_tx_stats.get.sojourn[tid].ave_sojourn_msec = g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.sojourn[tid].ave_sojourn_msec;
-        ioctl_stats->u.peer_tx_stats.get.sojourn[tid].sum_sojourn_msec = g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.sojourn[tid].sum_sojourn_msec;
-        ioctl_stats->u.peer_tx_stats.get.sojourn[tid].num_sojourn_mpdus = g_peer_tx_ioctl_stats[index].u.peer_tx_stats.get.sojourn[tid].num_sojourn_mpdus;
-    }
-#else
-
-    int32_t                             rc;
-    struct iwreq                        request;
     memset (&request, 0, sizeof(request));
 	request.u.data.pointer = ioctl_stats;
 	request.u.data.length = PS_UAPI_IOCTL_SIZE;

@@ -111,9 +111,9 @@ void parse_channel_survey_stats_cb(struct cfg80211_data *arg)
     g_bss_data.u.survey_bss.get.rx_bss     = chan_stats->bss_rx_cnt;
     g_bss_data.u.survey_bss.get.rx         = chan_stats->rx_frm_cnt;
     g_bss_data.u.survey_bss.get.busy_ext   = chan_stats->ext_busy_cnt;
-    LOGD("Home channel survey stats msg_len: %d, num_elements: %d\n", msg_len, num_elements);
-    LOGD("freq: %4d, rx_bss: %12llu, total: %12llu, tx: %12llu, "
-            "rx: %12llu, busy: %12llu, busy_ext: %12llu\n",
+    LOGD("Home channel survey stats msg_len: %zu, num_elements: %d\n", msg_len, num_elements);
+    LOGD("freq: %4d, rx_bss: %12"PRIu64", total: %12"PRIu64" tx: %12"PRIu64", "
+            "rx: %12"PRIu64", busy: %12"PRIu64", busy_ext: %12"PRIu64"",
             chan_stats->freq, chan_stats->bss_rx_cnt, chan_stats->cycle_cnt,
             chan_stats->tx_frm_cnt, chan_stats->rx_frm_cnt, chan_stats->clear_cnt,
             chan_stats->ext_busy_cnt);
@@ -128,8 +128,8 @@ void parse_channel_survey_stats_cb(struct cfg80211_data *arg)
             g_chan_data.u.survey_chan.get.channels[g_chan_idx].busy  = chan_stats->clear_cnt;
             g_chan_data.u.survey_chan.get.channels[g_chan_idx].tx    = chan_stats->tx_frm_cnt;
             g_chan_data.u.survey_chan.get.channels[g_chan_idx].rx    = chan_stats->rx_frm_cnt;
-            LOGD("freq: %4d, rx_bss: %12llu, total: %12llu, tx: %12llu, "
-                    "rx: %12llu, busy: %12llu, busy_ext: %12llu\n",
+            LOGD("freq: %4d, rx_bss: %12"PRIu64", total: %12"PRIu64", tx: %12"PRIu64", "
+                    "rx: %12"PRIu64", busy: %12"PRIu64", busy_ext: %12"PRIu64"",
                     chan_stats->freq, chan_stats->bss_rx_cnt, chan_stats->cycle_cnt,
                     chan_stats->tx_frm_cnt, chan_stats->rx_frm_cnt, chan_stats->clear_cnt,
                     chan_stats->ext_busy_cnt);
@@ -381,7 +381,7 @@ ioctl_status_t ioctl80211_survey_results_convert(
                 data_old->stats.survey_bss.chan_self);
 
         LOGT("Processed %s %s %u survey delta "
-             "{active=%llu busy=%llu tx=%llu self=%llu rx=%llu ext=%llu}",
+             "{active=%"PRIu64" busy=%"PRIu64" tx=%"PRIu64" self=%"PRIu64" rx=%"PRIu64" ext=%"PRIu64"}",
              radio_get_name_from_type(radio_type),
              radio_get_scan_name_from_type(scan_type),
              data_new->info.chan,

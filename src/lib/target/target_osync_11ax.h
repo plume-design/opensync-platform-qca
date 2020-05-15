@@ -28,7 +28,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
     for (mac = strtok(list, " \t\n"); mac; mac = strtok(NULL, " \t\n")) \
 
 static char *util_qca_getmac(const char *dvif, char *buf, int len);
-static int forkexec(const char *file, const char **argv, void (*xfrm)(char *), char *buf, int len);
+int forkexec(const char *file, const char **argv, void (*xfrm)(char *), char *buf, int len);
 static void argv2str(const char **argv, char *buf, int len);
 void rtrimws(char *str);
 void rtrimnl(char *str);

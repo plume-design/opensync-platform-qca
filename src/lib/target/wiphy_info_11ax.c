@@ -73,6 +73,7 @@ static const struct {
     { 0x0056, 0x168c, 0, "qca9888", "Besra" },
     { 0, 0, "qca,wifi-ipq40xx", "qca4019", "Dakota" },
     { 0, 0, "qca,wifi-ar956x", "qca9563", "Dragonfly" },
+    { 0, 0, "qcom,cnss-qca8074", "qca8074", "Hawkeye" },
     { 0, 0, "qcom,cnss-qca8074v2", "qca8074", "Hawkeye" },
 };
 
@@ -136,7 +137,7 @@ identify_chip(const char *ifname,
         globfree(&g);
 
         if (i != 1) {
-            LOGW("%s: unable to identify, glob() returned %d matches", ifname, i);
+            LOGW("%s: unable to identify, glob() returned %zu matches", ifname, i);
             return -1;
         }
     }

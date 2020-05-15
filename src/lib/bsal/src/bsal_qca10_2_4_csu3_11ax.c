@@ -222,7 +222,7 @@ static void util_nl_parse_iwevcustom(
         }
 
         if (length > sizeof(event.data.action_frame.data)) {
-            LOGI("%s action frame length exceed buffer size %d (%d)",
+            LOGI("%s action frame length exceed buffer size %zu (%d)",
                  ifname, sizeof(event.data.action_frame.data), length);
             return;
         }
@@ -493,7 +493,7 @@ static void qca_bsal_event_process(void)
 
     nlmsg = (struct nlmsghdr *)buf;
     if (NLMSG_PAYLOAD(nlmsg, 0) < sizeof(*bsev)) {
-        LOGW("Malformed netlink event received, length (%d < %d)",
+        LOGW("Malformed netlink event received, length (%d < %zu)",
              NLMSG_PAYLOAD(nlmsg, 0), sizeof(*bsev));
         return;
     }

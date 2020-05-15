@@ -144,7 +144,7 @@ enum config_mode_type get_config_mode_type();
 int send_command (struct socket_context *sock_ctx, const char *ifname, void *buf,
         size_t buflen, void (*callback) (struct cfg80211_data *arg), int cmd, int ioctl_cmd);
 void osync_peer_stats_event_callback(char *ifname, uint32_t cmdid, uint8_t *data, size_t len);
-int do_forkexec(const char *file, const char **argv, void (*xfrm)(char *), char *buf, int len);
+int forkexec(const char *file, const char **argv, void (*xfrm)(char *), char *buf, int len);
 
 #if defined (OSYNC_IOCTL_LIB) && (OSYNC_IOCTL_LIB == 0)
 static int
@@ -528,7 +528,7 @@ osync_nl80211_sta_info(const char *ifname, const uint8_t *mac_addr, bsal_client_
             memcpy(info->assoc_ies, assoc_ies, assoc_ies_len);
             info->assoc_ies_len = assoc_ies_len;
         } else {
-            LOGW("%s ies_len (%u) higher than ies table (%u)", ifname, assoc_ies_len, sizeof(info->assoc_ies));
+            LOGW("%s ies_len (%u) higher than ies table (%zu)", ifname, assoc_ies_len, sizeof(info->assoc_ies));
         }
     }
 #ifndef OPENSYNC_NL_SUPPORT
@@ -1114,7 +1114,7 @@ util_qca_set_int(const char *ifname, const char *iwprivname, int v)
     char c;
 
     snprintf(arg, sizeof(arg), "%d", v);
-    return do_forkexec(argv[0], argv, NULL, &c, sizeof(c));
+    return forkexec(argv[0], argv, NULL, &c, sizeof(c));
 }
 #else
 static void
@@ -1312,7 +1312,7 @@ qca_get_int(const char *ifname, const char *iwprivname, int *v)
     char buf[128];
     int err;
 
-    err = do_forkexec(argv[0], argv, rtrimws, buf, sizeof(buf));
+    err = forkexec(argv[0], argv, rtrimws, buf, sizeof(buf));
     if (err < 0)
         return false;
     p = strchr(buf, ':');
@@ -1337,10 +1337,10 @@ nl80211_device_txchainmask_get(radio_entry_t              *radio_cfg,
 #ifdef OPENSYNC_NL_SUPPORT
     int txchain_type;
 
-    rc = qca_get_int(radio_cfg->phy_name, "get_txchainsoft", &txchain_type);
+    rc = qca_get_int(radio_cfg->phy_name, "get_txchainmask", &txchain_type);
     if (!rc) {
         LOGW("%s: failed to get iwpriv int '%s'",
-             radio_cfg->phy_name, "get_txchainsoft");
+             radio_cfg->phy_name, "get_txchainmask");
         return -1;
     }
     txchainmask->type = radio_cfg->type;

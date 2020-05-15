@@ -259,7 +259,7 @@ argv2str(const char **argv, char *buf, int len)
     strncat(buf, "]", len - strlen(buf));
 }
 
-static int
+int
 forkexec(const char *file, const char **argv, void (*xfrm)(char *), char *buf, int len)
 {
     char dbgbuf[512];
@@ -332,12 +332,6 @@ forkexec(const char *file, const char **argv, void (*xfrm)(char *), char *buf, i
     }
 
     return err;
-}
-
-int
-do_forkexec(const char *file, const char **argv, void (*xfrm)(char *), char *buf, int len)
-{
-   return forkexec(argv[0], argv, NULL, buf, sizeof(buf));
 }
 
 static int
@@ -617,6 +611,18 @@ util_net_get_macaddr(const char *ifname,
  * Wireless helpers
  *****************************************************************************/
 
+static bool
+util_wifi_is_ap_vlan(const char *ifname)
+{
+    return strstr(ifname, ".sta") != NULL;
+}
+
+static int
+util_wifi_get_ap_vlan_aid(const char *ifname)
+{
+    return atoi(strstr(ifname, ".sta") + strlen(".sta"));
+}
+
 static int
 util_wifi_get_parent(const char *vif,
                      char *buf,
@@ -724,6 +730,7 @@ util_wifi_get_phy_vifs(const char *phy,
 
     for (p = readdir(d); p; p = readdir(d))
         if (snprintf(path, sizeof(path), "/sys/class/net/%s/parent", p->d_name) > 0 &&
+            !util_wifi_is_ap_vlan(p->d_name) &&
             util_file_read_str(path, parent, sizeof(parent)) > 0 &&
             (rtrimws(parent), 1) &&
             !strcmp(phy, parent))
@@ -779,6 +786,37 @@ util_wifi_phy_is_2ghz(const char *phy)
     char buf[32] = {};
     util_file_read_str(p, buf, sizeof(buf));
     return strlen(buf) > 0;
+}
+
+static int
+util_vif_ap_vlan_addr(const char *vif, char *addr, size_t addrlen)
+{
+    int aid = util_wifi_get_ap_vlan_aid(vif);
+    char *bss = strtok(strdupa(vif), ".");
+    char *stalist = strexa("wlanconfig", bss, "list", "sta");
+    char *line;
+    const char *macstr;
+    const char *aidstr;
+
+    memset(addr, 0, addrlen);
+    strsep(&stalist, "\r\n"); /* skip line with headers */
+    while ((line = strsep(&stalist, "\r\n"))) {
+        if (line[0] == ' ')
+            continue;
+
+        macstr = strtok(line, " ");
+        aidstr = strtok(NULL, " ");
+
+        if (!macstr || !aidstr)
+            continue;
+        if (atoi(aidstr) != aid)
+            continue;
+
+        strscpy(addr, macstr, addrlen);
+        return 0;
+    }
+
+    return -ENOENT;
 }
 
 /******************************************************************************
@@ -1334,6 +1372,9 @@ qca_ctrl_discover(const char *bss)
     const char *phy = strchomp(R(F("/sys/class/net/%s/parent", bss)), "\r\n ");
     char mode[32] = {};
 
+    if (util_wifi_is_ap_vlan(bss))
+        return;
+
     if (phy)
         util_iwconfig_get_opmode(bss, mode, sizeof(mode));
 
@@ -1352,6 +1393,7 @@ qca_ctrl_discover(const char *bss)
         hapd->wps_active = qca_hapd_wps_active;
         hapd->wps_success = qca_hapd_wps_success;
         hapd->wps_timeout = qca_hapd_wps_timeout;
+        hapd->respect_multi_ap = 1;
         ctrl_enable(&hapd->ctrl);
         hapd = NULL;
     }
@@ -1366,6 +1408,7 @@ qca_ctrl_discover(const char *bss)
         wpas->ctrl.overrun = qca_wpas_ctrl_opened;
         wpas->connected = qca_wpas_connected;
         wpas->disconnected = qca_wpas_disconnected;
+        wpas->respect_multi_ap = 1;
         ctrl_enable(&wpas->ctrl);
         wpas = NULL;
     }
@@ -1648,16 +1691,7 @@ static ds_dlist_t g_thermal_list = DS_DLIST_INIT(struct util_thermal, list);
 static const char **
 util_thermal_get_qca_names(const char *phy)
 {
-    static const char *soft[] = { "get_txchainsoft", "txchainsoft" };
     static const char *hard[] = { "get_txchainmask", "txchainmask" };
-    bool ok;
-    int v;
-
-    ok = util_qca_get_int(phy, soft[0], &v);
-    if (ok) {
-        LOGT("%s: thermal: using txchainsoft", phy);
-        return soft;
-    }
 
     LOGT("%s: thermal: using txchainmask", phy);
     return hard;
@@ -2447,7 +2481,7 @@ util_nl_parse_iwevcustom_csa_rx(const char *ifname,
     ev = data;
 
     if ((int)sizeof(*ev) > len) {
-        LOGW("%s: csa rx event too small (%d, should be at least %d), check your ABI",
+        LOGW("%s: csa rx event too small (%d, should be at least %zu), check your ABI",
              ifname, len, sizeof(*ev));
         return;
     }
@@ -2492,7 +2526,7 @@ util_nl_parse_iwevcustom_channel_list_updated(const char *phy,
     const unsigned char *chan;
 
     if (len < sizeof(*chan)) {
-        LOGW("%s: channel list updated event too short (%d < %d), userspace/driver abi mismatch?", phy, len, sizeof(*chan));
+        LOGW("%s: channel list updated event too short (%d < %zu), userspace/driver abi mismatch?", phy, len, sizeof(*chan));
         return;
     }
 
@@ -2534,7 +2568,7 @@ util_nl_parse_iwevcustom_radar_detected(const char *phy,
     int err;
 
     if (len < sizeof(*chan)) {
-        LOGW("%s: radar event too short (%d < %d), userspace/driver api mismatch?", phy, len, sizeof(*chan));
+        LOGW("%s: radar event too short (%d < %zu), userspace/driver api mismatch?", phy, len, sizeof(*chan));
         return;
     }
 
@@ -2612,6 +2646,7 @@ util_nl_parse_iwevcustom(const char *ifname,
         case IEEE80211_EV_CAC_COMPLETED:
         case IEEE80211_EV_NOL_STARTED:
         case IEEE80211_EV_NOL_FINISHED:
+            break;
         default:
             LOGT("%s: Unknown event on interface [%s]", __func__, ifname);
             break;
@@ -2651,10 +2686,12 @@ util_nl_parse(const void *buf, unsigned int len)
                                              util_nl_iwe_payload(iwe));
 
             ifm = NLMSG_DATA(hdr);
-            created = (hdr->nlmsg_type == RTM_NEWLINK) && (ifm->ifi_change == ~0UL);
+            created = (hdr->nlmsg_type == RTM_NEWLINK) && (ifm->ifi_change == ~0U);
             deleted = (hdr->nlmsg_type == RTM_DELLINK);
             if ((created || deleted) &&
                 (access(F("/sys/class/net/%s/parent", ifname), R_OK) == 0))
+                util_cb_delayed_update(UTIL_CB_VIF, ifname);
+            if (deleted && util_wifi_is_ap_vlan(ifname))
                 util_cb_delayed_update(UTIL_CB_VIF, ifname);
         }
 }
@@ -3255,11 +3292,6 @@ bool target_radio_state_get(char *phy, struct schema_Wifi_Radio_State *rstate)
         else
             v = -1;
 
-        if(strcmp(phy,"wifi0"))
-            v = 1;
-        else
-            v = 0;
-
         if (v >= 0) {
             STRSCPY(rstate->hw_config_keys[n], "dfs_usenol");
             snprintf(rstate->hw_config[n], sizeof(rstate->hw_config[n]), "%d", v);
@@ -3390,6 +3422,36 @@ util_radio_config_only_channel_changed(const struct schema_Wifi_Radio_Config_fla
     return !memcmp(&a, &b, sizeof(a));
 }
 
+void
+util_mode_reconfig(
+        const char *vif,
+        const char *hw_mode,
+        const char *freq_band,
+        const char *ht_mode)
+{
+    const struct util_iwpriv_mode *mode;
+    char oldmode[32];
+    char newmode[32];
+    int err;
+
+    if (WARN_ON(!qca_get_ht_mode(vif, oldmode, sizeof(oldmode))))
+        return;
+
+    mode = util_qca_lookup_mode(oldmode);
+    if (WARN_ON(!mode))
+        return;
+
+    if (!strcmp(mode->hwmode, hw_mode))
+        return;
+
+    err = util_qca_get_mode(hw_mode, ht_mode, freq_band, newmode, sizeof(newmode));
+    if (WARN_ON(err < 0))
+        return;
+
+    LOGI("%s: syncing mode %s -> %s", vif, oldmode, newmode);
+    util_qca_set_str_lazy(vif, "get_mode", "mode", newmode);
+}
+
 bool
 target_radio_config_set2(const struct schema_Wifi_Radio_Config *rconf,
                          const struct schema_Wifi_Radio_Config_flags *changed)
@@ -3404,6 +3466,12 @@ target_radio_config_set2(const struct schema_Wifi_Radio_Config *rconf,
                     LOGI("%s: background CAC active %d @ %s postpone channel change", phy, rconf->channel, rconf->ht_mode);
                 } else {
                     LOGI("%s: starting csa to %d @ %s", phy, rconf->channel, rconf->ht_mode);
+                    /*
+                     * Set mode in 2.4GHz using iwpriv before VAP is up does not work in SPF11.1 CS
+                     * Workaround is to update the mode for 2.4GHz AP vap
+                     * This can be removed if the issue is fixed in default SPF
+                     */
+                    util_mode_reconfig(vif, rconf->hw_mode, rconf->freq_band, rconf->ht_mode);
                     if (util_csa_start(phy, vif, rconf->hw_mode, rconf->freq_band, rconf->ht_mode, rconf->channel))
                         LOGW("%s: failed to start csa: %d (%s)", phy, errno, strerror(errno));
                     else if (util_radio_config_only_channel_changed(changed))
@@ -4066,6 +4134,13 @@ bool target_vif_state_get(char *vif, struct schema_Wifi_VIF_State *vstate)
 
     if ((vstate->mode_exists = util_iwconfig_get_opmode(vif, buf, sizeof(buf))))
         STRSCPY(vstate->mode, buf);
+
+    if (util_wifi_is_ap_vlan(vif)) {
+        SCHEMA_SET_STR(vstate->mode, "ap_vlan");
+
+        if (!WARN_ON(util_vif_ap_vlan_addr(vif, buf, sizeof(buf)) < 0))
+            SCHEMA_SET_STR(vstate->ap_vlan_sta_addr, buf);
+    }
 
     if ((vstate->ssid_broadcast_exists = util_qca_get_int(vif, "get_hide_ssid", &v)))
         STRSCPY(vstate->ssid_broadcast, v ? "disabled" : "enabled");
