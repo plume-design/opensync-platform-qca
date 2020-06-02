@@ -1323,6 +1323,12 @@ qca_hapd_wps_timeout(struct hapd *hapd)
 }
 
 static void
+qca_hapd_wps_disable(struct hapd *hapd)
+{
+    util_cb_delayed_update(UTIL_CB_VIF, hapd->ctrl.bss);
+}
+
+static void
 qca_wpas_connected(struct wpas *wpas, const char *bssid, int id, const char *id_str)
 {
     qca_wpas_report(wpas);
@@ -1393,6 +1399,7 @@ qca_ctrl_discover(const char *bss)
         hapd->wps_active = qca_hapd_wps_active;
         hapd->wps_success = qca_hapd_wps_success;
         hapd->wps_timeout = qca_hapd_wps_timeout;
+        hapd->wps_disable = qca_hapd_wps_disable;
         hapd->respect_multi_ap = 1;
         ctrl_enable(&hapd->ctrl);
         hapd = NULL;
@@ -2669,6 +2676,22 @@ util_nl_parse(const void *buf, unsigned int len)
     util_nl_each_msg(buf, hdr, len)
         if (hdr->nlmsg_type == RTM_NEWLINK ||
             hdr->nlmsg_type == RTM_DELLINK) {
+
+            /* Driver blindly sends all Probe Requests to user space after
+             * enabling WPS. There is no need to rediscover ifaces after
+             * receiving Probe Reqs, therefore we drop them here.
+             *
+             * Probe Requests are sent as IWEVASSOCREQIE events and it looks
+             * that this is the only case when IWEVASSOCREQIE is used.
+             */
+            bool skip_discover = false;
+            util_nl_each_attr_type(hdr, attr, attrlen, IFLA_WIRELESS)
+                util_nl_each_iwe_type(attr, iwe, iwelen, IWEVASSOCREQIE)
+                    skip_discover = true;
+
+            if (skip_discover)
+                continue;
+
             memset(ifname, 0, sizeof(ifname));
 
             util_nl_each_attr_type(hdr, attr, attrlen, IFLA_IFNAME)
@@ -3501,6 +3524,8 @@ target_radio_config_set2(const struct schema_Wifi_Radio_Config *rconf,
                      vif, rconf->bcn_int, errno, strerror(errno));
         }
     }
+
+    util_qca_set_int_lazy(phy, "get_dbdc_enable", "dbdc_enable", 0);
 
     if (changed->thermal_integration ||
         changed->thermal_downgrade_temp ||

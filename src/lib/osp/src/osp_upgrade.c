@@ -35,7 +35,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "osp.h"
 
 #define TEMP_PATH "/tmp/"
-#define IMG_MAX_SIZE 40 //MB
+#define IMG_MAX_SIZE 40  // MB
 
 struct osp_dl_data
 {
@@ -82,8 +82,10 @@ static bool osp_upg_dev_space_check()
     {
         LOG(ERR, "UM: fgets call failed");
         status = OSP_UPG_INTERNAL;
+        pclose(fp);
         return false;
     }
+    pclose(fp);
 
     // df returns kB, IMG_MAX_SIZE is in MB
     if ((int)(atoll(buf) / 1024) < IMG_MAX_SIZE)
@@ -146,6 +148,7 @@ static bool osp_upg_download_image(int timeout, long file_size)
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
 
     curl_ret = curl_easy_perform(curl);
+    fclose(fp);
 
     if (curl_ret != CURLE_OK)
     {
@@ -293,7 +296,7 @@ static bool osp_upg_set_url(const char *url)
     status = OSP_UPG_OK;
 
     // Make sure url is not empty
-    if (upg_url[0] == 0)
+    if (url[0] == 0)
     {
         status = OSP_UPG_ARGS;
         LOG(ERR, "UM: URL must not be empty");
@@ -314,11 +317,12 @@ static bool osp_upg_set_url(const char *url)
 }
 
 /*
- * FW Upgrade API
+ * FW Upgrade API implementation
  */
+
 /**
- * @brief Check system requirements for upgrade, like
- *        no upgrade in progress, available flash space etc
+ * Check system requirements for upgrade, like no upgrade in progress,
+ * available flash space etc.
  */
 bool osp_upg_check_system(void)
 {
@@ -339,7 +343,7 @@ bool osp_upg_check_system(void)
 }
 
 /**
- * Download an image suitable for upgrade from @p uri store it locally.
+ * Download an image suitable for upgrade from @p uri and store it locally.
  * Upon download and verification completion, invoke the @p dl_cb callback.
  */
 bool osp_upg_dl(char *url, uint32_t timeout, osp_upg_cb dl_cb)
@@ -375,7 +379,7 @@ bool osp_upg_dl(char *url, uint32_t timeout, osp_upg_cb dl_cb)
 
 /**
  * Write the previously downloaded image to the system. If the image
- * is encrypted, a password must be specified in @password.
+ * is encrypted, a password must be specified in @p password.
  *
  * After the image was successfully applied, the @p upg_cb callback is invoked.
  */
@@ -414,14 +418,14 @@ bool osp_upg_commit(void)
 {
     /*
      * Current implementation of libupgrade sets bootconfig commit together
-     * with upg_upgrade call so no action is needed at this point.
+     * with upg_upgrade call, so no action is needed at this point.
      */
     return true;
 }
 
 /**
- * Return more detailed error code in relation to a failed osp_upg_() function.
- * See osp_upg_status_t for a detailed list of error codes.
+ * Return a more detailed error code related to a failed osp_upg_*() function
+ * call. See osp_upg_status_t for a detailed list of error codes.
  */
 int osp_upg_errno(void)
 {

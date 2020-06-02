@@ -162,6 +162,8 @@ ioctl_status_t ioctl80211_client_stats_rx_calculate(
 
     uint32_t                        num_ppdus_delta;
     uint32_t                        num_sgi_delta;
+    uint32_t                        num_mpdus = 0;
+    uint32_t                        num_retries = 0;
 
     radio_type_t                    radio_type =
         radio_cfg->type;
@@ -223,6 +225,16 @@ ioctl_status_t ioctl80211_client_stats_rx_calculate(
            ) {
             continue;
         }
+
+        num_mpdus +=
+            STATS_DELTA(
+                    new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_mpdus,
+                    old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_mpdus);
+
+        num_retries +=
+            STATS_DELTA(
+                    new_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_retries,
+                    old_stats_rx->u.peer_rx_stats.get.stats[stats_index].num_retries);
 
         if (stats_index < PS_MAX_LEGACY) {
             mcs = stats_index;
@@ -401,6 +413,9 @@ ioctl_status_t ioctl80211_client_stats_rx_calculate(
         }
     }
 
+    client_record->stats.frames_rx = num_mpdus;
+    client_record->stats.retries_rx = num_retries;
+
     return IOCTL_STATUS_OK;
 }
 
@@ -504,6 +519,8 @@ ioctl_status_t ioctl80211_client_stats_tx_calculate(
     uint32_t                        bw;
 
     uint32_t                        stats_index = 0;
+    uint32_t                        num_mpdus = 0;
+    uint32_t                        num_retries = 0;
 
     radio_type_t                    radio_type = 
         radio_cfg->type;
@@ -557,6 +574,18 @@ ioctl_status_t ioctl80211_client_stats_tx_calculate(
         {
             continue;
         }
+
+        num_mpdus +=
+            STATS_DELTA(
+                    new_stats_tx->u.peer_tx_stats.get.stats[stats_index].success,
+                    old_stats_tx->u.peer_tx_stats.get.stats[stats_index].success);
+
+        num_retries +=
+            STATS_DELTA(
+                    (new_stats_tx->u.peer_tx_stats.get.stats[stats_index].attempts -
+                     new_stats_tx->u.peer_tx_stats.get.stats[stats_index].success),
+                    (old_stats_tx->u.peer_tx_stats.get.stats[stats_index].attempts -
+                     old_stats_tx->u.peer_tx_stats.get.stats[stats_index].success));
 
         if (stats_index < PS_MAX_LEGACY) {
             mcs = stats_index;
@@ -803,6 +832,9 @@ ioctl_status_t ioctl80211_client_stats_tx_calculate(
                  avgmbps.cnt);
         }
     }
+
+    client_record->stats.frames_tx = num_mpdus;
+    client_record->stats.retries_tx = num_retries;
 
     return IOCTL_STATUS_OK;
 }

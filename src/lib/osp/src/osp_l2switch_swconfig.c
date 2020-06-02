@@ -54,8 +54,8 @@ struct osp_l2switch_config
 static ds_tree_t l2swport_list = DS_TREE_INIT((ds_key_cmp_t *)strcmp, osp_l2switch_cfg_t, l2switch_cfg_tnode);
 
 /**
- * Initialize l2switch subsystem.
- * @return true on success, false on error
+ * Initialize l2switch subsystem
+ * @return true on success
  */
 bool osp_l2switch_init(void)
 {
@@ -66,25 +66,25 @@ bool osp_l2switch_init(void)
 }
 
 /**
- * Create the vlan config for the iface.
- * @param[in] ifname.
+ * Create the vlan config for the iface
+ * @param[in] ifname
+ * @return true on success
  */
 bool osp_l2switch_new(char *ifname)
 {
     int idx;
-    osp_l2switch_cfg_t *self = NULL;
+    osp_l2switch_cfg_t *self;
 
-    if (ifname &&
-        strncmp(ifname, ETH_PREFIX, ETH_PREFIX_LEN))
+    if (ifname && strncmp(ifname, ETH_PREFIX, ETH_PREFIX_LEN))
         return false;
 
     self = ds_tree_find(&l2swport_list, ifname);
     if (self)
     {
-        LOGD("osp_l2switch: Returning existing entry[%s].",self->ifname);
+        LOGD("osp_l2switch: Returning existing entry[%s].", self->ifname);
         return true;
     }
-    LOGD("osp_l2switch: Creating new entry for port[%s]",ifname);
+    LOGD("osp_l2switch: Creating new entry for port[%s]", ifname);
     self = malloc(sizeof(osp_l2switch_cfg_t));
 
     memset(self, 0, sizeof(osp_l2switch_cfg_t));
@@ -101,13 +101,12 @@ bool osp_l2switch_new(char *ifname)
 }
 
 /**
- * Set the port's vlanid and mode.
- * @param self: configuration of vlan, ifname and is_tagged.
- * @return 0 on success, -1 on error
+ * Set the port's vlanid and mode
+ * @return true on success
  */
 bool osp_l2switch_vlan_set(char *ifname, const int32_t vlan, bool tagged)
 {
-    osp_l2switch_cfg_t  *self;
+    osp_l2switch_cfg_t *self;
 
     self = ds_tree_find(&l2swport_list, ifname);
     if (!self)
@@ -123,13 +122,12 @@ bool osp_l2switch_vlan_set(char *ifname, const int32_t vlan, bool tagged)
 
 
 /**
- * Remove port's vlanid and mode.
- * @param self: configuration of vlan, ifname and is_tagged.
- * @return 0 on success, -1 on error
+ * Remove port's vlanid
+ * @return true on success
  */
 bool osp_l2switch_vlan_unset(char *ifname, const int32_t vlan)
 {
-    osp_l2switch_cfg_t  *self;
+    osp_l2switch_cfg_t *self;
 
     self = ds_tree_find(&l2swport_list, ifname);
     if (!self)
@@ -145,11 +143,11 @@ bool osp_l2switch_vlan_unset(char *ifname, const int32_t vlan)
 }
 
 /**
- * Delete a valid osp_l2switch_cfg_t object.
+ * Delete vlan configuration object for an interface
  */
 void osp_l2switch_del(char *ifname)
 {
-    osp_l2switch_cfg_t  *self;
+    osp_l2switch_cfg_t *self;
 
     if (!ifname)
         return;
@@ -165,6 +163,10 @@ void osp_l2switch_del(char *ifname)
     return;
 }
 
+/**
+ * Apply the vlan settings for the interface
+ * @return true on success
+ */
 bool osp_l2switch_apply(char *ifname)
 {
     osp_l2switch_cfg_t *self;
@@ -182,7 +184,7 @@ bool osp_l2switch_apply(char *ifname)
             if (WARN_ON(!target_switch_assoc_vlan_to_iface(self->ifname, idx, self->vlans[idx].is_tagged)))
                 return false;
         } else {
-            // Once vlan is deleted successfully it is marked with invalidid.
+            // Once vlan is deleted successfully it is marked with invalid id.
             if (self->vlans[idx].vlan_id != 4096)
             {
                 if (WARN_ON(!target_switch_disassoc_vlan_from_iface(ifname, idx)))
