@@ -1441,7 +1441,7 @@ static const struct util_iwpriv_mode {
     { "11ax", "HT40", { "5G", "5GU", "5GL" }, { "11AHE40", "11AHE40PLUS", "11AHE40MINUS" } },
     { "11ax", "HT80", { "5G", "5GU", "5GL" }, { "11AHE80" } },
     { "11ax", "HT160", { "5G", "5GU", "5GL" }, { "11AHE160" } },
-    { "11ax", "HT160", { "5G", "5GU", "5GL" }, { "11AHE80_80" } },
+    { "11ax", "HT80+80", { "5G", "5GU", "5GL" }, { "11AHE80_80" } },
     { NULL, NULL, {}, {} }, /* array guard, keep last */
 };
 

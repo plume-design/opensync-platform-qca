@@ -205,6 +205,8 @@ osync_nl80211_bsal_bs_config(int fd, const bsal_ifconfig_t *ifcfg, bool enable)
 {
     struct ieee80211req_athdbg      athdbg;
     int                             index;
+    struct                          cfg80211_data buffer;
+    uint32_t                         filter_value;
 
     // Have to disable before config parameters can be set
     if(qca_bsal_bs_enable(fd, ifcfg->ifname, false) < 0) {
@@ -259,6 +261,18 @@ osync_nl80211_bsal_bs_config(int fd, const bsal_ifconfig_t *ifcfg, bool enable)
 
 #ifdef OPENSYNC_NL_SUPPORT
     send_nl_command(&sock_ctx, ifcfg->ifname, &athdbg, sizeof(athdbg), NULL, QCA_NL80211_VENDOR_SUBCMD_DBGREQ);
+    /*
+     * set filter for receiving management frames - 256 is for Control frames
+     * This is required for receiving BSAL_EVENT_ACTION_FRAME
+     */
+    filter_value = 256;
+    buffer.length = sizeof(uint32_t);
+    buffer.data = (uint8_t *)&filter_value;
+    buffer.callback = NULL;
+    buffer.parse_data = 0;
+    wifi_cfg80211_send_setparam_command(&(sock_ctx.cfg80211_ctxt),
+                QCA_NL80211_VENDORSUBCMD_SETFILTER, filter_value,
+                ifcfg->ifname,(char *)&buffer, sizeof(uint32_t));
 #else
     memset(&iwreq, 0, sizeof(iwreq));
     STRSCPY(iwreq.ifr_name, ifcfg->ifname);

@@ -1517,7 +1517,7 @@ static const struct util_iwpriv_mode {
     { "11ax", "HT40", { "5G", "5GU", "5GL" }, { "11AHE40", "11AHE40PLUS", "11AHE40MINUS" } },
     { "11ax", "HT80", { "5G", "5GU", "5GL" }, { "11AHE80" } },
     { "11ax", "HT160", { "5G", "5GU", "5GL" }, { "11AHE160" } },
-    { "11ax", "HT160", { "5G", "5GU", "5GL" }, { "11AHE80_80" } },
+    { "11ax", "HT80+80", { "5G", "5GU", "5GL" }, { "11AHE80_80" } },
     { NULL, NULL, {}, {} }, /* array guard, keep last */
 };
 
@@ -4074,7 +4074,7 @@ target_vif_config_set2(const struct schema_Wifi_VIF_Config *vconf,
         util_qca_set_int_lazy(vif, "g_dynamicbeacon", "dynamicbeacon", D(vconf->dynamic_beacon, 0));
 
     if (changed->mcast2ucast)
-        util_qca_set_int_lazy(vif, "g_mcastenhance", "mcastenhance", D(vconf->mcast2ucast, 0) ? 2 : 0);
+        util_qca_set_int_lazy(vif, "g_mcastenhance", "mcastenhance", D(vconf->mcast2ucast, 0) ? 5 : 0);
 
     if (changed->ap_bridge)
         util_qca_set_int_lazy(vif, "get_ap_bridge", "ap_bridge", D(vconf->ap_bridge, 0));

@@ -81,6 +81,10 @@ typedef struct
     uint32_t flags;
     uint64_t sum;
     uint64_t cnt;
+    uint32_t mpdus;
+    uint32_t retries;
+    uint32_t success;
+    uint32_t attempts;
 } weighted_phyrate;
 
 static weighted_phyrate g_peer_rx_phyrate[PEER_CLI_MAX];
@@ -213,6 +217,8 @@ static void dp_peer_rx_rate_stats(uint8_t *peer_mac,
         {
             g_peer_rx_phyrate[index].sum += rx_stats->rate * rx_stats->num_ppdus;
             g_peer_rx_phyrate[index].cnt += rx_stats->num_ppdus;
+            g_peer_rx_phyrate[index].mpdus += rx_stats->num_mpdus;
+            g_peer_rx_phyrate[index].retries += rx_stats->num_retries;
         }
         rx_stats = rx_stats + 1;
     }
@@ -248,6 +254,8 @@ static void dp_peer_tx_rate_stats(uint8_t *peer_mac,
         {
             g_peer_tx_phyrate[index].sum += tx_stats->rate * tx_stats->num_ppdus;
             g_peer_tx_phyrate[index].cnt += tx_stats->num_ppdus;
+            g_peer_tx_phyrate[index].success += tx_stats->mpdu_success;
+            g_peer_tx_phyrate[index].attempts += tx_stats->mpdu_attempts;
         }
         tx_stats = tx_stats + 1;
     }
@@ -356,6 +364,10 @@ ioctl_status_t ioctl80211_client_stats_rx_calculate(
         g_peer_rx_phyrate[index].cnt = 0;
 
     }
+    client_record->stats.frames_rx = g_peer_rx_phyrate[index].mpdus;
+    client_record->stats.retries_rx = g_peer_rx_phyrate[index].retries;
+    g_peer_rx_phyrate[index].mpdus = 0;
+    g_peer_rx_phyrate[index].retries = 0;
     return IOCTL_STATUS_OK;
 }
 
@@ -453,6 +465,10 @@ ioctl_status_t ioctl80211_client_stats_tx_calculate(
         g_peer_tx_phyrate[index].sum = 0;
         g_peer_tx_phyrate[index].cnt = 0;
     }
+    client_record->stats.frames_tx = g_peer_tx_phyrate[index].success;
+    client_record->stats.retries_tx = (g_peer_tx_phyrate[index].attempts - g_peer_tx_phyrate[index].success);
+    g_peer_tx_phyrate[index].success = 0;
+    g_peer_tx_phyrate[index].attempts = 0;
     return IOCTL_STATUS_OK;
 }
 
