@@ -1240,7 +1240,7 @@ ioctl_status_t ioctl80211_clients_stats_fetch(
             "(Failed to retrieve them from driver '%s')",
             radio_get_name_from_type(radio_type),
             strerror(errno));
-        return IOCTL_STATUS_OK;
+        return IOCTL_STATUS_ERROR;
     }
 
     stats_entry->frames_tx = 
