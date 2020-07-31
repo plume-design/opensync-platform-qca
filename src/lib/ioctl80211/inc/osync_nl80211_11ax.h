@@ -293,26 +293,31 @@ osync_nl80211_bsal_bs_config(int fd, const bsal_ifconfig_t *ifcfg, bool enable)
 static inline int
 osync_nl80211_bsal_acl_mac(int fd, const char *ifname, const uint8_t *mac_addr, bool add)
 {
-    struct sockaddr         saddr;
-
-    memset(&saddr, 0, sizeof(saddr));
-    memcpy(&saddr.sa_data, mac_addr, BSAL_MAC_ADDR_LEN);
 #ifdef OPENSYNC_NL_SUPPORT
     int                     cno = add ? QCA_NL80211_VENDORSUBCMD_ADDMAC
                                       : QCA_NL80211_VENDORSUBCMD_DELMAC;
+    struct cfg80211_data            buffer;
+
+    buffer.data = (uint8_t *)mac_addr;
+    buffer.length = BSAL_MAC_ADDR_LEN;
+    buffer.callback = NULL;
+    buffer.parse_data = 0;
+
+    wifi_cfg80211_send_setparam_command(&(sock_ctx.cfg80211_ctxt),
+                                        cno, 0,
+                                        ifname, (char *)&buffer, sizeof(int));
 #else
+    struct sockaddr         saddr;
     int 					ret;
     struct iwreq            iwreq;
     int                     ino = add ? IEEE80211_IOCTL_ADDMAC
                                       : IEEE80211_IOCTL_DELMAC;
 
+    memset(&saddr, 0, sizeof(saddr));
+    memcpy(&saddr.sa_data, mac_addr, BSAL_MAC_ADDR_LEN);
     memset(&iwreq, 0, sizeof(iwreq));
     STRSCPY(iwreq.ifr_name, ifname);
     memcpy(iwreq.u.name, &saddr, sizeof(saddr));
-#endif
-#ifdef OPENSYNC_NL_SUPPORT
-    send_nl_command(&sock_ctx, ifname, &saddr, BSAL_MAC_ADDR_LEN, NULL, cno);
-#else
     ret = ioctl(fd, ino, &iwreq);
     if(ret < 0) {
         LOGE("ioctl(IEEE80211_DBGREQ_BSTEERING_SET_CLI_PARAMS) failed, " \
@@ -328,6 +333,14 @@ osync_nl80211_bsal_bs_client_config(int fd, const char *ifname, const uint8_t *m
 {
     struct ieee80211req_athdbg      athdbg;
     int                             ret = 0;
+
+#ifdef OPENSYNC_NL_SUPPORT
+    memset(&athdbg, 0, sizeof(athdbg));
+    memcpy(&athdbg.dstmac, mac_addr, sizeof(athdbg.dstmac));
+    athdbg.cmd = IEEE80211_DBGREQ_BSTEERING_SET_PROBE_RESP_WH;
+    athdbg.data.bsteering_probe_resp_wh = (conf->rssi_probe_hwm || conf->rssi_probe_lwm) ? 1 : 0;
+    send_nl_command(&sock_ctx, ifname, &athdbg, sizeof(athdbg), NULL, QCA_NL80211_VENDOR_SUBCMD_DBGREQ);
+#endif
 
     memset(&athdbg, 0, sizeof(athdbg));
     athdbg.cmd = IEEE80211_DBGREQ_ACL_SET_CLI_PARAMS;
@@ -346,6 +359,7 @@ osync_nl80211_bsal_bs_client_config(int fd, const char *ifname, const uint8_t *m
     athdbg.data.acl_cli_param.low_rate_rssi_xing   = conf->rssi_high_xing;
 
 #ifdef OPENSYNC_NL_SUPPORT
+    athdbg.data.acl_cli_param.auth_block           = (conf->rssi_auth_hwm || conf->rssi_auth_lwm) ? 1 : 0;
     send_nl_command(&sock_ctx, ifname, &athdbg, sizeof(athdbg), NULL, QCA_NL80211_VENDOR_SUBCMD_DBGREQ);
 #else
 

@@ -1401,6 +1401,7 @@ qca_ctrl_discover(const char *bss)
         hapd->wps_timeout = qca_hapd_wps_timeout;
         hapd->wps_disable = qca_hapd_wps_disable;
         hapd->respect_multi_ap = 1;
+        hapd->skip_probe_response = 1;
         ctrl_enable(&hapd->ctrl);
         hapd = NULL;
     }
@@ -2526,19 +2527,24 @@ util_nl_parse_iwevcustom_csa_rx(const char *ifname,
 }
 
 static void
-util_nl_parse_iwevcustom_channel_list_updated(const char *phy,
-                                              const void *data,
-                                              unsigned int len)
+util_nl_parse_iwevcustom_channel_state_changed(const char *phy,
+                                               const void *data,
+                                               unsigned int len)
 {
     const unsigned char *chan;
+    const uint16_t *freq;
 
-    if (len < sizeof(*chan)) {
-        LOGW("%s: channel list updated event too short (%d < %zu), userspace/driver abi mismatch?", phy, len, sizeof(*chan));
+    if (len == sizeof(*chan)) {
+        chan = data;
+        LOGI("%s: DFS channel state updated, chan %d", phy, *chan);
+    } else if (len == sizeof(*freq)) {
+        freq = data;
+        LOGI("%s: DFS channel state updated, chan %d", phy, radio_get_chan_from_mhz(*freq));
+    } else {
+        LOGW("%s: DFS channel state change event, length %d userspace/driver abi mismatch?", phy, len);
         return;
     }
 
-    chan = data;
-    LOGI("%s: channel list updated, chan %d", phy, *chan);
     util_cb_delayed_update(UTIL_CB_PHY, phy);
 }
 
@@ -2573,16 +2579,21 @@ util_nl_parse_iwevcustom_radar_detected(const char *phy,
     struct fallback_parent *parent;
     int num;
     int err;
+    const uint16_t *freq;
 
-    if (len < sizeof(*chan)) {
-        LOGW("%s: radar event too short (%d < %zu), userspace/driver api mismatch?", phy, len, sizeof(*chan));
+    if (len == sizeof(*chan)) {
+        chan = data;
+        LOGEM("%s: radar detected, chan %d", phy, *chan);
+        util_kv_radar_set(phy, *chan);
+    } else if (len == sizeof(*freq)) {
+        freq = data;
+        LOGEM("%s: radar detected, chan %d", phy, radio_get_chan_from_mhz(*freq));
+        util_kv_radar_set(phy, radio_get_chan_from_mhz(*freq));
+    } else {
+        LOGW("%s: radar event too short for length %d, userspace/driver api mismatch?", phy, len);
         return;
     }
 
-    chan = data;
-    LOGEM("%s: radar detected, chan %d \n", phy, *chan);
-
-    util_kv_radar_set(phy, *chan);
     util_cb_delayed_update(UTIL_CB_PHY, phy);
 
     if (!util_wifi_phy_has_sta(phy)) {
@@ -2645,15 +2656,14 @@ util_nl_parse_iwevcustom(const char *ifname,
             return util_nl_parse_iwevcustom_chan_change(ifname, data, iwp->length);
         case IEEE80211_EV_CSA_RX:
             return util_nl_parse_iwevcustom_csa_rx(ifname, data, iwp->length);
-        case IEEE80211_EV_CHANNEL_LIST_UPDATED:
-            return util_nl_parse_iwevcustom_channel_list_updated(ifname, data, iwp->length);
         case IEEE80211_EV_RADAR_DETECTED:
             return util_nl_parse_iwevcustom_radar_detected(ifname, data, iwp->length);
+        case IEEE80211_EV_CHANNEL_LIST_UPDATED:
         case IEEE80211_EV_CAC_STARTED:
         case IEEE80211_EV_CAC_COMPLETED:
         case IEEE80211_EV_NOL_STARTED:
         case IEEE80211_EV_NOL_FINISHED:
-            break;
+            return util_nl_parse_iwevcustom_channel_state_changed(ifname, data, iwp->length);
         default:
             LOGT("%s: Unknown event on interface [%s]", __func__, ifname);
             break;

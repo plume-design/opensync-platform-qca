@@ -54,7 +54,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define IOCTL80211_SCAN_MAX_RECORDS     300
 #define IOCTL80211_MAX_ESSID_QTY        8
 
-#define IOCTL80211_PHYMODE_SIZE         32
 #define IOCTL80211_MAX_NEIGHBOR_SIZE    (256 * 1024)  /* 256k limit */
 #define IOCTL80211_DRIVER_NOISE         -95
 
@@ -70,45 +69,52 @@ static size_t                       g_iw_scan_results_size;
 static unsigned int                 res_len;
 #include "osync_nl80211_11ax.h"
 
-typedef struct
-{
-    char                            phymode[IOCTL80211_PHYMODE_SIZE];
-    radio_chanwidth_t               chanwidth;
-} ioctl80211_phymodee_t;
+#define IEEE80211_GET_MODE_MASK    0x03
+#define IEEE80211_ELEMID_HTINFO    61
+#define IEEE80211_ELEMID_VHTCAPA   191
+#define IEEE80211_ELEMID_VHTOP     192
+#define IEEE80211_ELEMID_HECAPA    255
+#define IEEE80211_EXT_ELEID        35     /* HE Capabilities ext tag number */
 
-static ioctl80211_phymodee_t g_ioctl80211_phymode_table[] =
-{
-    { "IEEE80211_MODE_11A",             RADIO_CHAN_WIDTH_20MHZ},
-    { "IEEE80211_MODE_11B",             RADIO_CHAN_WIDTH_20MHZ},
-    { "IEEE80211_MODE_11G",             RADIO_CHAN_WIDTH_20MHZ},
-    { "IEEE80211_MODE_11NA_HT20",       RADIO_CHAN_WIDTH_20MHZ},
-    { "IEEE80211_MODE_11NG_HT20",       RADIO_CHAN_WIDTH_20MHZ},
-    { "IEEE80211_MODE_11NA_HT40PLUS",   RADIO_CHAN_WIDTH_40MHZ_ABOVE},
-    { "IEEE80211_MODE_11NA_HT40MINUS",  RADIO_CHAN_WIDTH_40MHZ_BELOW},
-    { "IEEE80211_MODE_11NG_HT40PLUS",   RADIO_CHAN_WIDTH_40MHZ_ABOVE},
-    { "IEEE80211_MODE_11NG_HT40MINUS",  RADIO_CHAN_WIDTH_40MHZ_BELOW},
-    { "IEEE80211_MODE_11NG_HT40",       RADIO_CHAN_WIDTH_40MHZ},
-    { "IEEE80211_MODE_11NA_HT40",       RADIO_CHAN_WIDTH_40MHZ},
-    { "IEEE80211_MODE_11AC_VHT20",      RADIO_CHAN_WIDTH_20MHZ},
-    { "IEEE80211_MODE_11AC_VHT40PLUS",  RADIO_CHAN_WIDTH_40MHZ_ABOVE},
-    { "IEEE80211_MODE_11AC_VHT40MINUS", RADIO_CHAN_WIDTH_40MHZ_BELOW},
-    { "IEEE80211_MODE_11AC_VHT40",      RADIO_CHAN_WIDTH_40MHZ},
-    { "IEEE80211_MODE_11AC_VHT80",      RADIO_CHAN_WIDTH_80MHZ},
-#if defined QCA_10_4
-    { "IEEE80211_MODE_11AC_VHT160",     RADIO_CHAN_WIDTH_160MHZ},
-    { "IEEE80211_MODE_11AC_VHT80_80",   RADIO_CHAN_WIDTH_80_PLUS_80MHZ},
-#endif
-    { "IEEE80211_MODE_11AXG_HE20",   RADIO_CHAN_WIDTH_20MHZ},
-    { "IEEE80211_MODE_11AXA_HE40PLUS",   RADIO_CHAN_WIDTH_40MHZ_ABOVE},
-    { "IEEE80211_MODE_11AXA_HE40MINUS",  RADIO_CHAN_WIDTH_40MHZ_BELOW},
-    { "IEEE80211_MODE_11AXG_HE40PLUS",   RADIO_CHAN_WIDTH_40MHZ_ABOVE},
-    { "IEEE80211_MODE_11AXG_HE40MINUS",  RADIO_CHAN_WIDTH_40MHZ_BELOW},
-    { "IEEE80211_MODE_11AXA_HE40",   RADIO_CHAN_WIDTH_40MHZ},
-    { "IEEE80211_MODE_11AXG_HE40",   RADIO_CHAN_WIDTH_40MHZ},
-    { "IEEE80211_MODE_11AXA_HE80",   RADIO_CHAN_WIDTH_80MHZ},
-    { "IEEE80211_MODE_11AXA_HE160",   RADIO_CHAN_WIDTH_160MHZ},
-    { "IEEE80211_MODE_11AXA_HE80_80",   RADIO_CHAN_WIDTH_80_PLUS_80MHZ},
-};
+#define get_chanwidth_from_htmode(_offset) \
+        (_offset == 0) ? RADIO_CHAN_WIDTH_20MHZ : \
+        (_offset == 1) ? RADIO_CHAN_WIDTH_40MHZ_ABOVE : \
+        (_offset == 3) ? RADIO_CHAN_WIDTH_40MHZ_BELOW : RADIO_CHAN_WIDTH_40MHZ
+
+#define get_chanwidth_from_vhtmode(_opcw, _offset) \
+        (_opcw == 0) ? get_chanwidth_from_htmode(_offset) : \
+        (_opcw == 1) ? RADIO_CHAN_WIDTH_80MHZ : \
+        (_opcw == 2) ? RADIO_CHAN_WIDTH_160MHZ : RADIO_CHAN_WIDTH_80_PLUS_80MHZ
+
+#define get_chanwidth_from_hemode(_cwset, _opcw, _offset) \
+        (_cwset == 0) ? get_chanwidth_from_vhtmode(_opcw, _offset) : \
+        (_cwset == 1) ? RADIO_CHAN_WIDTH_160MHZ : \
+        (_cwset == 3) ? RADIO_CHAN_WIDTH_80_PLUS_80MHZ : RADIO_CHAN_WIDTH_20MHZ
+
+#define IS_REVSIG_VHT160_CHWIDTH(vht_op_chwidth, \
+                                 vht_op_ch_freq_seg1, \
+                                 vht_op_ch_freq_seg2) \
+        ((vht_op_chwidth == IEEE80211_VHTOP_CHWIDTH_REVSIG_160) && \
+        (vht_op_ch_freq_seg2 != 0) && \
+        (abs(vht_op_ch_freq_seg2 - vht_op_ch_freq_seg1) == 8))
+
+#define IS_REVSIG_VHT80_80_CHWIDTH(vht_op_chwidth, \
+                                   vht_op_ch_freq_seg1, \
+                                   vht_op_ch_freq_seg2) \
+        ((vht_op_chwidth == IEEE80211_VHTOP_CHWIDTH_REVSIG_80_80) && \
+        (vht_op_ch_freq_seg2 != 0) && \
+        (abs(vht_op_ch_freq_seg2 - vht_op_ch_freq_seg1) > 16))
+
+#define HTCCFS2_GET(ccfs2_1, ccfs2_2) \
+        (((ccfs2_2) << IEEE80211_HTINFO_CCFS2_GET_S) | ccfs2_1)
+
+#define IEEE80211_SUPP_CHANWIDTH_SET_MASK 0x0000000C
+#define IEEE80211_EXT_NSS_BWSUPP_MASK     0x000000C0
+#define VHTCAP_INFO(ie) (ie[2] & IEEE80211_SUPP_CHANWIDTH_SET_MASK) \
+        | ((ie[5] & IEEE80211_EXT_NSS_BWSUPP_MASK) << 24)
+
+#define GET_MODE(he, vht, ht) \
+        (he) ? "HE" : (vht) ? "VHT" : (ht) ? "HT" : "None of the HT/VHT/HE"
 
 typedef struct {
     radio_entry_t                  *radio_cfg;
@@ -133,31 +139,6 @@ static  int32_t                     g_scan_result_timeout;
 /******************************************************************************
  *  PROTECTED definitions
  *****************************************************************************/
-
-static
-ioctl_status_t  ioctl80211_phymodee_to_chanwidth(
-        char                       *phymode,
-        radio_chanwidth_t          *chanwidth)
-{
-    ioctl80211_phymodee_t          *phymode_entry;
-    uint32_t                        phymode_index;
-
-    for (   phymode_index = 0;
-            phymode_index < sizeof(g_ioctl80211_phymode_table)/sizeof(ioctl80211_phymodee_t);
-            phymode_index++)
-    {
-        phymode_entry = &g_ioctl80211_phymode_table[phymode_index];
-        if (!strcmp (phymode, phymode_entry->phymode))
-        {
-            *chanwidth = phymode_entry->chanwidth;
-            return IOCTL_STATUS_OK;
-        }
-    }
-
-    /* There are many modes ... for unknown return 20MHz */
-    *chanwidth = RADIO_CHAN_WIDTH_20MHZ;
-    return IOCTL_STATUS_OK;
-}
 
 static
 ioctl_status_t ioctl80211_scan_result_timer_set(
@@ -314,169 +295,232 @@ ioctl_status_t ioctl80211_scan_extract_neighbors_from_ssids(
     return IOCTL_STATUS_OK;
 }
 
+static uint8_t
+util_extnss_160_validate(uint32_t vhtcap,
+                         uint8_t vht_op_chwidth,
+                         uint8_t vht_op_ch_freq_seg1,
+                         uint8_t vht_op_ch_freq_seg2,
+                         uint8_t ccfs2_1,
+                         uint8_t ccfs2_2)
+{
+
+    if (((vhtcap & IEEE80211_VHTCAP_EXT_NSS_MASK)
+        == IEEE80211_EXTNSS_MAP_00_80F1_160NONE_80P80NONE)) {
+        return 0;
+    }
+
+    if (((vhtcap & IEEE80211_VHTCAP_EXT_NSS_MASK) == IEEE80211_EXTNSS_MAP_13_80F2_160F2_80P80F1) ||
+        ((vhtcap & IEEE80211_VHTCAP_EXT_NSS_MASK) == IEEE80211_EXTNSS_MAP_10_80F1_160F1_80P80NONE) ||
+        ((vhtcap & IEEE80211_VHTCAP_EXT_NSS_MASK) == IEEE80211_EXTNSS_MAP_11_80F1_160F1_80P80FDOT5) ||
+        ((vhtcap & IEEE80211_VHTCAP_EXT_NSS_MASK) == IEEE80211_EXTNSS_MAP_12_80F1_160F1_80P80FDOT75) ||
+        ((vhtcap & IEEE80211_VHTCAP_EXT_NSS_MASK) == IEEE80211_EXTNSS_MAP_20_80F1_160F1_80P80F1) ||
+        ((vhtcap & IEEE80211_VHTCAP_EXT_NSS_MASK) == IEEE80211_EXTNSS_MAP_23_80F2_160F1_80P80F1)) {
+        if ((vht_op_chwidth == IEEE80211_VHTOP_CHWIDTH_REVSIG_160) &&
+               (vht_op_ch_freq_seg2 != 0) &&
+               (abs(vht_op_ch_freq_seg2 - vht_op_ch_freq_seg1) == 8)) {
+            return 1;
+        }
+    } else if (((vhtcap & IEEE80211_VHTCAP_EXT_NSS_MASK) == IEEE80211_EXTNSS_MAP_01_80F1_160FDOT5_80P80NONE) ||
+               ((vhtcap & IEEE80211_VHTCAP_EXT_NSS_MASK) == IEEE80211_EXTNSS_MAP_02_80F1_160FDOT5_80P80FDOT5) ||
+               ((vhtcap & IEEE80211_VHTCAP_EXT_NSS_MASK) == IEEE80211_EXTNSS_MAP_03_80F1_160FDOT75_80P80FDOT75)) {
+        if ((vht_op_chwidth == IEEE80211_VHTOP_CHWIDTH_REVSIG_160) &&
+               (HTCCFS2_GET(ccfs2_1, ccfs2_2) != 0) &&
+               (abs(HTCCFS2_GET(ccfs2_1, ccfs2_2) - vht_op_ch_freq_seg1) == 8)) {
+            return 2;
+        }
+    } else {
+        return 0;
+    }
+    return 0;
+}
+
+static uint8_t
+util_extnss_80p80_validate(uint32_t vhtcap,
+                           uint8_t vht_op_chwidth,
+                           uint8_t vht_op_ch_freq_seg1,
+                           uint8_t vht_op_ch_freq_seg2,
+                           uint8_t ccfs2_1,
+                           uint8_t ccfs2_2)
+{
+
+    if (((vhtcap & IEEE80211_VHTCAP_EXT_NSS_MASK)
+        == IEEE80211_EXTNSS_MAP_00_80F1_160NONE_80P80NONE)) {
+        return 0;
+    }
+
+    if (((vhtcap & IEEE80211_VHTCAP_EXT_NSS_MASK) == IEEE80211_EXTNSS_MAP_13_80F2_160F2_80P80F1) ||
+        ((vhtcap & IEEE80211_VHTCAP_EXT_NSS_MASK) == IEEE80211_EXTNSS_MAP_20_80F1_160F1_80P80F1) ||
+        ((vhtcap & IEEE80211_VHTCAP_EXT_NSS_MASK) == IEEE80211_EXTNSS_MAP_23_80F2_160F1_80P80F1)) {
+        if ((vht_op_chwidth == IEEE80211_VHTOP_CHWIDTH_REVSIG_80_80) &&
+               (vht_op_ch_freq_seg2 != 0) &&
+               (abs(vht_op_ch_freq_seg2 - vht_op_ch_freq_seg1) > 16)) {
+            return 1;
+        }
+    } else if (((vhtcap & IEEE80211_VHTCAP_EXT_NSS_MASK) == IEEE80211_EXTNSS_MAP_11_80F1_160F1_80P80FDOT5) ||
+               ((vhtcap & IEEE80211_VHTCAP_EXT_NSS_MASK) == IEEE80211_EXTNSS_MAP_02_80F1_160FDOT5_80P80FDOT5) ||
+               ((vhtcap & IEEE80211_VHTCAP_EXT_NSS_MASK) == IEEE80211_EXTNSS_MAP_12_80F1_160F1_80P80FDOT75) ||
+               ((vhtcap & IEEE80211_VHTCAP_EXT_NSS_MASK) == IEEE80211_EXTNSS_MAP_03_80F1_160FDOT75_80P80FDOT75)) {
+        if ((vht_op_chwidth == IEEE80211_VHTOP_CHWIDTH_REVSIG_80_80) &&
+               (HTCCFS2_GET(ccfs2_1, ccfs2_2) != 0) &&
+               (abs(HTCCFS2_GET(ccfs2_1, ccfs2_2) - vht_op_ch_freq_seg1) > 16)) {
+             return 2;
+        }
+    } else {
+        return 0;
+    }
+    return 0;
+}
+
+static uint8_t
+util_get_chanwidth(const uint8_t *vp, int ielen)
+{
+    bool       is_ht_found        = false;
+    bool       is_vht_found       = false;
+    bool       is_he_found        = false;
+    uint8_t    ht_ccfs2_1         = 0;
+    uint8_t    ht_ccfs2_2         = 0;
+    uint8_t    sec_chan_offset    = 0;
+    uint8_t    vht_op_cw          = 0;
+    uint8_t    he_cw_set          = 0;
+    uint8_t    chanwidth          = 0;
+    uint32_t   vhtcap_info        = 0;
+    uint8_t    vhtop_ch_freq_seg1 = 0;
+    uint8_t    vhtop_ch_freq_seg2 = 0;
+
+    /* Parsing each element id from the ie data to store necessary data for
+       calculating current channel width of neighbor AP */
+    while (ielen > 0) {
+        switch (vp[0]) {
+            case IEEE80211_ELEMID_HTINFO:
+                is_ht_found = true;
+                sec_chan_offset  = vp[3] & IEEE80211_GET_MODE_MASK;
+                ht_ccfs2_1 = (vp[4] >> 5) & ((1 << 3) - 1);
+                ht_ccfs2_2 = vp[5] & ((1 << 5) - 1);
+                break;
+            case IEEE80211_ELEMID_VHTCAPA:
+                is_vht_found = true;
+                vhtcap_info = VHTCAP_INFO(vp);
+                break;
+            case IEEE80211_ELEMID_VHTOP:
+                is_vht_found = true;
+                vht_op_cw = vp[2];
+                vhtop_ch_freq_seg1 = vp[3];
+                vhtop_ch_freq_seg2 = vp[4];
+                break;
+            case IEEE80211_ELEMID_HECAPA:
+                if (vp[2] == IEEE80211_EXT_ELEID) {
+                    is_he_found = true;
+                    he_cw_set = (vp[9] >> 3) & IEEE80211_GET_MODE_MASK;
+                }
+                break;
+            default:
+                break;
+        }
+
+        ielen = ielen - (2 + vp[1]);
+        vp = vp + 2 + vp[1];
+    }
+
+    LOG(TRACE,
+        "Neighbor is AP Operating on %s Mode "
+        "{Secondary channel offset - %u"
+        " ccfs2_1 - %u ccfs2_2 - %u"
+        " VHT Capabilities info - 0x%8X"
+        " VHT operational chanwidth - %u"
+        " CCS0 - %u CCS1 - %u"
+        " HE chanwidth set - %u}",
+        GET_MODE(is_he_found, is_vht_found, is_ht_found),
+        sec_chan_offset,
+        ht_ccfs2_1,
+        ht_ccfs2_2,
+        vhtcap_info,
+        vht_op_cw,
+        vhtop_ch_freq_seg1,
+        vhtop_ch_freq_seg2,
+        he_cw_set);
+
+    /* If neighbor AP is not running on any of HT/VHT/HE modes then
+       the default channel width is 20 MHz */
+    if (is_he_found) {
+        chanwidth = get_chanwidth_from_hemode(he_cw_set,
+                                              vht_op_cw,
+                                              sec_chan_offset);
+    } else if (is_vht_found) {
+        chanwidth = get_chanwidth_from_vhtmode(vht_op_cw, sec_chan_offset);
+    } else if (is_ht_found) {
+        return get_chanwidth_from_htmode(sec_chan_offset);
+    } else {
+        return RADIO_CHAN_WIDTH_20MHZ;
+    }
+
+    if (chanwidth == RADIO_CHAN_WIDTH_80MHZ) {
+        if ( util_extnss_160_validate(vhtcap_info,
+                                      vht_op_cw,
+                                      vhtop_ch_freq_seg1,
+                                      vhtop_ch_freq_seg2,
+                                      ht_ccfs2_1,
+                                      ht_ccfs2_2)
+            || IS_REVSIG_VHT160_CHWIDTH(vht_op_cw,
+                                        vhtop_ch_freq_seg1,
+                                        vhtop_ch_freq_seg2 ) ) {
+            return RADIO_CHAN_WIDTH_160MHZ;
+        } else if ( util_extnss_80p80_validate(vhtcap_info,
+                                               vht_op_cw,
+                                               vhtop_ch_freq_seg1,
+                                               vhtop_ch_freq_seg2,
+                                               ht_ccfs2_1,
+                                               ht_ccfs2_2)
+            || IS_REVSIG_VHT80_80_CHWIDTH(vht_op_cw,
+                                          vhtop_ch_freq_seg1,
+                                          vhtop_ch_freq_seg2) ) {
+            return RADIO_CHAN_WIDTH_80_PLUS_80MHZ;
+        } else {
+            return RADIO_CHAN_WIDTH_80MHZ;
+        }
+    } else {
+        return chanwidth;
+    }
+}
+
 //static
 ioctl_status_t ioctl80211_scan_results_parse(
         radio_type_t                radio_type,
-        struct iw_event            *iw_event,
+        const struct ieee80211req_scan_result *sr,
         dpp_neighbor_record_t      *neighbor_record)
 {
-    int                     rc = -1;
-    struct iw_point         iw_point;
     uint8_t                 sig8 = 0;
+    const void             *ssid = sr + 1;
 
-    /* Parse data per event */
-    switch (iw_event->cmd)
-    {
-        case SIOCGIWAP:
-            {
-                snprintf(neighbor_record->bssid,
-                        sizeof(neighbor_record->bssid),
-                        MAC_ADDRESS_FORMAT,
-                        MAC_ADDRESS_PRINT(iw_event->u.ap_addr.sa_data));
-                LOG(TRACE,
-                    "Parsed %s BSSID %s",
-                    radio_get_name_from_type(radio_type),
-                    neighbor_record->bssid);
+    snprintf(neighbor_record->bssid,
+             sizeof(neighbor_record->bssid),
+             MAC_ADDRESS_FORMAT,
+             MAC_ADDRESS_PRINT(sr->isr_bssid));
+    neighbor_record->lastseen = time(NULL);
+    neighbor_record->chan = radio_get_chan_from_mhz(sr->isr_freq);
 
-                neighbor_record->lastseen = time(NULL);
-                LOG(TRACE,
-                    "Parsed %s lastseen %d",
-                    radio_get_name_from_type(radio_type),
-                    neighbor_record->lastseen);
-            }
-            break;
-        case SIOCGIWFREQ:
-            {
-                neighbor_record->chan =
-                    radio_get_chan_from_mhz(
-                            iw_event->u.freq.m / 100000);
-
-                LOG(TRACE,
-                    "Parsed %s chan %u from freq %d (^%d)",
-                    radio_get_name_from_type(radio_type),
-                    neighbor_record->chan,
-                    iw_event->u.freq.m,
-                    iw_event->u.freq.e);
-            }
-            break;
-        case SIOCGIWESSID:
-            {
-                rc = ioctl80211_get_iwp(iw_event, &iw_point);
-                if (0 > rc) {
-                    LOG(ERR,
-                        "Parsing %s SSID event %d > %d",
-                        radio_get_name_from_type(radio_type),
-                        iw_point.length,
-                        iw_event->len);
-                    return IOCTL_STATUS_ERROR;
-                }
-
-                if (iw_point.length) {
-                    if (iw_point.length >= sizeof(neighbor_record->ssid))
-                        iw_point.length = sizeof(neighbor_record->ssid) - 1;
-
-                    memcpy (neighbor_record->ssid,
-                            iw_point.pointer,
-                            iw_point.length);
-
-                    LOG(TRACE,
-                        "Parsed %s SSID %s",
-                        radio_get_name_from_type(radio_type),
-                        neighbor_record->ssid);
-                }
-                else
-                {
-                    LOG(TRACE,
-                        "Parsed %s hidden SSID %s",
-                        radio_get_name_from_type(radio_type),
-                        neighbor_record->ssid);
-                }
-            }
-            break;
-        case IWEVQUAL:
-            if (iw_event->u.qual.updated & IW_QUAL_DBM)
-            {
-                /* Deal with signal level in dBm  (absolute power measurement) */
-                if (!(iw_event->u.qual.updated & IW_QUAL_LEVEL_INVALID) &&
-                    !(iw_event->u.qual.updated & IW_QUAL_NOISE_INVALID))
-                {
-                    /* Driver adds the noise floor
-                       iq->noise = 161;        -> -95dBm
-                       iq->level = iq->noise + rssi;
-
-                       Note: Below arithmetic
-                       relies on 8-bit unsigned
-                       int wraparound.
-                     */
-                    sig8 = iw_event->u.qual.level;
-                    sig8 -= iw_event->u.qual.noise;
-
-                    if IOCTL80211_IS_RSSI_VALID (sig8) {
-                        neighbor_record->sig = sig8;
-                    } else {
-                        neighbor_record->sig = 0;
-                    }
-                    LOG(TRACE,
-                        "Parsed %s signal %d",
-                        radio_get_name_from_type(radio_type),
-                        neighbor_record->sig);
-                }
-            }
-            break;
-        case IWEVCUSTOM:
-            {
-                rc = ioctl80211_get_iwp(iw_event, &iw_point);
-                if (0 > rc) {
-                    LOG(ERR,
-                        "Parsing %s CUSTOM event %d > %d",
-                        radio_get_name_from_type(radio_type),
-                        iw_point.length,
-                        iw_event->len);
-                    return IOCTL_STATUS_ERROR;
-                }
-
-                char  phymode[IOCTL80211_PHYMODE_SIZE];
-                int32_t read_num = 0;
-
-                memset (phymode, 0, sizeof(phymode));
-
-                if (    (NULL != iw_point.pointer)
-                     && (NULL != strstr(iw_point.pointer, "phy_mode="))
-                   )
-                {
-                    char buf[256];
-
-                    memset(buf, 0, sizeof(buf));
-                    if (iw_point.length >= sizeof(buf))
-                        iw_point.length = sizeof(buf) - 1;
-
-                    memcpy(buf, iw_point.pointer, iw_point.length);
-
-                    read_num =
-                        sscanf (buf,
-                                "phy_mode=%32[a-zA-Z0-9_]s",
-                                phymode);
-                    if (1 != read_num)
-                    {
-                        return IOCTL_STATUS_ERROR;
-                    }
-
-                    ioctl80211_phymodee_to_chanwidth (
-                            phymode,
-                            &neighbor_record->chanwidth);
-
-                    LOG(TRACE,
-                        "Parsed %s chanwidth %d from %s (%s)",
-                        radio_get_name_from_type(radio_type),
-                        neighbor_record->chanwidth,
-                        phymode,
-                        buf);
-                }
-            }
-            break;
-        default:
-            break;
+    sig8 = sr->isr_rssi;
+    sig8 -= sr->isr_noise;
+    if (sig8 > 0 && sig8 <= 127) {
+        neighbor_record->sig = sig8;
+    } else {
+        neighbor_record->sig = 0;
     }
+
+    memcpy (neighbor_record->ssid, ssid, sr->isr_ssid_len);
+    neighbor_record->chanwidth =
+             util_get_chanwidth(ssid + sr->isr_ssid_len, sr->isr_ie_len);
+
+    LOG(TRACE,
+        "Parsed %s neighbor {chan='%u' from freq='%u'"
+        " signal='%d'"
+        " ssid='%s'"
+        " chanwidth='%d'}",
+        radio_get_name_from_type(radio_type),
+        neighbor_record->chan,
+        sr->isr_freq,
+        neighbor_record->sig,
+        neighbor_record->ssid,
+        neighbor_record->chanwidth);
 
     return IOCTL_STATUS_OK;
 }
@@ -691,7 +735,6 @@ ioctl_status_t ioctl80211_scan_results_get(
     dpp_neighbor_record_t           scan_records[IOCTL80211_SCAN_MAX_RECORDS * IOCTL80211_MAX_ESSID_QTY];
     uint32_t                        scan_result_qty = 0;
     dpp_neighbor_record_t          *scan_record = NULL;
-    bool                            parse_error = false;;
 
     if (NULL == scan_results)
     {
@@ -699,69 +742,49 @@ ioctl_status_t ioctl80211_scan_results_get(
     }
     radio_type = radio_cfg->type;
 
-    /* Driver returns buffer as event list. Traverse through it and
-       parse required events.
-     */
     memset (scan_records, 0, sizeof(scan_records));
     if (g_iw_scan_results_size)
     {
-        struct iw_event    *iw_event;
+        const struct ieee80211req_scan_result *sr;
         char               *ptr;
         uint32_t            len;
-        //uint32_t            payload_len;;
 
         ptr = g_iw_scan_results;
         len = g_iw_scan_results_size;
 
-        /* Traverse through results and extract iw_event TLVs */
-        while (len > IW_EV_LCP_LEN) {
-            /* Point to next event */
-            iw_event = (struct iw_event *) ptr;
+        while (len >= sizeof(*sr)) {
+            /* Point to next scan result */
+            sr = (struct ieee80211req_scan_result *) ptr;
 
             /* Malformed stream or end of buffer */
-            if (len < iw_event->len || 0 == iw_event->len) {
+            if (len < sr->isr_len || sr->isr_len == 0) {
                 break;
             }
 
             /* Point to new scan record entry. */
-            if (SIOCGIWAP == iw_event->cmd)
+            scan_record = &scan_records[scan_result_qty];
+            if (scan_result_qty >= ARRAY_SIZE(scan_records))
             {
-                scan_record = &scan_records[scan_result_qty];
-
-                /* check for max record limit limit */
-                if (scan_result_qty >= ARRAY_SIZE(scan_records))
-                {
-                    break;
-                }
-                scan_result_qty++;
-                parse_error = false;
+                break;
             }
-
-            /* Skip entry events in case of parser error */
-            if (true == parse_error)
-            {
-                continue;
-            }
+            scan_result_qty++;
 
             status = 
                 ioctl80211_scan_results_parse (
                         radio_type,
-                        iw_event,
+                        sr,
                         scan_record);
             if (IOCTL_STATUS_OK != status)
             {
                 /* Clear previous data in case of error */
                 memset (scan_record, 0, sizeof(dpp_neighbor_record_t));
 
-                /* Skip parsing of next events */
-                parse_error = true;
-
                 /* Resent entry count */
                 scan_result_qty--;
             }
 
-            ptr += iw_event->len;
-            len -= iw_event->len;
+            ptr += sr->isr_len;
+            len -= sr->isr_len;
         }
     }
 
