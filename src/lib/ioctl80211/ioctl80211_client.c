@@ -843,12 +843,12 @@ static
 ioctl_status_t ioctl80211_clients_stats_tx_fetch(
         radio_type_t                    radio_type,
         char                           *phyName,
-        ioctl80211_client_record_t      *client_entry)
+        mac_address_t                   mac,
+        struct ps_uapi_ioctl           *ioctl_stats)
 {
     int32_t                             rc;
 
     struct iwreq                        request;
-    struct ps_uapi_ioctl               *ioctl_stats = &client_entry->stats_tx;
 
     memset (ioctl_stats, 0, sizeof(*ioctl_stats));
     memset (&request, 0, sizeof(request));
@@ -856,12 +856,12 @@ ioctl_status_t ioctl80211_clients_stats_tx_fetch(
     request.u.data.length = PS_UAPI_IOCTL_SIZE;
 
     ioctl_stats->cmd = PS_UAPI_IOCTL_CMD_PEER_TX_STATS;
-    ioctl_stats->u.peer_tx_stats.set.addr[0] = (u8)client_entry->info.mac[0];
-    ioctl_stats->u.peer_tx_stats.set.addr[1] = (u8)client_entry->info.mac[1];
-    ioctl_stats->u.peer_tx_stats.set.addr[2] = (u8)client_entry->info.mac[2];
-    ioctl_stats->u.peer_tx_stats.set.addr[3] = (u8)client_entry->info.mac[3];
-    ioctl_stats->u.peer_tx_stats.set.addr[4] = (u8)client_entry->info.mac[4];
-    ioctl_stats->u.peer_tx_stats.set.addr[5] = (u8)client_entry->info.mac[5];
+    ioctl_stats->u.peer_tx_stats.set.addr[0] = (u8)mac[0];
+    ioctl_stats->u.peer_tx_stats.set.addr[1] = (u8)mac[1];
+    ioctl_stats->u.peer_tx_stats.set.addr[2] = (u8)mac[2];
+    ioctl_stats->u.peer_tx_stats.set.addr[3] = (u8)mac[3];
+    ioctl_stats->u.peer_tx_stats.set.addr[4] = (u8)mac[4];
+    ioctl_stats->u.peer_tx_stats.set.addr[5] = (u8)mac[5];
 
     rc = 
         ioctl80211_request_send(
@@ -1207,16 +1207,20 @@ ioctl_status_t ioctl80211_peer_stats_calculate(
 }
 
 static
-ioctl_status_t ioctl80211_clients_stats_fetch(
+ioctl_status_t ioctl80211_clients_stats_get(
         radio_type_t                radio_type,
         char                       *ifName,
-        ioctl80211_client_record_t *client_entry)
+        char                       *phyName,
+        mac_address_t               mac,
+        ioctl80211_client_stats_t  *stats_entry)
 {
     int32_t                         rc;
-    ioctl80211_client_stats_t      *stats_entry = &client_entry->stats.client;
 
     struct iwreq                    request;
     struct ieee80211req_sta_stats   ieee80211_client_stats;
+    struct ps_uapi_ioctl            stats_tx;
+    ioctl_status_t                  status;
+    uint32_t                        stats_index;
 
     memset (&ieee80211_client_stats, 0, sizeof(ieee80211_client_stats));
     memset (&request, 0, sizeof(request));
@@ -1224,7 +1228,7 @@ ioctl_status_t ioctl80211_clients_stats_fetch(
     request.u.data.length = sizeof(ieee80211_client_stats);
 
     memcpy (ieee80211_client_stats.is_u.macaddr,
-            client_entry->info.mac,
+            mac,
             sizeof(ieee80211_client_stats.is_u.macaddr));
 
     rc = 
@@ -1242,13 +1246,6 @@ ioctl_status_t ioctl80211_clients_stats_fetch(
             strerror(errno));
         return IOCTL_STATUS_ERROR;
     }
-
-    stats_entry->frames_tx = 
-        ieee80211_client_stats.is_stats.ns_tx_data_success;
-    LOG(TRACE,
-        "Parsed %s client tx_frames %u",
-        radio_get_name_from_type(radio_type),
-        stats_entry->frames_tx);
 
     stats_entry->bytes_tx = 
         ieee80211_client_stats.is_stats.ns_tx_bytes_success;
@@ -1270,20 +1267,6 @@ ioctl_status_t ioctl80211_clients_stats_fetch(
         "Parsed %s client rx_bytes %"PRIu64"",
         radio_get_name_from_type(radio_type),
         stats_entry->bytes_rx);
-
-    /* TODO: Needs verification.
-
-       Retry counter was taken from assumption from the following calculation:
-
-       all queued packets were packets actually sent and not ok - retried!!
-       packet_queued = tx_data_packets + ns_is_tx_not_ok
-     */
-    stats_entry->retries_tx = 
-        ieee80211_client_stats.is_stats.ns_is_tx_not_ok;
-    LOG(TRACE,
-        "Parsed %s client tx retries %u",
-        radio_get_name_from_type(radio_type),
-        stats_entry->retries_tx);
 
     stats_entry->retries_rx =
         ieee80211_client_stats.is_stats.ns_rx_retries;
@@ -1316,7 +1299,55 @@ ioctl_status_t ioctl80211_clients_stats_fetch(
         radio_get_name_from_type(radio_type),
         stats_entry->errors_rx);
 
+    status = 
+        ioctl80211_clients_stats_tx_fetch (
+                radio_type,
+                phyName,
+                mac,
+                &stats_tx);
+    if (IOCTL_STATUS_OK != status)
+    {
+        LOG(WARNING,
+            "Skipping parsing %s client stats tx "
+            "(Failed to retrieve them from driver)",
+            radio_get_name_from_type(radio_type));
+        return IOCTL_STATUS_ERROR;
+    }
+
+    stats_entry->frames_tx = 0;
+    stats_entry->retries_tx = 0;
+    for (stats_index = 0; stats_index < PS_MAX_ALL; stats_index++)
+    {
+        stats_entry->frames_tx += stats_tx.u.peer_tx_stats.get.stats[stats_index].success;
+        stats_entry->retries_tx += (stats_tx.u.peer_tx_stats.get.stats[stats_index].attempts -
+            stats_tx.u.peer_tx_stats.get.stats[stats_index].success);
+    }
+
+    LOG(TRACE,
+        "Parsed %s client tx_frames %u",
+        radio_get_name_from_type(radio_type),
+        stats_entry->frames_tx);
+    LOG(TRACE,
+        "Parsed %s client tx retries %u",
+        radio_get_name_from_type(radio_type),
+        stats_entry->retries_tx);
+
     return IOCTL_STATUS_OK;
+}
+
+static
+ioctl_status_t ioctl80211_clients_stats_fetch(
+        radio_type_t                radio_type,
+        char                       *ifName,
+        char                       *phyName,
+        ioctl80211_client_record_t *client_entry)
+{
+    return ioctl80211_clients_stats_get(
+            radio_type,
+            ifName,
+            phyName,
+            client_entry->info.mac,
+            &client_entry->stats.client);
 }
 
 static
@@ -1444,6 +1475,7 @@ ioctl_status_t ioctl80211_clients_list_fetch(
             ioctl80211_clients_stats_fetch (
                     radio_type,
                     ifName,
+                    radio_cfg->phy_name,
                     client_entry);
         if (IOCTL_STATUS_OK != status)
         {
@@ -1464,7 +1496,8 @@ ioctl_status_t ioctl80211_clients_list_fetch(
             ioctl80211_clients_stats_tx_fetch (
                     radio_type,
                     radio_cfg->phy_name,
-                    client_entry);
+                    client_entry->info.mac,
+                    &client_entry->stats_tx);
         if (IOCTL_STATUS_OK != status)
         {
             goto error;
@@ -1740,7 +1773,8 @@ ioctl_status_t ioctl80211_peer_list_fetch(
         ioctl80211_clients_stats_tx_fetch (
                 radio_type,
                 radio_cfg->phy_name,
-                client_entry);
+                client_entry->info.mac,
+                &client_entry->stats_tx);
     if (IOCTL_STATUS_OK != status)
     {
         goto error;
@@ -1933,6 +1967,43 @@ ioctl_status_t ioctl80211_client_stats_convert(
     {
         return IOCTL_STATUS_ERROR;
     }
+
+    return IOCTL_STATUS_OK;
+}
+
+ioctl_status_t ioctl80211_client_stats_get(
+        radio_type_t                radio_type,
+        char                       *ifName,
+        char                       *phyName,
+        mac_address_t               mac,
+        dpp_client_stats_t         *stats)
+{
+    ioctl_status_t                  status;
+    ioctl80211_client_stats_t       stats_entry;
+
+    status =
+        ioctl80211_clients_stats_get(
+            radio_type,
+            ifName,
+            phyName,
+            mac,
+            &stats_entry);
+    if (IOCTL_STATUS_OK != status)
+    {
+        return IOCTL_STATUS_ERROR;
+    }
+
+    stats->bytes_tx = stats_entry.bytes_tx;
+    stats->bytes_rx = stats_entry.bytes_rx;
+    stats->frames_tx = stats_entry.frames_tx;
+    stats->frames_rx = stats_entry.frames_rx;
+    stats->retries_rx = stats_entry.retries_rx;
+    stats->retries_tx = stats_entry.retries_tx;
+    stats->errors_rx = stats_entry.errors_rx;
+    stats->errors_tx = stats_entry.errors_tx;
+    stats->rate_rx = stats_entry.rate_rx;
+    stats->rate_tx = stats_entry.rate_tx;
+    stats->rssi = stats_entry.rssi;
 
     return IOCTL_STATUS_OK;
 }

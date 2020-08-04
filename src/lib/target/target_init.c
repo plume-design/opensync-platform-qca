@@ -44,6 +44,11 @@ struct ev_loop *target_mainloop;
 bool target_init(target_init_opt_t opt, struct ev_loop *loop)
 {
     switch (opt) {
+        case TARGET_INIT_MGR_WBM:
+            if (ioctl80211_init(loop, false) != IOCTL_STATUS_OK) {
+                return false;
+            }
+            break;
         case TARGET_INIT_MGR_SM:
             if (ioctl80211_init(loop, true) != IOCTL_STATUS_OK) {
                 return false;

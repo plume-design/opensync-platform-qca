@@ -446,3 +446,22 @@ ioctl_status_t ioctl80211_survey_results_convert(
 
     return IOCTL_STATUS_OK;
 }
+
+ioctl_status_t ioctl80211_survey_noise_floor_get(
+        char                       *if_name,
+        int                        *noise_floor)
+{
+    struct iwreq iwr;
+
+    memset(&iwr, 0, sizeof(iwr));
+    strncpy(iwr.ifr_name, if_name, IFNAMSIZ);
+    iwr.u.mode = IEEE80211_PARAM_CHAN_NOISE;
+
+    if (ioctl(ioctl80211_fd_get(), IEEE80211_IOCTL_GETPARAM, &iwr) < 0) {
+        LOGE("%s: Failed to get Noise Floor for %s dev", __func__, if_name);
+        return IOCTL_STATUS_ERROR;
+    }
+
+    *noise_floor = iwr.u.param.value;
+	return IOCTL_STATUS_OK;
+}
