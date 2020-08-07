@@ -24,8 +24,8 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef TARGET_IOCTL_H_INCLUDED
-#define TARGET_IOCTL_H_INCLUDED
+#ifndef TARGET_QCA_H_INCLUDED
+#define TARGET_QCA_H_INCLUDED
 
 #include "ioctl80211_client.h"
 #include "ioctl80211_survey.h"
@@ -40,4 +40,4 @@ typedef ioctl80211_client_record_t target_client_record_t;
 typedef ioctl80211_survey_record_t target_survey_record_t;
 typedef ioctl80211_capacity_data_t target_capacity_data_t;
 
-#endif /* TARGET_IOCTL_H_INCLUDED */
+#endif /* TARGET_QCA_H_INCLUDED */

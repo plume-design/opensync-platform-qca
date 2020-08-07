@@ -43,7 +43,7 @@ UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_qca.c
 UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/wiphy_info.c
 endif
 
-UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_ioctl_init.c
+UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_init.c
 UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_switch.c
 UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_mcproxy.c
 UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/hostapd_util.c

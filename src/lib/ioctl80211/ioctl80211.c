@@ -93,8 +93,10 @@ static ioctl_status_t ioctl80211_get_ifname(
  *  PUBLIC definitions
  *****************************************************************************/
 
-ioctl_status_t ioctl80211_init(struct ev_loop *loop)
+ioctl_status_t ioctl80211_init(struct ev_loop *loop, bool init_callback)
 {
+    (void)init_callback;
+
     g_ioctl80211_sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (0 >= g_ioctl80211_sock_fd)
     {

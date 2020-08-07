@@ -28,6 +28,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <stdio.h>
 #include <errno.h>
 
+#include "kconfig.h"
 #include "target.h"
 #include "ioctl80211.h"
 
@@ -42,11 +43,21 @@ struct ev_loop *target_mainloop;
 
 bool target_init(target_init_opt_t opt, struct ev_loop *loop)
 {
-    ioctl_status_t status;
-
-    status = ioctl80211_init(loop);
-    if (IOCTL_STATUS_OK != status) {
-        return false;
+    switch (opt) {
+        case TARGET_INIT_MGR_SM:
+            if (ioctl80211_init(loop, true) != IOCTL_STATUS_OK) {
+                return false;
+            }
+            break;
+        case TARGET_INIT_MGR_BM:
+            if (kconfig_enabled(CONFIG_PLATFORM_QCA_QSDK110)) {
+                if (ioctl80211_init(loop, false) != IOCTL_STATUS_OK) {
+                    return false;
+                }
+            }
+            break;
+        default:
+            break;
     }
 
     target_mainloop = loop;

@@ -61,6 +61,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define IOCTL80211_DATA_RATE_LEN    (32)
 #define PEER_RX_STATS 0
 #define PEER_TX_STATS 1
+#define PEER_AVG_STATS 2
 
 #define OSYNC_IOCTL_LIB 1
 
@@ -87,8 +88,20 @@ typedef struct
     uint32_t attempts;
 } weighted_phyrate;
 
+#ifndef DP_PEER_AVG_RATE_STATS_SUPPORTED
+#define DP_PEER_AVG_RATE_STATS (1 << 31)
+struct wlan_avg_rate_stats {};
+#endif
+
+struct avg_phyrate {
+    mac_address_t mac_addr;
+    uint32_t flags;
+    struct wlan_avg_rate_stats stats;
+};
+
 static weighted_phyrate g_peer_rx_phyrate[PEER_CLI_MAX];
 static weighted_phyrate g_peer_tx_phyrate[PEER_CLI_MAX];
+static struct avg_phyrate g_peer_avg_phyrate[PEER_CLI_MAX];
 
 uint16_t g_stainfo_len;
 uint8_t bsal_clients[IOCTL80211_CLIENTS_SIZE];
@@ -191,6 +204,25 @@ int get_cli_mac_index(mac_address_t mac_addr, int peer_stats_flag)
             }
         }
     }
+    else if (peer_stats_flag == PEER_AVG_STATS)
+    {
+        for (i = 0; i < PEER_CLI_MAX; i++)
+        {
+            if (g_peer_avg_phyrate[i].flags & PEER_STATS_FLAG)
+            {
+                if ((g_peer_avg_phyrate[i].mac_addr[0] == (u8)mac_addr[0]) && (g_peer_avg_phyrate[i].mac_addr[1] == (u8)mac_addr[1]) &&
+                    (g_peer_avg_phyrate[i].mac_addr[2] == (u8)mac_addr[2]) && (g_peer_avg_phyrate[i].mac_addr[3] == (u8)mac_addr[3]) &&
+                    (g_peer_avg_phyrate[i].mac_addr[4] == (u8)mac_addr[4]) && (g_peer_avg_phyrate[i].mac_addr[5] == (u8)mac_addr[5]))
+                {
+                    index = i;
+                    break;
+                }
+            } else {
+                index = i;
+                break;
+            }
+        }
+    }
 
     return index;
 }
@@ -264,6 +296,47 @@ static void dp_peer_tx_rate_stats(uint8_t *peer_mac,
 }
 
 #endif
+
+static void dp_peer_avg_rate_stats(uint8_t *peer_mac,
+                    uint64_t peer_cookie,
+                    void *buffer,
+                    uint32_t buffer_len)
+{
+#ifdef DP_PEER_AVG_RATE_STATS_SUPPORTED
+    struct avg_phyrate *buf;
+    uint32_t *src;
+    uint32_t *dst;
+    int index;
+    int n;
+
+    if (WARN_ON(buffer_len < sizeof(struct wlan_avg_rate_stats)))
+        return;
+    if (WARN_ON(buffer_len > sizeof(struct wlan_avg_rate_stats)))
+        return;
+
+    index = get_cli_mac_index(peer_mac, PEER_AVG_STATS);
+    buf = &g_peer_avg_phyrate[index];
+    memcpy(buf->mac_addr, peer_mac, sizeof(buf->mac_addr));
+    buf->flags |= PEER_STATS_FLAG;
+
+    /* The entire buffer is ultimately a set of 32
+     * bit unsigned integers all around. That's
+     * why it is possible to accumulate all
+     * constituents by treating it as an array.
+     */
+    n = buffer_len / sizeof(*src);
+    src = buffer;
+    dst = (uint32_t *)&buf->stats;
+
+    for (; n; n--, src++, dst++)
+        *dst += *src;
+
+    LOG(TRACE,
+        "Accumulating avg rate stats for "MAC_ADDRESS_FORMAT,
+        MAC_ADDRESS_PRINT(peer_mac));
+#endif
+}
+
 static void dp_peer_stats_handler(uint32_t cache_type,
                  uint8_t *peer_mac,
                  uint64_t peer_cookie,
@@ -277,6 +350,10 @@ static void dp_peer_stats_handler(uint32_t cache_type,
         break;
     case DP_PEER_TX_RATE_STATS:
         dp_peer_tx_rate_stats(peer_mac, peer_cookie,
+                        buffer, buffer_len);
+        break;
+    case DP_PEER_AVG_RATE_STATS:
+        dp_peer_avg_rate_stats(peer_mac, peer_cookie,
                         buffer, buffer_len);
         break;
     }
@@ -337,6 +414,62 @@ void osync_peer_stats_event_callback(char *ifname,
 
 }
 
+static void
+ioctl80211_client_stats_avg_rx_calc(
+        radio_entry_t              *radio_cfg,
+        ioctl80211_client_record_t *data_new,
+        ioctl80211_client_record_t *data_old,
+        dpp_client_record_t        *client_record)
+{
+#ifdef DP_PEER_AVG_RATE_STATS_SUPPORTED
+    struct avg_phyrate *avg;
+    double mbps;
+    double num;
+    int index;
+
+    index = get_cli_mac_index(data_new->info.mac, PEER_AVG_STATS);
+    avg = &g_peer_avg_phyrate[index];
+    if (avg->flags & PEER_STATS_FLAG) {
+        if (avg->stats.rx[WLAN_RATE_SU].num_ppdu) {
+            mbps = avg->stats.rx[WLAN_RATE_SU].sum_mbps;
+            mbps /= avg->stats.rx[WLAN_RATE_SU].num_ppdu;
+
+            LOG(TRACE,
+                "Overriding rate_rx %lf with SU rate %lf for "MAC_ADDRESS_FORMAT,
+                client_record->stats.rate_rx,
+                mbps,
+                MAC_ADDRESS_PRINT(data_new->info.mac));
+
+            client_record->stats.rate_rx = mbps;
+        }
+
+        mbps = 0;
+        mbps += avg->stats.rx[WLAN_RATE_SU].sum_mbps;
+        mbps += avg->stats.rx[WLAN_RATE_MU_MIMO].sum_mbps;
+        mbps += avg->stats.rx[WLAN_RATE_MU_OFDMA].sum_mbps;
+        mbps += avg->stats.rx[WLAN_RATE_MU_OFDMA_MIMO].sum_mbps;
+
+        num = 0;
+        num += avg->stats.rx[WLAN_RATE_SU].num_ppdu;
+        num += avg->stats.rx[WLAN_RATE_MU_MIMO].num_ppdu;
+        num += avg->stats.rx[WLAN_RATE_MU_OFDMA].num_ppdu;
+        num += avg->stats.rx[WLAN_RATE_MU_OFDMA_MIMO].num_ppdu;
+
+        if (num != 0) {
+            mbps /= num;
+            client_record->stats.rate_rx_perceived = mbps;
+
+            LOG(TRACE,
+                "Calculated rate_rx_perceived %lf for "MAC_ADDRESS_FORMAT,
+                mbps,
+                MAC_ADDRESS_PRINT(data_new->info.mac));
+        }
+
+        memset(avg->stats.rx, 0, sizeof(avg->stats.rx));
+    }
+#endif
+}
+
 static
 ioctl_status_t ioctl80211_client_stats_rx_calculate(
         radio_entry_t              *radio_cfg,
@@ -368,6 +501,10 @@ ioctl_status_t ioctl80211_client_stats_rx_calculate(
     client_record->stats.retries_rx = g_peer_rx_phyrate[index].retries;
     g_peer_rx_phyrate[index].mpdus = 0;
     g_peer_rx_phyrate[index].retries = 0;
+
+    ioctl80211_client_stats_avg_rx_calc(radio_cfg, data_new, data_old,
+                                        client_record);
+
     return IOCTL_STATUS_OK;
 }
 
@@ -440,6 +577,79 @@ ioctl_status_t ioctl80211_clients_stats_rx_fetch(
     return IOCTL_STATUS_OK;
 }
 
+static void
+ioctl80211_client_stats_avg_tx_calc(
+        radio_entry_t              *radio_cfg,
+        ioctl80211_client_record_t *data_new,
+        ioctl80211_client_record_t *data_old,
+        dpp_client_record_t        *client_record)
+{
+#ifdef DP_PEER_AVG_RATE_STATS_SUPPORTED
+    struct avg_phyrate             *avg;
+    int32_t                         snr;
+    double                          mbps;
+    double                          num;
+    int                             index;
+
+    index = get_cli_mac_index(data_new->info.mac, PEER_AVG_STATS);
+    avg = &g_peer_avg_phyrate[index];
+    if (avg->flags & PEER_STATS_FLAG) {
+        if (avg->stats.tx[WLAN_RATE_SU].num_ppdu) {
+            mbps = avg->stats.tx[WLAN_RATE_SU].sum_mbps;
+            mbps /= avg->stats.tx[WLAN_RATE_SU].num_ppdu;
+
+            LOG(TRACE,
+                "Overriding rate_tx %lf with SU rate %lf for "MAC_ADDRESS_FORMAT,
+                client_record->stats.rate_tx,
+                mbps,
+                MAC_ADDRESS_PRINT(data_new->info.mac));
+
+            client_record->stats.rate_tx = mbps;
+        }
+
+        mbps = 0;
+        mbps += avg->stats.tx[WLAN_RATE_SU].sum_mbps;
+        mbps += avg->stats.tx[WLAN_RATE_MU_MIMO].sum_mbps;
+        mbps += avg->stats.tx[WLAN_RATE_MU_OFDMA].sum_mbps;
+        mbps += avg->stats.tx[WLAN_RATE_MU_OFDMA_MIMO].sum_mbps;
+
+        num = 0;
+        num += avg->stats.tx[WLAN_RATE_SU].num_ppdu;
+        num += avg->stats.tx[WLAN_RATE_MU_MIMO].num_ppdu;
+        num += avg->stats.tx[WLAN_RATE_MU_OFDMA].num_ppdu;
+        num += avg->stats.tx[WLAN_RATE_MU_OFDMA_MIMO].num_ppdu;
+
+        if (num != 0) {
+            mbps /= num;
+            client_record->stats.rate_tx_perceived = mbps;
+
+            LOG(TRACE,
+                "Calculated rate_tx_perceived %lf for "MAC_ADDRESS_FORMAT,
+                mbps,
+                MAC_ADDRESS_PRINT(data_new->info.mac));
+        }
+
+        /* Apparently the SU ack rssi is the most reliable
+         * one. Others are all over the place.
+         */
+        if (avg->stats.tx[WLAN_RATE_SU].num_snr) {
+            snr = avg->stats.tx[WLAN_RATE_SU].sum_snr;
+            snr /= avg->stats.tx[WLAN_RATE_SU].num_snr;
+
+            LOG(TRACE,
+                "Overriding rssi %d with SU rssi %d for "MAC_ADDRESS_FORMAT,
+                client_record->stats.rssi,
+                snr,
+                MAC_ADDRESS_PRINT(data_new->info.mac));
+
+            client_record->stats.rssi = snr;
+        }
+
+        memset(avg->stats.tx, 0, sizeof(avg->stats.tx));
+    }
+#endif
+}
+
 static
 ioctl_status_t ioctl80211_client_stats_tx_calculate(
         radio_entry_t              *radio_cfg,
@@ -469,6 +679,10 @@ ioctl_status_t ioctl80211_client_stats_tx_calculate(
     client_record->stats.retries_tx = (g_peer_tx_phyrate[index].attempts - g_peer_tx_phyrate[index].success);
     g_peer_tx_phyrate[index].success = 0;
     g_peer_tx_phyrate[index].attempts = 0;
+
+    ioctl80211_client_stats_avg_tx_calc(radio_cfg, data_new, data_old,
+                                        client_record);
+
     return IOCTL_STATUS_OK;
 }
 

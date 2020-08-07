@@ -76,6 +76,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "util.h"
+#include "os_nif.h"
 
 /* See target_radio_config_init2() for details */
 #include "ovsdb.h"
@@ -161,7 +162,6 @@ static int g_num_vconfs;
 #define F(fmt, ...) ({ char *__p = alloca(4096); memset(__p, 0, 4096); snprintf(__p, 4095, fmt, ##__VA_ARGS__); __p; })
 #define E(prog, ...) forkexec(prog, (const char *[]){ prog, __VA_ARGS__, NULL }, NULL, NULL, 0)
 #define R(...) file_geta(__VA_ARGS__)
-#define timeout_arg "timeout", "-s", "KILL", "-t", "3"
 #define runcmd(...) readcmd(0, 0, 0, ## __VA_ARGS__)
 #define WARN(cond, ...) (cond && (LOGW(__VA_ARGS__), 1))
 #define util_exec_read(xfrm, buf, len, prog, ...) forkexec(prog, (const char *[]){ prog, __VA_ARGS__,  NULL }, xfrm, buf, len)
@@ -3228,6 +3228,7 @@ bool target_radio_state_get(char *phy, struct schema_Wifi_Radio_State *rstate)
     int v;
     char htmode[32];
     char country[32];
+    bool isup;
 
     memset(htmode, '\0', sizeof(htmode));
     memset(rstate, 0, sizeof(*rstate));
@@ -3253,11 +3254,11 @@ bool target_radio_state_get(char *phy, struct schema_Wifi_Radio_State *rstate)
         LOGD("%s: no vifs, some rstate bits will be missing", phy);
     }
 
+    if (os_nif_is_up(phy, &isup))
+        SCHEMA_SET_INT(rstate->enabled, isup);
+
     if ((rstate->mac_exists = (0 == util_net_get_macaddr_str(phy, buf, sizeof(buf)))))
         STRSCPY(rstate->mac, buf);
-
-    if ((rstate->enabled_exists = util_net_ifname_exists(phy, &v)))
-        rstate->enabled = v;
 
     if ((rstate->channel_exists = util_iwconfig_get_chan(phy, NULL, &v)))
         rstate->channel = v;
@@ -3471,6 +3472,9 @@ target_radio_config_set2(const struct schema_Wifi_Radio_Config *rconf,
 {
     const char *phy = rconf->if_name;
     const char *vif;
+
+    if (changed->enabled)
+        WARN_ON(!os_nif_up((char *)phy, rconf->enabled));
 
     if ((changed->channel || changed->ht_mode)) {
         if (rconf->channel_exists && rconf->channel > 0 && rconf->ht_mode_exists) {

@@ -40,6 +40,7 @@ typedef struct
     uint64_t                        chan_self;
     uint64_t                        chan_rx;
     uint64_t                        chan_tx;
+    int16_t                         chan_noise;
 } ioctl80211_survey_bss_t;
 
 // off-channel survey
@@ -51,6 +52,7 @@ typedef struct
     uint32_t                        chan_self;
     uint32_t                        chan_rx;
     uint32_t                        chan_tx;
+    int16_t                         chan_noise;
 } ioctl80211_survey_obss_t;
 
 typedef struct

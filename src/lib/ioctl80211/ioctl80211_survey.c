@@ -50,10 +50,147 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #define MODULE_ID LOG_MODULE_ID_IOCTL
 
-
 /******************************************************************************
  *  PROTECTED definitions
  *****************************************************************************/
+
+static int
+ioctl80211_survey_handle_iwreq(
+        const radio_entry_t    *radio_cfg,
+        radio_scan_type_t       scan_type,
+        enum ps_uapi_ioctl_cmd  cmd,
+        uint32_t                chan,
+        struct ps_uapi_ioctl   *data)
+{
+    const radio_type_t radio_type = radio_cfg->type;
+    struct iwreq       request;
+    int                rc;
+
+    memset(data, 0, sizeof(*data));
+    memset(&request, 0, sizeof(request));
+    request.u.data.pointer = data;
+    request.u.data.length = PS_UAPI_IOCTL_SIZE;
+
+    data->cmd = cmd;
+
+    rc = 
+        ioctl80211_request_send(
+                ioctl80211_fd_get(),
+                radio_cfg->phy_name,
+                PS_UAPI_IOCTL_SET,
+                &request);
+    if (rc < 0) {
+        const int log_lvl = (errno == EOPNOTSUPP ? LOG_SEVERITY_WARN : LOG_SEVERITY_ERR);
+        mlog(log_lvl, MODULE_ID, "Processing %s %s PS UAPI cmd 0x%x for chan %u "
+             " (Failed to set params '%s')",
+             radio_get_name_from_type(radio_type),
+             radio_get_scan_name_from_type(scan_type),
+             cmd,
+             chan,
+             strerror(errno));
+        return errno == EOPNOTSUPP ? IOCTL_STATUS_NOSUPPORT : IOCTL_STATUS_ERROR;
+    }
+
+    rc = 
+        ioctl80211_request_send(
+                ioctl80211_fd_get(),
+                radio_cfg->phy_name,
+                PS_UAPI_IOCTL_GET,
+                &request);
+    if (rc < 0) {
+        const int log_lvl = (errno == EOPNOTSUPP ? LOG_SEVERITY_WARN : LOG_SEVERITY_ERR);
+        mlog(log_lvl, MODULE_ID, "Processing %s %s PS UAPI cmd 0x%x for chan %u "
+             " (Failed to get params '%s')",
+             radio_get_name_from_type(radio_type),
+             radio_get_scan_name_from_type(scan_type),
+             cmd,
+             chan,
+             strerror(errno));
+        return errno == EOPNOTSUPP ? IOCTL_STATUS_NOSUPPORT : IOCTL_STATUS_ERROR;
+    }
+
+    return IOCTL_STATUS_OK;
+}
+
+static int
+ioctl80211_survey_retrieve_survey(
+        const radio_entry_t  *radio_cfg,
+        radio_scan_type_t     scan_type,
+        uint32_t              chan,
+        struct ps_uapi_ioctl *data)
+{
+    const enum ps_uapi_ioctl_cmd cmd =
+        (RADIO_SCAN_TYPE_ONCHAN == scan_type) ?
+        PS_UAPI_IOCTL_CMD_SURVEY_BSS :
+        PS_UAPI_IOCTL_CMD_SURVEY_CHAN;
+
+    return ioctl80211_survey_handle_iwreq(radio_cfg, scan_type, cmd, chan, data);
+}
+
+static int
+ioctl80211_survey_retrieve_survey_ext(
+        const radio_entry_t  *radio_cfg,
+        radio_scan_type_t     scan_type,
+        uint32_t              chan,
+        struct ps_uapi_ioctl *data)
+{
+#if PS_UAPI_VERSION >= 2
+    const enum ps_uapi_ioctl_cmd cmd =
+        (RADIO_SCAN_TYPE_ONCHAN == scan_type) ?
+        PS_UAPI_IOCTL_CMD_SURVEY_EXT_BSS :
+        PS_UAPI_IOCTL_CMD_SURVEY_EXT_CHAN;
+
+    return ioctl80211_survey_handle_iwreq(radio_cfg, scan_type, cmd, chan, data);
+#else
+    memset(data, 0, sizeof(*data));
+    return true;
+#endif
+}
+
+static void
+ioctl80211_survey_process_onchan_survey_ext(
+        const radio_entry_t        *radio_cfg,
+        const struct ps_uapi_ioctl *data,
+        radio_scan_type_t           scan_type,
+        ioctl80211_survey_record_t *survey_record)
+{
+#if PS_UAPI_VERSION >= 2
+    const radio_type_t radio_type = radio_cfg->type;
+
+    survey_record->stats.survey_bss.chan_noise = data->u.survey_ext_bss.get.nf;
+
+    LOGT("Fetched %s %s %u survey_ext {nf=%"PRIi16"}",
+         radio_get_name_from_type(radio_type),
+         radio_get_scan_name_from_type(scan_type),
+         survey_record->info.chan,
+         survey_record->stats.survey_bss.chan_noise);
+#else
+    survey_record->stats.survey_bss.chan_noise = 0;
+#endif
+}
+
+static void
+ioctl80211_survey_process_offchan_survey_ext(
+        const radio_entry_t        *radio_cfg,
+        const struct ps_uapi_ioctl *data,
+        radio_scan_type_t           scan_type,
+        uint32_t                    stats_index,
+        ioctl80211_survey_record_t *survey_record)
+{
+#if PS_UAPI_VERSION >= 2
+    const radio_type_t radio_type = radio_cfg->type;
+
+    survey_record->stats.survey_obss.chan_noise = data->u.survey_ext_chan.get.channels[stats_index].nf;
+
+    LOGT("Fetched %s %s %u survey_ext {nf=%"PRIi16"}",
+         radio_get_name_from_type(radio_type),
+         radio_get_scan_name_from_type(scan_type),
+         survey_record->info.chan,
+         survey_record->stats.survey_obss.chan_noise);
+#else
+    survey_record->stats.survey_obss.chan_noise = 0;
+#endif
+}
 
 /******************************************************************************
  *  PUBLIC definitions
@@ -66,52 +203,25 @@ ioctl_status_t ioctl80211_survey_results_get(
         radio_scan_type_t           scan_type,
         ds_dlist_t                 *survey_list)
 {
-    int32_t                         rc;
-    struct iwreq                    request;
+    int                             rc;
+    struct ps_uapi_ioctl            data_ext;
     struct ps_uapi_ioctl            data;
     radio_type_t                    radio_type = radio_cfg->type;
     ioctl80211_survey_record_t     *survey_record;
 
-    memset (&data, 0, sizeof(data));
-    memset (&request, 0, sizeof(request));
-    request.u.data.pointer = &data;
-    request.u.data.length = PS_UAPI_IOCTL_SIZE;
-
-    data.cmd = 
-        (RADIO_SCAN_TYPE_ONCHAN == scan_type) ?
-        PS_UAPI_IOCTL_CMD_SURVEY_BSS :
-        PS_UAPI_IOCTL_CMD_SURVEY_CHAN;
-
-    rc = 
-        ioctl80211_request_send(
-                ioctl80211_fd_get(),
-                radio_cfg->phy_name,
-                PS_UAPI_IOCTL_SET,
-                &request);
-    if (0 > rc) {
-        LOGE("Processing %s %s survey for chan %u "
-             " (Failed to set params '%s')",
-             radio_get_name_from_type(radio_type),
-             radio_get_scan_name_from_type(scan_type),
-             chan_list[0],
-             strerror(errno));
+    rc = ioctl80211_survey_retrieve_survey(radio_cfg, scan_type, chan_list[0], &data);
+    if (rc != IOCTL_STATUS_OK)
         return IOCTL_STATUS_ERROR;
-    }
 
-    rc = 
-        ioctl80211_request_send(
-                ioctl80211_fd_get(),
-                radio_cfg->phy_name,
-                PS_UAPI_IOCTL_GET,
-                &request);
-    if (0 > rc) {
-        LOGE("Processing %s %s survey for chan %u "
-             " (Failed to get params '%s')",
-             radio_get_name_from_type(radio_type),
-             radio_get_scan_name_from_type(scan_type),
-             chan_list[0],
-             strerror(errno));
-        return IOCTL_STATUS_ERROR;
+    rc = ioctl80211_survey_retrieve_survey_ext(radio_cfg, scan_type, chan_list[0], &data_ext);
+    if (rc != IOCTL_STATUS_OK) {
+        if (rc == IOCTL_STATUS_NOSUPPORT) {
+            /* Driver UAPI doesn't provide surveu_ext, ignore results */
+            memset(&data_ext, 0, sizeof(data_ext));
+        }
+        else {
+            return IOCTL_STATUS_ERROR;
+        }
     }
 
     uint32_t    chan_index = 0;
@@ -148,6 +258,8 @@ ioctl_status_t ioctl80211_survey_results_get(
                  survey_record->stats.survey_bss.chan_self,
                  survey_record->stats.survey_bss.chan_rx,
                  survey_record->stats.survey_bss.chan_busy_ext);
+
+            ioctl80211_survey_process_onchan_survey_ext(radio_cfg, &data_ext, scan_type, survey_record);
         }
         else {
             uint32_t    stats_chan = 0;
@@ -189,6 +301,9 @@ ioctl_status_t ioctl80211_survey_results_get(
                      survey_record->stats.survey_obss.chan_self,
                      survey_record->stats.survey_obss.chan_rx,
                      survey_record->stats.survey_obss.chan_busy_ext);
+
+                ioctl80211_survey_process_offchan_survey_ext(radio_cfg, &data_ext, scan_type,
+                    stats_index, survey_record);
                 // channel found, exit loop
                 break;
             }
@@ -250,9 +365,10 @@ ioctl_status_t ioctl80211_survey_results_convert(
         data.chan_self = STATS_DELTA(
                 data_new->stats.survey_bss.chan_self,
                 data_old->stats.survey_bss.chan_self);
+        data.chan_noise = data_new->stats.survey_bss.chan_noise;
 
         LOGT("Processed %s %s %u survey delta "
-             "{active=%llu busy=%llu tx=%llu self=%llu rx=%llu ext=%llu}",
+             "{active=%llu busy=%llu tx=%llu self=%llu rx=%llu ext=%llu nf=%d}",
              radio_get_name_from_type(radio_type),
              radio_get_scan_name_from_type(scan_type),
              data_new->info.chan,
@@ -261,7 +377,8 @@ ioctl_status_t ioctl80211_survey_results_convert(
              data.chan_tx,
              data.chan_self,
              data.chan_rx,
-             data.chan_busy_ext);
+             data.chan_busy_ext,
+             data.chan_noise);
 
         /* Repeat the measurement */
         if (!data.chan_active) {
@@ -279,6 +396,7 @@ ioctl_status_t ioctl80211_survey_results_convert(
         survey_record->chan_busy_ext =
             STATS_PERCENT(data.chan_busy_ext, data.chan_active);
         survey_record->duration_ms   = data.chan_active / 1000;
+        survey_record->chan_noise   = data.chan_noise;
     } else { /* OFF and FULL */
         ioctl80211_survey_obss_t     data;
 
@@ -296,9 +414,10 @@ ioctl_status_t ioctl80211_survey_results_convert(
                 data_old->stats.survey_obss.chan_busy);
         data.chan_self = 0;
         data.chan_busy_ext = 0;
+        data.chan_noise = data_new->stats.survey_obss.chan_noise;
 
         LOGT("Processed %s %s %u survey delta "
-             "{active=%u busy=%u tx=%u self=%u rx=%u ext=%u}",
+             "{active=%u busy=%u tx=%u self=%u rx=%u ext=%u nf=%d}",
              radio_get_name_from_type(radio_type),
              radio_get_scan_name_from_type(scan_type),
              data_new->info.chan,
@@ -307,7 +426,8 @@ ioctl_status_t ioctl80211_survey_results_convert(
              data.chan_tx,
              data.chan_self,
              data.chan_rx,
-             data.chan_busy_ext);
+             data.chan_busy_ext,
+             data.chan_noise);
 
         /* Repeat the measurement */
         if (!data.chan_active) {
@@ -321,6 +441,7 @@ ioctl_status_t ioctl80211_survey_results_convert(
         survey_record->chan_rx       =
             STATS_PERCENT(data.chan_rx, data.chan_active);
         survey_record->duration_ms   = data.chan_active / 1000;
+        survey_record->chan_noise   = data.chan_noise;
     }
 
     return IOCTL_STATUS_OK;

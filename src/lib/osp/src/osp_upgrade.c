@@ -31,8 +31,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <string.h>
 #include <libgen.h>
 #include <ev.h>
-#include "target.h"
-#include "osp.h"
+
+#include "log.h"
+#include "util.h"
+#include "osp_upg.h"
 
 #define TEMP_PATH "/tmp/"
 #define IMG_MAX_SIZE 40  // MB

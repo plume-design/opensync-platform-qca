@@ -161,7 +161,6 @@ static int g_num_vconfs;
 #define F(fmt, ...) ({ char *__p = alloca(4096); memset(__p, 0, 4096); snprintf(__p, 4095, fmt, ##__VA_ARGS__); __p; })
 #define E(prog, ...) forkexec(prog, (const char *[]){ prog, __VA_ARGS__, NULL }, NULL, NULL, 0)
 #define R(...) file_geta(__VA_ARGS__)
-#define timeout_arg "timeout", "-s", "KILL", "-t", "3"
 #define runcmd(...) readcmd(0, 0, 0, ## __VA_ARGS__)
 #define WARN(cond, ...) (cond && (LOGW(__VA_ARGS__), 1))
 #define util_exec_read(xfrm, buf, len, prog, ...) forkexec(prog, (const char *[]){ prog, __VA_ARGS__,  NULL }, xfrm, buf, len)

@@ -106,9 +106,9 @@ static ioctl_status_t ioctl80211_get_ifname(
  *  PUBLIC definitions
  *****************************************************************************/
 
-ioctl_status_t ioctl80211_init(struct ev_loop *loop)
+ioctl_status_t ioctl80211_init(struct ev_loop *loop, bool init_callback)
 {
-	return osync_nl80211_init(loop);
+	return osync_nl80211_init(loop, init_callback);
 }
 
 ioctl_status_t ioctl80211_close(struct ev_loop *loop)

@@ -603,38 +603,28 @@ osync_nl80211_bsal_client_measure(const char *ifname, const uint8_t *mac_addr, i
 #include "util.h"
 
 static inline int
-osync_nl80211_init(struct ev_loop *loop)
+osync_nl80211_init(struct ev_loop *loop, bool init_callback)
 {
 #ifdef OPENSYNC_NL_SUPPORT
-    int err = 0;
-    pid_t pid;
-    char buf[256];
-    char buffer[64];
-
-    pid = getpid();
-
     memset(&sock_ctx, 0, sizeof(struct socket_context));
-    snprintf(buf, sizeof(buf), "ps | grep %d", pid);
-    err = readcmd(buffer, sizeof(buffer), 0, "%s", buf);
-    if (err) {
-        LOGI("Unable to get process name using pid %d\n", pid);
-    }
-    if (strstr(buffer, "sm")) {
+    sock_ctx.cfg80211 = 1;
+
+    if (init_callback) {
         sock_ctx.cfg80211_ctxt.event_callback = osync_peer_stats_event_callback;
     }
 
-    sock_ctx.cfg80211 = 1;
-    err = init_socket_context(&sock_ctx, WIFI_NL80211_CMD_SOCK_ID, WIFI_NL80211_EVENT_SOCK_ID);
-    if (err) {
+    if (init_socket_context(&sock_ctx, WIFI_NL80211_CMD_SOCK_ID, WIFI_NL80211_EVENT_SOCK_ID)) {
         return -EIO;
     }
-    if (strstr(buffer, "sm")) {
+
+    if (init_callback) {
         if (wifi_nl80211_start_event_thread(&sock_ctx.cfg80211_ctxt)) {
             wifi_destroy_nl80211(&sock_ctx.cfg80211_ctxt);
             return -EIO;
         }
     }
-    return 0;
+
+    return IOCTL_STATUS_OK;
 #else
     g_ioctl80211_sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
     if(0 >= g_ioctl80211_sock_fd)

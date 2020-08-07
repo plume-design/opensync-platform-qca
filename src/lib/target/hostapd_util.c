@@ -28,9 +28,16 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "os.h"
 #include "log.h"
+#include "kconfig.h"
 #include "hostapd_util.h"
 
 #define MODULE_ID LOG_MODULE_ID_TARGET
+
+#if CONFIG_HOSTAP_TIMEOUT_T_SWITCH
+#define CMD_TIMEOUT "timeout -t"
+#else
+#define CMD_TIMEOUT "timeout"
+#endif
 
 bool hostapd_client_disconnect(const char *path, const char *interface, const
                                const char *disc_type, const char *mac_str, uint8_t reason)
@@ -39,8 +46,8 @@ bool hostapd_client_disconnect(const char *path, const char *interface, const
     bool ret = false;
 
     snprintf(hostapd_cmd, sizeof(hostapd_cmd),
-             "timeout -t 5 hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s %s %s reason=%hhu",
-             path, interface, interface, disc_type, mac_str, reason);
+             "%s 5 hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s %s %s reason=%hhu",
+             CMD_TIMEOUT, path, interface, interface, disc_type, mac_str, reason);
 
     ret = !cmd_log(hostapd_cmd);
     if (!ret) {
@@ -56,8 +63,8 @@ bool hostapd_btm_request(const char *path, const char *interface, const char *bt
     bool    ret = false;
 
     snprintf(hostapd_cmd, sizeof(hostapd_cmd),
-            "timeout -t 5 hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s bss_tm_req %s",
-            path, interface, interface, btm_req_cmd);
+            "%s 5 hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s bss_tm_req %s",
+            CMD_TIMEOUT, path, interface, interface, btm_req_cmd);
 
     ret = !cmd_log(hostapd_cmd);
     if (!ret) {
@@ -74,9 +81,9 @@ bool hostapd_rrm_set_neighbor(const char *path, const char *interface, const cha
     bool    ret = false;
 
     snprintf(hostapd_cmd, sizeof(hostapd_cmd),
-            "timeout -t 5 hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s "
+            "%s 5 hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s "
             "set_neighbor %s nr=%s",
-            path, interface, interface, bssid, nr);
+            CMD_TIMEOUT, path, interface, interface, bssid, nr);
 
     ret = !cmd_log(hostapd_cmd);
     if (!ret) {
@@ -92,9 +99,9 @@ bool hostapd_rrm_remove_neighbor(const char *path, const char *interface, const 
     bool    ret = false;
 
     snprintf(hostapd_cmd, sizeof(hostapd_cmd),
-            "timeout -t 5 hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s "
+            "%s 5 hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s "
             "remove_neighbor %s ",
-            path, interface, interface, bssid);
+            CMD_TIMEOUT, path, interface, interface, bssid);
 
     ret = !cmd_log(hostapd_cmd);
     if (!ret) {

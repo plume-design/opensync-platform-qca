@@ -52,6 +52,7 @@ typedef uint64_t u64;
 typedef uint32_t u32;
 typedef uint16_t u16;
 typedef uint8_t  u8;
+typedef int16_t  s16;
 
 #ifdef CONFIG_PLATFORM_QCA_QSDK110
 #include "ps_uapi_11ax.h"
@@ -121,7 +122,7 @@ typedef enum
     IOCTL_STATUS_NOSUPPORT    = 1
 } ioctl_status_t;
 
-ioctl_status_t ioctl80211_init(struct ev_loop *loop);
+ioctl_status_t ioctl80211_init(struct ev_loop *loop, bool init_callback);
 ioctl_status_t ioctl80211_close(struct ev_loop *loop);
 int            ioctl80211_fd_get(void);
 
