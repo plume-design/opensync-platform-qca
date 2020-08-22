@@ -381,7 +381,15 @@ wiphy_info_init_ifname(const char *ifname)
     if (WARN_ON(!info->band))
         return -1;
 
-    info->mode = "11ax";
+    /* Hawkeye for 11ax */
+    if (!strcmp(info->chip, "qca8074")) {
+        info->mode = "11ax";
+    } else {
+        if (strstr(info->band, "5G") == info->band)
+            info->mode = "11ac";
+        else
+            info->mode = "11n";
+    }
 
     if (!strcmp(info->band, "2.4G"))
         STRSCPY(g_wiphy_2ghz_ifname, ifname);
