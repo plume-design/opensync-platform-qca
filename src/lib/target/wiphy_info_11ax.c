@@ -75,6 +75,7 @@ static const struct {
     { 0, 0, "qca,wifi-ar956x", "qca9563", "Dragonfly" },
     { 0, 0, "qcom,cnss-qca8074", "qca8074", "Hawkeye" },
     { 0, 0, "qcom,cnss-qca8074v2", "qca8074", "Hawkeye" },
+    { 0, 0, "qcom,cnss-qca6018", "qca6018", "Cypress" },
 };
 
 /* runtime data */
