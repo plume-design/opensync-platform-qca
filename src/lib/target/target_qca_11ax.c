@@ -78,6 +78,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "util.h"
+#include "os_nif.h"
 
 /* See target_radio_config_init2() for details */
 #include "ovsdb.h"
@@ -94,6 +95,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <opensync-hapd.h>
 
 #define MODULE_ID LOG_MODULE_ID_TARGET
+#define RTT_MODULE_ID 22
 
 /******************************************************************************
  * Driver-dependant feature compatibility
@@ -3212,6 +3214,7 @@ bool target_radio_state_get(char *phy, struct schema_Wifi_Radio_State *rstate)
     int v;
     char htmode[32];
     char country[32];
+    bool isup;
 
     memset(htmode, '\0', sizeof(htmode));
     memset(rstate, 0, sizeof(*rstate));
@@ -3237,11 +3240,11 @@ bool target_radio_state_get(char *phy, struct schema_Wifi_Radio_State *rstate)
         LOGD("%s: no vifs, some rstate bits will be missing", phy);
     }
 
+    if (os_nif_is_up(phy, &isup))
+        SCHEMA_SET_INT(rstate->enabled, isup);
+
     if ((rstate->mac_exists = (0 == util_net_get_macaddr_str(phy, buf, sizeof(buf)))))
         STRSCPY(rstate->mac, buf);
-
-    if ((rstate->enabled_exists = util_net_ifname_exists(phy, &v)))
-        rstate->enabled = v;
 
     if ((rstate->channel_exists = util_iwconfig_get_chan(phy, NULL, &v)))
         rstate->channel = v;
@@ -3491,6 +3494,9 @@ target_radio_config_set2(const struct schema_Wifi_Radio_Config *rconf,
     const char *phy = rconf->if_name;
     const char *vif;
 
+    if (changed->enabled)
+        WARN_ON(!os_nif_up((char *)phy, rconf->enabled));
+
     if ((changed->channel || changed->ht_mode)) {
         if (rconf->channel_exists && rconf->channel > 0 && rconf->ht_mode_exists) {
             if ((vif = util_iwconfig_any_phy_vif_type(phy, "ap", A(32)))) {
@@ -3565,6 +3571,9 @@ target_radio_config_set2(const struct schema_Wifi_Radio_Config *rconf,
             util_kv_set(F("%s.zero_wait_dfs", phy), NULL);
         }
     }
+
+    if (util_qca_set_int(phy, "dl_modoff", RTT_MODULE_ID))
+        LOGW("Failed to disable debug logs for module\n");
 
     util_thermal_sys_recalc_tx_chainmask();
     util_cb_phy_state_update(phy);

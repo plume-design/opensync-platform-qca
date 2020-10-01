@@ -936,7 +936,7 @@ osync_nl80211_radio_type_get(char	*ifName,
         c = atoi(chan);
         if(c < 100)
             has_lower = true;
-        if(c > 100)
+        if(c >= 100)
             has_upper = true;
 
         if (c >= 1 && c <= 20)

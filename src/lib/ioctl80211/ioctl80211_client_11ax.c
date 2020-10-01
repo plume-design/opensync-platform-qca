@@ -1076,22 +1076,18 @@ ioctl_status_t ioctl80211_clients_stats_fetch(
             "(Failed to retrieve them from driver '%s')",
             radio_get_name_from_type(radio_type),
             strerror(errno));
-        return IOCTL_STATUS_OK;
+        return IOCTL_STATUS_ERROR;
     }
 
     stats_entry->frames_tx = 
-        (RADIO_TYPE_5G == radio_type) ? 
-        ieee80211_client_stats.is_stats.ns_tx_data_success : 
-        ieee80211_client_stats.is_stats.ns_tx_data;
+        ieee80211_client_stats.is_stats.ns_tx_data_success;
     LOG(TRACE,
         "Parsed %s client tx_frames %u",
         radio_get_name_from_type(radio_type),
         stats_entry->frames_tx);
 
     stats_entry->bytes_tx = 
-        (RADIO_TYPE_5G == radio_type) ? 
-        ieee80211_client_stats.is_stats.ns_tx_bytes_success :
-        ieee80211_client_stats.is_stats.ns_tx_bytes;
+        ieee80211_client_stats.is_stats.ns_tx_bytes_success;
     LOG(TRACE,
         "Parsed %s client tx_bytes %"PRIu64"",
         radio_get_name_from_type(radio_type),
