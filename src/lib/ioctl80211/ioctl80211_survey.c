@@ -344,7 +344,7 @@ ioctl_status_t ioctl80211_survey_results_convert(
 
     /* Loop through all configured channels */
     if (scan_type == RADIO_SCAN_TYPE_ONCHAN) {
-        ioctl80211_survey_bss_t     data;
+        ioctl80211_survey_t     data;
 
 
         data.chan_active = STATS_DELTA(
@@ -398,7 +398,7 @@ ioctl_status_t ioctl80211_survey_results_convert(
         survey_record->duration_ms   = data.chan_active / 1000;
         survey_record->chan_noise   = data.chan_noise;
     } else { /* OFF and FULL */
-        ioctl80211_survey_obss_t     data;
+        ioctl80211_survey_t     data;
 
         data.chan_active = STATS_DELTA(
                 data_new->stats.survey_obss.chan_active,

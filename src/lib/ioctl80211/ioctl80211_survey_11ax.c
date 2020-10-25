@@ -308,7 +308,7 @@ ioctl_status_t ioctl80211_survey_results_get(
                 survey_record->stats.survey_obss.chan_busy_ext = 0;
 
                 LOGT("Fetched %s %s %u survey "
-                     "{active=%u busy=%u tx=%u self=%u rx=%u ext=%u}",
+                     "{active=%"PRIu64" busy=%"PRIu64" tx=%"PRIu64" self=%"PRIu64" rx=%"PRIu64" ext=%"PRIu64"}",
                      radio_get_name_from_type(radio_type),
                      radio_get_scan_name_from_type(scan_type),
                      survey_record->info.chan,
@@ -358,7 +358,7 @@ ioctl_status_t ioctl80211_survey_results_convert(
 
     /* Loop through all configured channels */
     if (scan_type == RADIO_SCAN_TYPE_ONCHAN) {
-        ioctl80211_survey_bss_t     data;
+        ioctl80211_survey_t     data;
 
 
         data.chan_active = STATS_DELTA(
@@ -409,7 +409,7 @@ ioctl_status_t ioctl80211_survey_results_convert(
             STATS_PERCENT(data.chan_busy_ext, data.chan_active);
         survey_record->duration_ms   = data.chan_active / 1000;
     } else { /* OFF and FULL */
-        ioctl80211_survey_obss_t     data;
+        ioctl80211_survey_t     data;
 
         data.chan_active = STATS_DELTA(
                 data_new->stats.survey_obss.chan_active,
@@ -427,7 +427,7 @@ ioctl_status_t ioctl80211_survey_results_convert(
         data.chan_busy_ext = 0;
 
         LOGT("Processed %s %s %u survey delta "
-             "{active=%u busy=%u tx=%u self=%u rx=%u ext=%u}",
+             "{active=%"PRIu64" busy=%"PRIu64" tx=%"PRIu64" self=%"PRIu64" rx=%"PRIu64" ext=%"PRIu64"}",
              radio_get_name_from_type(radio_type),
              radio_get_scan_name_from_type(scan_type),
              data_new->info.chan,
