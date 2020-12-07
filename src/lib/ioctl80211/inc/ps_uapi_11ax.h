@@ -160,6 +160,7 @@ struct ps_uapi_ioctl {
 					u32 tx;
 					u32 rx;
 					u32 busy;
+					s16 nf;
 				} __packed channels[PS_MAX_CHANS];
 			} __packed get;
 		} __packed survey_chan;
@@ -174,6 +175,7 @@ struct ps_uapi_ioctl {
 				u64 rx_bss;
 				u64 busy;
 				u64 busy_ext;
+				s16 nf;
 			} __packed get;
 		} __packed survey_bss;
 		struct {

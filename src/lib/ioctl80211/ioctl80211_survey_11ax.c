@@ -69,6 +69,10 @@ enum qca_wlan_generic_data {
         QCA_WLAN_VENDOR_ATTR_GENERIC_PARAM_LAST - 1
 };
 
+#ifndef IEEE80211_CHAN_NOISE_FLOOR_SUPPORTED
+#warning channel noise floor patch is not added
+#endif
+
 /******************************************************************************
  *  PROTECTED definitions
  *****************************************************************************/
@@ -111,14 +115,20 @@ void parse_channel_survey_stats_cb(struct cfg80211_data *arg)
     g_bss_data.u.survey_bss.get.rx_bss     = chan_stats->bss_rx_cnt;
     g_bss_data.u.survey_bss.get.rx         = chan_stats->rx_frm_cnt;
     g_bss_data.u.survey_bss.get.busy_ext   = chan_stats->ext_busy_cnt;
-    LOGD("Home channel survey stats msg_len: %zu, num_elements: %d\n", msg_len, num_elements);
+#ifdef IEEE80211_CHAN_NOISE_FLOOR_SUPPORTED
+    g_bss_data.u.survey_bss.get.nf         = chan_stats->noise_floor;
+#endif
+    LOGD("Home channel survey stats msg_len: %zu, num_elements: %d", msg_len, num_elements);
     LOGD("freq: %4d, rx_bss: %12"PRIu64", total: %12"PRIu64" tx: %12"PRIu64", "
-            "rx: %12"PRIu64", busy: %12"PRIu64", busy_ext: %12"PRIu64"",
-            chan_stats->freq, chan_stats->bss_rx_cnt, chan_stats->cycle_cnt,
-            chan_stats->tx_frm_cnt, chan_stats->rx_frm_cnt, chan_stats->clear_cnt,
-            chan_stats->ext_busy_cnt);
+         "rx: %12"PRIu64", busy: %12"PRIu64", busy_ext: %12"PRIu64"",
+         chan_stats->freq, chan_stats->bss_rx_cnt, chan_stats->cycle_cnt,
+         chan_stats->tx_frm_cnt, chan_stats->rx_frm_cnt, chan_stats->clear_cnt,
+         chan_stats->ext_busy_cnt);
+#ifdef IEEE80211_CHAN_NOISE_FLOOR_SUPPORTED
+    LOGD("noise_floor: %"PRIi16"", chan_stats->noise_floor);
+#endif
 
-    LOGD("Scan channel survey stats \n");
+    LOGD("Scan channel survey stats:");
     chan_stats++;
     memset(&g_chan_data, 0, sizeof(g_chan_data));
     for (index = 1, g_chan_idx = 0; index < num_elements; index++) {
@@ -128,11 +138,17 @@ void parse_channel_survey_stats_cb(struct cfg80211_data *arg)
             g_chan_data.u.survey_chan.get.channels[g_chan_idx].busy  = chan_stats->clear_cnt;
             g_chan_data.u.survey_chan.get.channels[g_chan_idx].tx    = chan_stats->tx_frm_cnt;
             g_chan_data.u.survey_chan.get.channels[g_chan_idx].rx    = chan_stats->rx_frm_cnt;
+#ifdef IEEE80211_CHAN_NOISE_FLOOR_SUPPORTED
+            g_chan_data.u.survey_chan.get.channels[g_chan_idx].nf    = chan_stats->noise_floor;
+#endif
             LOGD("freq: %4d, rx_bss: %12"PRIu64", total: %12"PRIu64", tx: %12"PRIu64", "
-                    "rx: %12"PRIu64", busy: %12"PRIu64", busy_ext: %12"PRIu64"",
-                    chan_stats->freq, chan_stats->bss_rx_cnt, chan_stats->cycle_cnt,
-                    chan_stats->tx_frm_cnt, chan_stats->rx_frm_cnt, chan_stats->clear_cnt,
-                    chan_stats->ext_busy_cnt);
+                 "rx: %12"PRIu64", busy: %12"PRIu64", busy_ext: %12"PRIu64"",
+                 chan_stats->freq, chan_stats->bss_rx_cnt, chan_stats->cycle_cnt,
+                 chan_stats->tx_frm_cnt, chan_stats->rx_frm_cnt, chan_stats->clear_cnt,
+                 chan_stats->ext_busy_cnt);
+#ifdef IEEE80211_CHAN_NOISE_FLOOR_SUPPORTED
+            LOGD("noise_floor: %"PRIi16"", chan_stats->noise_floor);
+#endif
             g_chan_idx++;
         }
         chan_stats++;
@@ -177,7 +193,7 @@ ioctl_status_t ioctl80211_survey_results_get(
                 QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION,
                 QCA_NL80211_VENDOR_SUBCMD_DBGREQ, radio_cfg->if_name, (char*)&arg, arg.length);
         if (rc < 0) {
-            LOGI("%s: failed to get channel survey stats\n", radio_cfg->if_name);
+            LOGE("%s: failed to get channel survey stats", radio_cfg->if_name);
             return IOCTL_STATUS_ERROR;
         }
     }
@@ -189,6 +205,7 @@ ioctl_status_t ioctl80211_survey_results_get(
         data.u.survey_bss.get.rx_bss    = g_bss_data.u.survey_bss.get.rx_bss;
         data.u.survey_bss.get.rx        = g_bss_data.u.survey_bss.get.rx;
         data.u.survey_bss.get.busy_ext  = g_bss_data.u.survey_bss.get.busy_ext;
+        data.u.survey_bss.get.nf        = g_bss_data.u.survey_bss.get.nf;
     } else {
         for (index = 0; index < g_chan_idx; index++) {
             data.u.survey_chan.get.channels[index].freq  = g_chan_data.u.survey_chan.get.channels[index].freq;
@@ -196,6 +213,7 @@ ioctl_status_t ioctl80211_survey_results_get(
             data.u.survey_chan.get.channels[index].busy  = g_chan_data.u.survey_chan.get.channels[index].busy;
             data.u.survey_chan.get.channels[index].tx    = g_chan_data.u.survey_chan.get.channels[index].tx;
             data.u.survey_chan.get.channels[index].rx    = g_chan_data.u.survey_chan.get.channels[index].rx;
+            data.u.survey_chan.get.channels[index].nf    = g_chan_data.u.survey_chan.get.channels[index].nf;
         }
     }
 #else
@@ -265,9 +283,11 @@ ioctl_status_t ioctl80211_survey_results_get(
             survey_record->stats.survey_bss.chan_self     = data.u.survey_bss.get.rx_bss;
             survey_record->stats.survey_bss.chan_rx       = data.u.survey_bss.get.rx;
             survey_record->stats.survey_bss.chan_busy_ext = data.u.survey_bss.get.busy_ext;
+            survey_record->stats.survey_bss.chan_noise    = data.u.survey_bss.get.nf;
 
             LOGT("Fetched %s %s %u survey "
-                 "{active=%"PRIu64" busy=%"PRIu64" tx=%"PRIu64" self=%"PRIu64" rx=%"PRIu64" ext=%"PRIu64"}",
+                 "{active=%"PRIu64" busy=%"PRIu64" tx=%"PRIu64" self=%"PRIu64""
+                 " rx=%"PRIu64" ext=%"PRIu64" nf=%"PRIi16"}",
                  radio_get_name_from_type(radio_type),
                  radio_get_scan_name_from_type(scan_type),
                  survey_record->info.chan,
@@ -276,7 +296,8 @@ ioctl_status_t ioctl80211_survey_results_get(
                  survey_record->stats.survey_bss.chan_tx,
                  survey_record->stats.survey_bss.chan_self,
                  survey_record->stats.survey_bss.chan_rx,
-                 survey_record->stats.survey_bss.chan_busy_ext);
+                 survey_record->stats.survey_bss.chan_busy_ext,
+                 survey_record->stats.survey_bss.chan_noise);
         }
         else {
             uint32_t    stats_chan = 0;
@@ -306,9 +327,10 @@ ioctl_status_t ioctl80211_survey_results_get(
                 survey_record->stats.survey_obss.chan_self    = 0,
                 survey_record->stats.survey_obss.chan_rx      = data.u.survey_chan.get.channels[stats_index].rx,
                 survey_record->stats.survey_obss.chan_busy_ext = 0;
+                survey_record->stats.survey_obss.chan_noise   = data.u.survey_chan.get.channels[stats_index].nf;
 
                 LOGT("Fetched %s %s %u survey "
-                     "{active=%u busy=%u tx=%u self=%u rx=%u ext=%u}",
+                     "{active=%u busy=%u tx=%u self=%u rx=%u ext=%u nf=%d}",
                      radio_get_name_from_type(radio_type),
                      radio_get_scan_name_from_type(scan_type),
                      survey_record->info.chan,
@@ -317,7 +339,8 @@ ioctl_status_t ioctl80211_survey_results_get(
                      survey_record->stats.survey_obss.chan_tx,
                      survey_record->stats.survey_obss.chan_self,
                      survey_record->stats.survey_obss.chan_rx,
-                     survey_record->stats.survey_obss.chan_busy_ext);
+                     survey_record->stats.survey_obss.chan_busy_ext,
+                     survey_record->stats.survey_obss.chan_noise);
                 // channel found, exit loop
                 break;
             }
@@ -360,7 +383,6 @@ ioctl_status_t ioctl80211_survey_results_convert(
     if (scan_type == RADIO_SCAN_TYPE_ONCHAN) {
         ioctl80211_survey_bss_t     data;
 
-
         data.chan_active = STATS_DELTA(
                 data_new->stats.survey_bss.chan_active,
                 data_old->stats.survey_bss.chan_active);
@@ -379,9 +401,11 @@ ioctl_status_t ioctl80211_survey_results_convert(
         data.chan_self = STATS_DELTA(
                 data_new->stats.survey_bss.chan_self,
                 data_old->stats.survey_bss.chan_self);
+        data.chan_noise = data_new->stats.survey_bss.chan_noise;
 
         LOGT("Processed %s %s %u survey delta "
-             "{active=%"PRIu64" busy=%"PRIu64" tx=%"PRIu64" self=%"PRIu64" rx=%"PRIu64" ext=%"PRIu64"}",
+             "{active=%"PRIu64" busy=%"PRIu64" tx=%"PRIu64" self=%"PRIu64""
+             " rx=%"PRIu64" ext=%"PRIu64" nf=%"PRIi16"}",
              radio_get_name_from_type(radio_type),
              radio_get_scan_name_from_type(scan_type),
              data_new->info.chan,
@@ -390,7 +414,8 @@ ioctl_status_t ioctl80211_survey_results_convert(
              data.chan_tx,
              data.chan_self,
              data.chan_rx,
-             data.chan_busy_ext);
+             data.chan_busy_ext,
+             data.chan_noise);
 
         /* Repeat the measurement */
         if (!data.chan_active) {
@@ -408,6 +433,7 @@ ioctl_status_t ioctl80211_survey_results_convert(
         survey_record->chan_busy_ext =
             STATS_PERCENT(data.chan_busy_ext, data.chan_active);
         survey_record->duration_ms   = data.chan_active / 1000;
+        survey_record->chan_noise    = data.chan_noise;
     } else { /* OFF and FULL */
         ioctl80211_survey_obss_t     data;
 
@@ -425,9 +451,10 @@ ioctl_status_t ioctl80211_survey_results_convert(
                 data_old->stats.survey_obss.chan_busy);
         data.chan_self = 0;
         data.chan_busy_ext = 0;
+        data.chan_noise = data_new->stats.survey_obss.chan_noise;
 
         LOGT("Processed %s %s %u survey delta "
-             "{active=%u busy=%u tx=%u self=%u rx=%u ext=%u}",
+             "{active=%u busy=%u tx=%u self=%u rx=%u ext=%u nf=%d}",
              radio_get_name_from_type(radio_type),
              radio_get_scan_name_from_type(scan_type),
              data_new->info.chan,
@@ -436,7 +463,8 @@ ioctl_status_t ioctl80211_survey_results_convert(
              data.chan_tx,
              data.chan_self,
              data.chan_rx,
-             data.chan_busy_ext);
+             data.chan_busy_ext,
+             data.chan_noise);
 
         /* Repeat the measurement */
         if (!data.chan_active) {
@@ -450,6 +478,7 @@ ioctl_status_t ioctl80211_survey_results_convert(
         survey_record->chan_rx       =
             STATS_PERCENT(data.chan_rx, data.chan_active);
         survey_record->duration_ms   = data.chan_active / 1000;
+        survey_record->chan_noise    = data.chan_noise;
     }
 
     return IOCTL_STATUS_OK;
