@@ -463,5 +463,5 @@ ioctl_status_t ioctl80211_survey_noise_floor_get(
     }
 
     *noise_floor = iwr.u.param.value;
-	return IOCTL_STATUS_OK;
+    return IOCTL_STATUS_OK;
 }
