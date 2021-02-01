@@ -1378,6 +1378,7 @@ qca_ctrl_discover(const char *bss)
     struct wpas *wpas = wpas_lookup(bss);
     const char *phy = strchomp(R(F("/sys/class/net/%s/parent", bss)), "\r\n ");
     char mode[32] = {};
+    const char *caps;
 
     if (util_wifi_is_ap_vlan(bss))
         return;
@@ -1403,7 +1404,14 @@ qca_ctrl_discover(const char *bss)
         hapd->wps_disable = qca_hapd_wps_disable;
         hapd->respect_multi_ap = 1;
         hapd->skip_probe_response = 1;
+        hapd->ieee80211n = 1;
+        hapd->ieee80211ac = 1;
         ctrl_enable(&hapd->ctrl);
+        caps = strchomp(R(F("/sys/class/net/%s/cfg80211_htcaps", bss)), "\r\n ");
+        if (caps != NULL) STRSCPY_WARN(hapd->htcaps, caps);
+        STRSCAT(hapd->htcaps, "[SHORT-GI]");
+        caps = strchomp(R(F("/sys/class/net/%s/cfg80211_vhtcaps", bss)), "\r\n ");
+        if (caps != NULL) STRSCPY_WARN(hapd->vhtcaps, caps);
         hapd = NULL;
     }
 

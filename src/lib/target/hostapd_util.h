@@ -38,4 +38,10 @@ bool hostapd_btm_request(const char *path, const char *interface, const char *bt
 bool hostapd_rrm_set_neighbor(const char *path, const char *interface, const char *bssid, const char *nr);
 bool hostapd_rrm_remove_neighbor(const char *path, const char *interface, const char *bssid);
 
+bool hostapd_dpp_stop(const char *path, const char *interface, const char *command, const char *conf_num, int timeout_seconds);
+bool hostapd_dpp_add(const char *path, const char *interface, const char *command, const char *value, const char *curve, int timeout_seconds);
+bool hostapd_dpp_auth_init(const char *path, const char *interface, const char *configurator_conf_role, const char *configurator_conf_ssid_hex, const char *configurator_conf_psk_hex, int bi_id, int timeout_seconds);
+bool hostapd_dpp_chirp_or_listen(const char *path, const char *interface, const char *command, int freq, int bi_id, int timeout_seconds);
+bool hostapd_dpp_set_configurator_params(const char *path, const char *interface, const char *configurator_conf_role, const char *configurator_conf_ssid_hex, const char *configurator_conf_psk_hex, int timeout_seconds);
+
 #endif /* HOSTAPD_UTIL_H_INCLUDED */

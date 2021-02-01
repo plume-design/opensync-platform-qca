@@ -60,6 +60,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "wiphy_info.h"
 #include "log.h"
 #include "ds_dlist.h"
+#include "kconfig.h"
 
 #include "wpa_ctrl.h"
 
@@ -781,8 +782,8 @@ util_iwconfig_freq_to_chan(int mhz)
         return 0;
 }
 
-static bool
-util_iwconfig_get_chan(const char *phy,
+static int
+util_iwconfig_get_freq(const char *phy,
                        const char *vif,
                        int *chan)
 {
@@ -791,7 +792,7 @@ util_iwconfig_get_chan(const char *phy,
     char *vifr;
     char *p;
     int mhz_last;
-    int mhz;
+    int mhz = 0;
     int err;
     int num;
 
@@ -801,7 +802,7 @@ util_iwconfig_get_chan(const char *phy,
         err = util_wifi_get_phy_vifs(phy, vifs, sizeof(vifs));
 
     if (err < 0)
-        return false;
+        return 0;
 
     num = 0;
     mhz_last = 0;
@@ -851,13 +852,27 @@ util_iwconfig_get_chan(const char *phy,
          * ovsdb rework anyway.
          */
         if (num > 0 && mhz != mhz_last)
-            return false;
+            return 0;
 
         num++;
         mhz_last = mhz;
     }
 
     if (num == 0)
+        return 0;
+
+    return mhz;
+}
+
+static bool
+util_iwconfig_get_chan(const char *phy,
+                       const char *vif,
+                       int *chan)
+{
+    int mhz;
+
+    mhz = util_iwconfig_get_freq(phy, vif, chan);
+    if (mhz == 0)
         return false;
 
     *chan = util_iwconfig_freq_to_chan(mhz);
@@ -1214,6 +1229,34 @@ qca_wpas_report(struct wpas *wpas)
 /* ctrl -> target */
 
 static void
+qca_hapd_dpp_chirp_received(const struct target_dpp_chirp_obj *chirp)
+{
+    if (WARN_ON(!rops.op_dpp_announcement)) return;
+    rops.op_dpp_announcement(chirp);
+}
+
+static void
+qca_hapd_dpp_conf_sent(const struct target_dpp_conf_enrollee *enrollee)
+{
+    if (WARN_ON(!rops.op_dpp_conf_enrollee)) return;
+    rops.op_dpp_conf_enrollee(enrollee);
+}
+
+static void
+qca_wpas_dpp_conf_received(const struct target_dpp_conf_network *conf)
+{
+    if (WARN_ON(!rops.op_dpp_conf_network)) return;
+    rops.op_dpp_conf_network(conf);
+}
+
+static void
+qca_hapd_dpp_conf_received(const struct target_dpp_conf_network *conf)
+{
+    if (WARN_ON(!rops.op_dpp_conf_network)) return;
+    rops.op_dpp_conf_network(conf);
+}
+
+static void
 qca_hapd_sta_connected(struct hapd *hapd, const char *mac, const char *keyid)
 {
     qca_hapd_sta_report(hapd, mac);
@@ -1322,6 +1365,9 @@ qca_ctrl_discover(const char *bss)
         hapd->ctrl.opened = qca_hapd_ctrl_opened;
         hapd->ctrl.closed = qca_hapd_ctrl_closed;
         hapd->ctrl.overrun = qca_hapd_ctrl_opened;
+        hapd->dpp_chirp_received = qca_hapd_dpp_chirp_received;
+        hapd->dpp_conf_sent = qca_hapd_dpp_conf_sent;
+        hapd->dpp_conf_received = qca_hapd_dpp_conf_received;
         hapd->sta_connected = qca_hapd_sta_connected;
         hapd->sta_disconnected = qca_hapd_sta_disconnected;
         hapd->ap_enabled = qca_hapd_ap_enabled;
@@ -1344,6 +1390,7 @@ qca_ctrl_discover(const char *bss)
         wpas->ctrl.overrun = qca_wpas_ctrl_opened;
         wpas->connected = qca_wpas_connected;
         wpas->disconnected = qca_wpas_disconnected;
+        wpas->dpp_conf_received = qca_wpas_dpp_conf_received;
         ctrl_enable(&wpas->ctrl);
         wpas = NULL;
     }
@@ -4146,6 +4193,209 @@ bool target_vif_state_get(char *vif, struct schema_Wifi_VIF_State *vstate)
     if (hapd) hapd_bss_get(hapd, vstate);
     if (wpas) wpas_bss_get(wpas, vstate);
 
+    return true;
+}
+
+/******************************************************************************
+ * DPP implementation
+ *****************************************************************************/
+
+static bool
+qca_dpp_flush_configuration(const char *ifname, int timeout_seconds)
+{
+    const char *all_confs = "*";
+
+    if (!hostapd_dpp_stop(HOSTAPD_CONTROL_PATH_DEFAULT, ifname,
+                "dpp_configurator_remove", all_confs, timeout_seconds))
+    {
+        LOGE("dpp %s: failed to remove dpp configurator", ifname);
+        return false;
+    }
+
+    if (!hostapd_dpp_stop(HOSTAPD_CONTROL_PATH_DEFAULT, ifname,
+                "dpp_bootstrap_remove", all_confs, timeout_seconds))
+    {
+        LOGE("dpp %s: failed to remove dpp bootstrapping info", ifname);
+        return false;
+    }
+
+    if (!hostapd_dpp_stop(HOSTAPD_CONTROL_PATH_DEFAULT, ifname,
+                "dpp_stop_listen", NULL, timeout_seconds))
+    {
+        LOGE("dpp %s: failed to stop dpp activity", ifname);
+        return false;
+    }
+
+    if (!hostapd_dpp_stop(HOSTAPD_CONTROL_PATH_DEFAULT, ifname,
+                "dpp_stop_chirp", NULL, timeout_seconds))
+    {
+        LOGE("dpp %s: failed to stop dpp chirping", ifname);
+        return false;
+    }
+
+    LOGI("dpp %s: stopped all dpp Activity", ifname);
+    return true;
+}
+
+bool target_dpp_supported(void)
+{
+    return kconfig_enabled(CONFIG_QCA_USE_DPP);
+}
+
+bool target_dpp_config_set(const struct schema_DPP_Config *config)
+{
+    int i;
+    const int default_timeout = 5;
+    const int num_all_phy = 3;
+    const char *all_phy[] = { "wifi0", "wifi1", "wifi2" };
+    char phy[32];
+    int *channel = 0;
+    int freq = 0;
+    int bi_id;
+
+    // Flush config on all interfaces
+    for (i = 0; i < num_all_phy; i++)
+    {
+        char vifs[512] = {0};
+        char *vifr = vifs;
+        char *vif = {0};
+
+        if (util_wifi_get_phy_vifs(all_phy[i], vifs, sizeof(vifs))) {
+            LOGE("dpp: %s: get vifs failed", all_phy[i]);
+            return false;
+        }
+
+        while ((vif = strsep(&vifr, " "))) {
+            if (strlen(vif)) {
+                if (!qca_dpp_flush_configuration(vif, default_timeout))
+                {
+                    LOGE("dpp: %s: failed to flush conifguration", vif);
+                    return false;
+                }
+            }
+        }
+    }
+
+    LOGI("dpp: flushed conifguration from all interfaces");
+
+    // if config is NULL, stop and return.
+    if (!config)
+    {
+        return true;
+    }
+
+    // Apply DPP Configuration to each interface.
+    if (config->configurator_conf_role_exists)
+    {
+        for (i = 0; i < config->ifnames_len; i++)
+        {
+            if (!hostapd_dpp_add(HOSTAPD_CONTROL_PATH_DEFAULT, config->ifnames[i], "dpp_configurator_add", config->configurator_key_hex,
+                        config->configurator_key_curve, config->timeout_seconds)) {
+
+                LOGE("dpp: %s: failed to add configurator", config->ifnames[i]);
+                return false;
+            }
+
+            // Only 1 configurator per interface
+            if (config->configurator_conf_psk_hex_exists)
+            {
+                if (!hostapd_dpp_set_configurator_params(HOSTAPD_CONTROL_PATH_DEFAULT, config->ifnames[i], config->configurator_conf_role,
+                            config->configurator_conf_ssid_hex, config->configurator_conf_psk_hex, config->timeout_seconds)) {
+
+                    LOGE("dpp: %s: failed to set configurator role, ssid, and password", config->ifnames[i]);
+                    return false;
+                }
+            }
+            else
+            {
+                if (!hostapd_dpp_set_configurator_params(HOSTAPD_CONTROL_PATH_DEFAULT, config->ifnames[i], config->configurator_conf_role,
+                            config->configurator_conf_ssid_hex, NULL, config->timeout_seconds)) {
+
+                    LOGE("dpp: %s: failed to set configurator role and ssid", config->ifnames[i]);
+                    return false;
+                }
+            }
+            LOGI("dpp: %s: dpp config applied", config->ifnames[i]);
+        }
+    }
+
+    // Apply Peer BI URI and optionally initiatie DPP Auth
+    // Peer BI will always be 1
+    if (config->peer_bi_uri_exists)
+    {
+        bi_id = 1;
+        for (i = 0; i < config->ifnames_len; i++)
+        {
+            // Apply Peer BI URI
+            if (!hostapd_dpp_add(HOSTAPD_CONTROL_PATH_DEFAULT, config->ifnames[i],
+                        "dpp_qr_code", config->peer_bi_uri, NULL, config->timeout_seconds)) {
+
+                LOGE("dpp: %s: failed to add peer bi uri", config->ifnames[i]);
+                return false;
+            }
+            LOGI("dpp: %s: peer bootstrapping info applied", config->ifnames[i]);
+
+            // Initiate Auth now
+            if (!strcmp(config->auth, SCHEMA_CONSTS_DPP_INIT_NOW))
+            {
+                if (!hostapd_dpp_auth_init(HOSTAPD_CONTROL_PATH_DEFAULT, config->ifnames[i], config->configurator_conf_role,
+                            config->configurator_conf_ssid_hex, config->configurator_conf_psk_hex, bi_id, config->timeout_seconds)) {
+
+                    LOGE("dpp: %s: failed to initatie dpp auth", config->ifnames[i]);
+                    return false;
+                }
+                LOGI("dpp: %s: auth initiated", config->ifnames[i]);
+            }
+        }
+    }
+
+    // Apply own BI and optionally start chirping
+    if (config->own_bi_key_hex_exists)
+    {
+        // own_bi will be 1 if there is no peer_bi_uri
+        // Otherwise it will be 2
+        if (!config->peer_bi_uri_exists)
+            bi_id = 1;
+        else
+            bi_id = 2;
+
+        for (i = 0; i < config->ifnames_len; i++)
+        {
+            // Apply own_bi
+            if (!hostapd_dpp_add(HOSTAPD_CONTROL_PATH_DEFAULT, config->ifnames[i],
+                        "dpp_bootstrap_gen", config->own_bi_key_hex, config->own_bi_key_curve, config->timeout_seconds)) {
+
+                LOGE("dpp: %s: failed to add own bi", config->ifnames[i]);
+                return false;
+            }
+            LOGI("dpp: %s: bi applied", config->ifnames[i]);
+
+            // Start Chirping
+            if (!strcmp(config->auth, SCHEMA_CONSTS_DPP_CHIRP))
+            {
+                if (!hostapd_dpp_chirp_or_listen(HOSTAPD_CONTROL_PATH_DEFAULT, config->ifnames[i],
+                            "dpp_chirp", 0, bi_id, config->timeout_seconds)) {
+
+                    LOGE("dpp: %s: failed to initatie chirping", config->ifnames[i]);
+                    return false;
+                }
+                LOGI("dpp: %s: chirping started", config->ifnames[i]);
+            }
+
+            util_wifi_get_parent(config->ifnames[i], phy, sizeof(phy));
+            util_iwconfig_get_chan(phy, config->ifnames[i], channel);
+            freq = util_iwconfig_get_freq(phy, config->ifnames[i], channel);
+
+            // Start listening for Auth Init messages
+            if (!hostapd_dpp_chirp_or_listen(HOSTAPD_CONTROL_PATH_DEFAULT, config->ifnames[i],
+                        "dpp_listen", freq, bi_id, config->timeout_seconds)) {
+
+                LOGE("dpp: %s: failed to listen", config->ifnames[i]);
+                return false;
+            }
+            LOGI("dpp: %s: started listening on %d frequency", config->ifnames[i], freq);
+        }
+    }
     return true;
 }
 
