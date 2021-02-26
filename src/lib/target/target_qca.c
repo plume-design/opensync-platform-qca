@@ -784,8 +784,7 @@ util_iwconfig_freq_to_chan(int mhz)
 
 static int
 util_iwconfig_get_freq(const char *phy,
-                       const char *vif,
-                       int *chan)
+                       const char *vif)
 {
     char vifs[1024];
     char buf[256];
@@ -871,7 +870,7 @@ util_iwconfig_get_chan(const char *phy,
 {
     int mhz;
 
-    mhz = util_iwconfig_get_freq(phy, vif, chan);
+    mhz = util_iwconfig_get_freq(phy, vif);
     if (mhz == 0)
         return false;
 
@@ -4203,7 +4202,7 @@ bool target_vif_state_get(char *vif, struct schema_Wifi_VIF_State *vstate)
 static bool
 qca_dpp_flush_configuration(const char *ifname, int timeout_seconds)
 {
-    const char *all_confs = "*";
+    const char *all_confs = "'*'";
 
     if (!hostapd_dpp_stop(HOSTAPD_CONTROL_PATH_DEFAULT, ifname,
                 "dpp_configurator_remove", all_confs, timeout_seconds))
@@ -4233,7 +4232,7 @@ qca_dpp_flush_configuration(const char *ifname, int timeout_seconds)
         return false;
     }
 
-    LOGI("dpp %s: stopped all dpp Activity", ifname);
+    LOGI("dpp %s: stopped all dpp activity", ifname);
     return true;
 }
 
@@ -4249,7 +4248,6 @@ bool target_dpp_config_set(const struct schema_DPP_Config *config)
     const int num_all_phy = 3;
     const char *all_phy[] = { "wifi0", "wifi1", "wifi2" };
     char phy[32];
-    int *channel = 0;
     int freq = 0;
     int bi_id;
 
@@ -4259,6 +4257,18 @@ bool target_dpp_config_set(const struct schema_DPP_Config *config)
         char vifs[512] = {0};
         char *vifr = vifs;
         char *vif = {0};
+
+        /* Hack to enable DPP mcast action rx. This enables more
+         * than necessary and there's no easy way to |= foo and
+         * &= ~foo unfortunately. This is best effort to get
+         * thing working. Hopefully it's not too destructive for
+         * operation otherwise.
+         *
+         * This must be done even if !config because
+         * otherwise chirping won't be reported properly.
+         */
+        if (access(F("/sys/class/net/%s/", all_phy[i]), X_OK) == 0)
+            WARN_ON(util_iwpriv_set_int(all_phy[i], "set_rxfilter", 0xFFFFFFFF) != 0);
 
         if (util_wifi_get_phy_vifs(all_phy[i], vifs, sizeof(vifs))) {
             LOGE("dpp: %s: get vifs failed", all_phy[i]);
@@ -4296,24 +4306,11 @@ bool target_dpp_config_set(const struct schema_DPP_Config *config)
                 return false;
             }
 
-            // Only 1 configurator per interface
-            if (config->configurator_conf_psk_hex_exists)
-            {
-                if (!hostapd_dpp_set_configurator_params(HOSTAPD_CONTROL_PATH_DEFAULT, config->ifnames[i], config->configurator_conf_role,
-                            config->configurator_conf_ssid_hex, config->configurator_conf_psk_hex, config->timeout_seconds)) {
+            if (!hostapd_dpp_set_configurator_params(HOSTAPD_CONTROL_PATH_DEFAULT, config->ifnames[i], config->configurator_conf_role,
+                        config->configurator_conf_ssid_hex, config->configurator_conf_psk_hex, config->timeout_seconds)) {
 
-                    LOGE("dpp: %s: failed to set configurator role, ssid, and password", config->ifnames[i]);
-                    return false;
-                }
-            }
-            else
-            {
-                if (!hostapd_dpp_set_configurator_params(HOSTAPD_CONTROL_PATH_DEFAULT, config->ifnames[i], config->configurator_conf_role,
-                            config->configurator_conf_ssid_hex, NULL, config->timeout_seconds)) {
-
-                    LOGE("dpp: %s: failed to set configurator role and ssid", config->ifnames[i]);
-                    return false;
-                }
+                LOGE("dpp: %s: failed to set configurator role, ssid, and password", config->ifnames[i]);
+                return false;
             }
             LOGI("dpp: %s: dpp config applied", config->ifnames[i]);
         }
@@ -4383,8 +4380,7 @@ bool target_dpp_config_set(const struct schema_DPP_Config *config)
             }
 
             util_wifi_get_parent(config->ifnames[i], phy, sizeof(phy));
-            util_iwconfig_get_chan(phy, config->ifnames[i], channel);
-            freq = util_iwconfig_get_freq(phy, config->ifnames[i], channel);
+            freq = util_iwconfig_get_freq(phy, config->ifnames[i]);
 
             // Start listening for Auth Init messages
             if (!hostapd_dpp_chirp_or_listen(HOSTAPD_CONTROL_PATH_DEFAULT, config->ifnames[i],

@@ -111,36 +111,67 @@ bool hostapd_rrm_remove_neighbor(const char *path, const char *interface, const 
     return ret;
 }
 
+static const char *hostapd_cli_cmd(const char *interface)
+{
+    /* This is dirty hack, it shouldnt be based on intf names */
+    if (strstr(interface, "bhaul-sta"))
+        return "wpa_cli";
+    else
+        return "hostapd_cli";
+}
+
+static const char *hostapd_cli_dir(const char *interface)
+{
+    /* This is dirty hack, it shouldnt be based on intf names */
+    if (strstr(interface, "bhaul-sta"))
+        return "wpa_supplicant";
+    else
+        return "hostapd";
+}
+
+const char *
+hostapd_dpp_conf_role(const char *conf)
+{
+    if (!strcmp(conf, "sta-dpp-sae")) return "sta-sae-dpp";
+    if (!strcmp(conf, "sta-dpp-psk-sae")) return "sta-psk-sae-dpp";
+    if (!strcmp(conf, "ap-dpp-sae")) return "ap-sae-dpp";
+    if (!strcmp(conf, "ap-dpp-psk-sae")) return "ap-psk-sae-dpp";
+    return conf;
+}
+
 bool hostapd_dpp_stop(const char *path,
                       const char *interface,
                       const char *command,
                       const char *conf_num,
                       int timeout_seconds)
 {
+    const char *cmd = hostapd_cli_cmd(interface);
+    const char *dir = hostapd_cli_dir(interface);
     char    hostapd_cmd[1024];
     bool    ret = false;
 
     if (!strcmp(command, "dpp_bootstrap_remove") || !strcmp(command, "dpp_configurator_remove"))
     {
         snprintf(hostapd_cmd, sizeof(hostapd_cmd),
-            "%s %d hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s "
+            "%s %d %s -p %s/%s-$(cat /sys/class/net/%s/parent) -i %s "
             "%s %s ",
-            CMD_TIMEOUT, timeout_seconds, path, interface, interface, command, conf_num);
+            CMD_TIMEOUT, timeout_seconds, cmd, path, dir, interface, interface, command, conf_num);
     }
     else if (!strcmp(command, "dpp_stop_listen") || !strcmp(command, "dpp_stop_chirp"))
     {
         snprintf(hostapd_cmd, sizeof(hostapd_cmd),
-            "%s %d hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s "
+            "%s %d %s -p %s/%s-$(cat /sys/class/net/%s/parent) -i %s "
             "%s ",
-            CMD_TIMEOUT, timeout_seconds, path, interface, interface, command);
+            CMD_TIMEOUT, timeout_seconds, cmd, path, dir, interface, interface, command);
     }
 
-    ret = !cmd_log(hostapd_cmd);
-    if (!ret) {
+    ret = cmd_log(hostapd_cmd);
+    if (!WIFEXITED(ret) || WEXITSTATUS(ret)) {
         LOGE("hostapd_cli execution failed: %s", hostapd_cmd);
+        return false;
     }
 
-    return ret;
+    return true;
 }
 
 bool hostapd_dpp_add(const char *path,
@@ -150,30 +181,35 @@ bool hostapd_dpp_add(const char *path,
                      const char *curve,
                      int timeout_seconds)
 {
+    const char *cmd = hostapd_cli_cmd(interface);
+    const char *dir = hostapd_cli_dir(interface);
+    const char *type;
     char    hostapd_cmd[1024];
     bool    ret = false;
 
     if (!strcmp(command, "dpp_configurator_add") || !strcmp(command, "dpp_bootstrap_gen"))
     {
+        type = strcmp(command, "dpp_bootstrap_gen") ? "" : " type=qrcode";
         snprintf(hostapd_cmd, sizeof(hostapd_cmd),
-            "%s %d hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s "
-            "%s curve=%s key=%s",
-            CMD_TIMEOUT, timeout_seconds, path, interface, interface, command, value, curve);
+            "%s %d %s -p %s/%s-$(cat /sys/class/net/%s/parent) -i %s "
+            "%s curve=%s key=%s%s",
+            CMD_TIMEOUT, timeout_seconds, cmd, path, dir, interface, interface, command, curve, value, type);
     }
     else if (!strcmp(command, "dpp_qr_code"))
     {
         snprintf(hostapd_cmd, sizeof(hostapd_cmd),
-            "%s %d hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s "
-            "%s %s",
-            CMD_TIMEOUT, timeout_seconds, path, interface, interface, command, value);
+            "%s %d %s -p %s/%s-$(cat /sys/class/net/%s/parent) -i %s "
+            "%s \"%s\"",
+            CMD_TIMEOUT, timeout_seconds, cmd, path, dir, interface, interface, command, value);
     }
 
-    ret = !cmd_log(hostapd_cmd);
-    if (!ret) {
+    ret = cmd_log(hostapd_cmd);
+    if (!WIFEXITED(ret) || WEXITSTATUS(ret)) {
         LOGE("hostapd_cli execution failed: %s", hostapd_cmd);
+        return false;
     }
 
-    return ret;
+    return true;
 }
 
 bool hostapd_dpp_auth_init(const char *path,
@@ -184,28 +220,33 @@ bool hostapd_dpp_auth_init(const char *path,
                            int bi_id,
                            int timeout_seconds)
 {
+    const char *cmd = hostapd_cli_cmd(interface);
+    const char *dir = hostapd_cli_dir(interface);
     char    hostapd_cmd[1024];
     bool    ret = false;
 
-    if (!configurator_conf_psk_hex) {
+    configurator_conf_role = hostapd_dpp_conf_role(configurator_conf_role);
+
+    if (!strcmp(configurator_conf_psk_hex, "")) {
         snprintf(hostapd_cmd, sizeof(hostapd_cmd),
-            "%s %d hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s "
+            "%s %d %s -p %s/%s-$(cat /sys/class/net/%s/parent) -i %s "
             "dpp_auth_init peer=%d conf=%s ssid=%s configurator=1",
-            CMD_TIMEOUT, timeout_seconds, path, interface, interface, bi_id, configurator_conf_role, configurator_conf_ssid_hex);
+            CMD_TIMEOUT, timeout_seconds, cmd, path, dir, interface, interface, bi_id, configurator_conf_role, configurator_conf_ssid_hex);
     }
     else {
         snprintf(hostapd_cmd, sizeof(hostapd_cmd),
-            "%s %d hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s "
+            "%s %d %s -p %s/%s-$(cat /sys/class/net/%s/parent) -i %s "
             "dpp_auth_init peer=%d conf=%s ssid=%s pass=%s configurator=1",
-            CMD_TIMEOUT, timeout_seconds, path, interface, interface, bi_id, configurator_conf_role, configurator_conf_ssid_hex, configurator_conf_psk_hex);
+            CMD_TIMEOUT, timeout_seconds, cmd, path, dir, interface, interface, bi_id, configurator_conf_role, configurator_conf_ssid_hex, configurator_conf_psk_hex);
     }
 
-    ret = !cmd_log(hostapd_cmd);
-    if (!ret) {
+    ret = cmd_log(hostapd_cmd);
+    if (!WIFEXITED(ret) || WEXITSTATUS(ret)) {
         LOGE("hostapd_cli execution failed: %s", hostapd_cmd);
+        return false;
     }
 
-    return ret;
+    return true;
 }
 
 bool hostapd_dpp_chirp_or_listen(const char *path,
@@ -215,30 +256,33 @@ bool hostapd_dpp_chirp_or_listen(const char *path,
                                  int bi_id,
                                  int timeout_seconds)
 {
+    const char *cmd = hostapd_cli_cmd(interface);
+    const char *dir = hostapd_cli_dir(interface);
     char    hostapd_cmd[1024];
     bool    ret = false;
 
     if (!strcmp(command, "dpp_chirp"))
     {
         snprintf(hostapd_cmd, sizeof(hostapd_cmd),
-            "%s %d hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s "
+            "%s %d %s -p %s/%s-$(cat /sys/class/net/%s/parent) -i %s "
             "%s own=%d iter=2",
-            CMD_TIMEOUT, timeout_seconds, path, interface, interface, command, bi_id);
+            CMD_TIMEOUT, timeout_seconds, cmd, path, dir, interface, interface, command, bi_id);
     }
     else if (!strcmp(command, "dpp_listen"))
     {
         snprintf(hostapd_cmd, sizeof(hostapd_cmd),
-            "%s %d hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s "
+            "%s %d %s -p %s/%s-$(cat /sys/class/net/%s/parent) -i %s "
             "%s %d",
-            CMD_TIMEOUT, timeout_seconds, path, interface, interface, command, freq);
+            CMD_TIMEOUT, timeout_seconds, cmd, path, dir, interface, interface, command, freq);
     }
 
-    ret = !cmd_log(hostapd_cmd);
-    if (!ret) {
+    ret = cmd_log(hostapd_cmd);
+    if (!WIFEXITED(ret) || WEXITSTATUS(ret)) {
         LOGE("hostapd_cli execution failed: %s", hostapd_cmd);
+        return false;
     }
 
-    return ret;
+    return true;
 }
 
 bool hostapd_dpp_set_configurator_params(const char *path,
@@ -248,29 +292,34 @@ bool hostapd_dpp_set_configurator_params(const char *path,
                                          const char *configurator_conf_psk_hex,
                                          int timeout_seconds)
 {
+    const char *cmd = hostapd_cli_cmd(interface);
+    const char *dir = hostapd_cli_dir(interface);
     char    hostapd_cmd[1024];
     bool    ret = false;
 
-    if (!configurator_conf_psk_hex) {
+    configurator_conf_role = hostapd_dpp_conf_role(configurator_conf_role);
+
+    if (!strcmp(configurator_conf_psk_hex, "")) {
         snprintf(hostapd_cmd, sizeof(hostapd_cmd),
-            "%s %d hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s "
+            "%s %d %s -p %s/%s-$(cat /sys/class/net/%s/parent) -i %s "
             "raw SET dpp_configurator_params conf=%s ssid=%s configurator=1",
-            CMD_TIMEOUT, timeout_seconds, path, interface, interface,
+            CMD_TIMEOUT, timeout_seconds, cmd, path, dir, interface, interface,
             configurator_conf_role, configurator_conf_ssid_hex);
     }
     else {
         snprintf(hostapd_cmd, sizeof(hostapd_cmd),
-            "%s %d hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s "
+            "%s %d %s -p %s/%s-$(cat /sys/class/net/%s/parent) -i %s "
             "raw SET dpp_configurator_params conf=%s ssid=%s pass=%s configurator=1",
-            CMD_TIMEOUT, timeout_seconds, path, interface, interface,
+            CMD_TIMEOUT, timeout_seconds, cmd, path, dir, interface, interface,
             configurator_conf_role, configurator_conf_ssid_hex, configurator_conf_psk_hex);
     }
 
 
-    ret = !cmd_log(hostapd_cmd);
-    if (!ret) {
+    ret = cmd_log(hostapd_cmd);
+    if (!WIFEXITED(ret) || WEXITSTATUS(ret)) {
         LOGE("hostapd_cli execution failed: %s", hostapd_cmd);
+        return false;
     }
 
-    return ret;
+    return true;
 }
