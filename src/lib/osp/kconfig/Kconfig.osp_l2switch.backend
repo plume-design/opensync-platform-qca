@@ -1,5 +1,4 @@
-config OSP_L2SWITCH_SWCONFIG
-    bool "swconfig"
-
+config OSP_L2SWITCH_SSDKSH
+    bool "ssdk_sh"
     help
-        Use swconfig for L2 switch configuration
+        Use the `ssdk_sh` tool for L2 switch configuration

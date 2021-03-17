@@ -1,3 +1,5 @@
+#!/bin/sh
+
 # Copyright (c) 2015, Plume Design Inc. All rights reserved.
 # 
 # Redistribution and use in source and binary forms, with or without
@@ -22,11 +24,41 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-##############################################################################
-#
-# OSP layer library override
-#
-##############################################################################
+vap=$1
 
-UNIT_SRC_TOP += $(if $(CONFIG_OSP_L2SWITCH_SSDKSH),$(OVERRIDE_DIR)/src/osp_l2switch_ssdksh.c)
+if ! iwconfig $vap >/dev/null 2>/dev/null
+then
+    # Possibly handled by a different driver.
+    exit 0
+fi
 
+out_of_channels()
+{
+    radio=$(cat /sys/class/net/$1/parent)
+    chan_cnt=$(exttool --list --interface $1 | wc -l)
+    nop_cnt=$(exttool --list --interface $1 | grep NOP_STARTED | wc -l)
+
+    test \
+        $chan_cnt -gt 0 -a \
+        $chan_cnt -eq $nop_cnt
+}
+
+if out_of_channels "$vap"
+then
+    log_warn "$vap($radio): all channels happen to be dfs in this regdomain and all are unavailable"
+    exit 0
+fi
+
+if ! iwconfig "$vap" | grep -q 'Access Point: ..:..:..:..:..:..'
+then
+    log_warn "$vap: bss is not associated: no ap"
+    exit 1
+fi
+
+if iwconfig "$vap" | grep -q 'Access Point: 00:00:00:00:00:00'
+then
+    log_warn "$vap: bss is not associated: null ap"
+    exit 1
+fi
+
+exit 0

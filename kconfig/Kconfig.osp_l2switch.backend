@@ -1,1 +1,3 @@
+if PLATFORM_IS_QCA
 rsource "../src/lib/osp/kconfig/Kconfig.osp_l2switch.backend"
+endif

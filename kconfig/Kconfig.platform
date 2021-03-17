@@ -56,4 +56,10 @@ config QCA_USE_GRE_NSS
         Uses the inet_nssgre_t class as the default GRE implementation.
         This options redefines the inet_gre_new() function to return
         a inet_nssgre_t class.
+
+config QCA_USE_DPP
+    bool "Use DPP for WPA Key Managment"
+    default n
+    help
+        Add support for WFA Easy Connect (DPP).
 endif
