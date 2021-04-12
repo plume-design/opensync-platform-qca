@@ -831,10 +831,13 @@ util_iwconfig_freq_to_chan(int mhz)
         return 0;
     if (mhz < 5000)
         return 1 + ((mhz - 2412) / 5);
-    else if (mhz < 6000)
+    else if (mhz < 5935)
         return (mhz - 5000) / 5;
-    else
-        return 0;
+    else if (mhz == 5935)
+        return 2;
+    else if (mhz > 5950 && mhz <= 7115)
+        return (mhz - 5950) / 5;
+    return 0;
 }
 
 static bool
@@ -1406,6 +1409,7 @@ qca_ctrl_discover(const char *bss)
         hapd->skip_probe_response = 1;
         hapd->ieee80211n = 1;
         hapd->ieee80211ac = 1;
+        hapd->ieee80211ax = 1;
         ctrl_enable(&hapd->ctrl);
         caps = strchomp(R(F("/sys/class/net/%s/cfg80211_htcaps", bss)), "\r\n ");
         if (caps != NULL) STRSCPY_WARN(hapd->htcaps, caps);
@@ -1523,11 +1527,11 @@ static const struct util_iwpriv_mode {
     { "11ac", "HT80+80", { "5G", "5GU", "5GL" }, { "11ACVHT80_80" } },
     { "11ax", "HT20", { "2.4G" }, { "11GHE20" } },
     { "11ax", "HT40", { "2.4G" }, { "11GHE40", "11GHE40PLUS", "11GHE40MINUS" } },
-    { "11ax", "HT20", { "5G", "5GU", "5GL" }, { "11AHE20" } },
-    { "11ax", "HT40", { "5G", "5GU", "5GL" }, { "11AHE40", "11AHE40PLUS", "11AHE40MINUS" } },
-    { "11ax", "HT80", { "5G", "5GU", "5GL" }, { "11AHE80" } },
-    { "11ax", "HT160", { "5G", "5GU", "5GL" }, { "11AHE160" } },
-    { "11ax", "HT80+80", { "5G", "5GU", "5GL" }, { "11AHE80_80" } },
+    { "11ax", "HT20", { "5G", "5GU", "5GL", "6G" }, { "11AHE20" } },
+    { "11ax", "HT40", { "5G", "5GU", "5GL", "6G" }, { "11AHE40", "11AHE40PLUS", "11AHE40MINUS" } },
+    { "11ax", "HT80", { "5G", "5GU", "5GL", "6G" }, { "11AHE80" } },
+    { "11ax", "HT160", { "5G", "5GU", "5GL", "6G" }, { "11AHE160" } },
+    { "11ax", "HT80+80", { "5G", "5GU", "5GL", "6G" }, { "11AHE80_80" } },
     { NULL, NULL, {}, {} }, /* array guard, keep last */
 };
 
@@ -3123,6 +3127,10 @@ util_radio_ht_mode_get_max(const char *phy,
         return true;
 
     snprintf(path, sizeof(path), "/sys/class/net/%s/5g_maxchwidth", phy);
+    if (util_file_read_str(path, ht_mode_vif, htmode_len) < 0)
+        return false;
+
+    snprintf(path, sizeof(path), "/sys/class/net/%s/6g_maxchwidth", phy);
     if (util_file_read_str(path, ht_mode_vif, htmode_len) < 0)
         return false;
 

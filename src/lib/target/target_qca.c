@@ -4111,6 +4111,9 @@ target_vif_config_set2(const struct schema_Wifi_VIF_Config *vconf,
     if (changed->mac_list_type || changed->mac_list)
         util_vif_acl_enforce(phy, vif, vconf);
 
+    if (changed->dpp_cc)
+        util_iwpriv_set_int_lazy(vif, "gdppcc", "sdppcc", vconf->dpp_cc);
+
     if (!strcmp(vconf->mode, "ap"))
         if (changed->min_hw_mode)
             util_vif_min_hw_mode_set(vif, vconf->min_hw_mode);
@@ -4201,6 +4204,9 @@ bool target_vif_state_get(char *vif, struct schema_Wifi_VIF_State *vstate)
 
     if ((vstate->channel_exists = util_iwconfig_get_chan(NULL, vif, &v)))
         vstate->channel = v;
+
+    if (util_iwpriv_get_int(vif, "gdppcc", &v))
+        SCHEMA_SET_INT(vstate->dpp_cc, v);
 
     util_kv_set(F("%s.last_channel", vif),
                 vstate->channel_exists ? F("%d", vstate->channel) : "");
