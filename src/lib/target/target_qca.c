@@ -4287,18 +4287,6 @@ bool target_dpp_config_set(const struct schema_DPP_Config *config)
         char *vifr = vifs;
         char *vif = {0};
 
-        /* Hack to enable DPP mcast action rx. This enables more
-         * than necessary and there's no easy way to |= foo and
-         * &= ~foo unfortunately. This is best effort to get
-         * thing working. Hopefully it's not too destructive for
-         * operation otherwise.
-         *
-         * This must be done even if !config because
-         * otherwise chirping won't be reported properly.
-         */
-        if (access(F("/sys/class/net/%s/", all_phy[i]), X_OK) == 0)
-            WARN_ON(util_iwpriv_set_int(all_phy[i], "set_rxfilter", 0xFFFFFFFF) != 0);
-
         if (util_wifi_get_phy_vifs(all_phy[i], vifs, sizeof(vifs))) {
             LOGE("dpp: %s: get vifs failed", all_phy[i]);
             return false;
