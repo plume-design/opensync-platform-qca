@@ -62,4 +62,12 @@ config QCA_USE_DPP
     default n
     help
         Add support for WFA Easy Connect (DPP).
+
+config QCA_NF_NAT_HELPERS
+    bool "Use preferred OpenSync netfilter NAT helpers"
+    default y
+    help
+        This will overwrite /etc/modules.d/nf-nathelper-extra
+        with preferred OpenSync options.
+
 endif

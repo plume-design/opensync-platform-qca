@@ -1449,7 +1449,7 @@ osync_nl80211_scan_results_fetch(radio_entry_t *radio_cfg_ctx)
     int list_alloc_size;
     list_alloc_size = 3*1024;
     struct cfg80211_data buffer;
-    uint8_t *buf = malloc(list_alloc_size);
+    char buf[list_alloc_size];
 
     buffer.data = buf;
     buffer.length = list_alloc_size;
@@ -1463,7 +1463,6 @@ osync_nl80211_scan_results_fetch(radio_entry_t *radio_cfg_ctx)
         return -1;
     }
 
-    free(buf);
     return buffer.length;
 #else
     int rc;
