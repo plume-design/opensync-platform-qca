@@ -3130,6 +3130,9 @@ util_radio_ht_mode_get_max(const char *phy,
     if (util_file_read_str(path, ht_mode_vif, htmode_len) < 0)
         return false;
 
+   if (strlen(ht_mode_vif) > 0)
+        return true;
+
     snprintf(path, sizeof(path), "/sys/class/net/%s/6g_maxchwidth", phy);
     if (util_file_read_str(path, ht_mode_vif, htmode_len) < 0)
         return false;

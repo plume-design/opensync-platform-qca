@@ -54,6 +54,7 @@ enum {
     CHAN_2GHZ = 1 << 0,
     CHAN_5GHZ_LOWER = 1 << 1,
     CHAN_5GHZ_UPPER = 1 << 2,
+    CHAN_6GHZ = 1 << 3,
 };
 
 /* static data */
@@ -71,6 +72,7 @@ static const struct {
     { 0x0040, 0x168c, 0, "qca99x0", "Beeliner" },
     { 0x0046, 0x168c, 0, "qca9984", "Cascade" },
     { 0x0056, 0x168c, 0, "qca9888", "Besra" },
+    { 0x1104, 0x17cb, 0, "qcn9074", "Pine" },
     { 0, 0, "qca,wifi-ipq40xx", "qca4019", "Dakota" },
     { 0, 0, "qca,wifi-ar956x", "qca9563", "Dragonfly" },
     { 0, 0, "qcom,cnss-qca8074", "qca8074", "Hawkeye" },
@@ -180,14 +182,27 @@ identify_chip(const char *ifname,
     return 0;
 }
 
-static void
-chan_classify(int c, int *flags)
+static bool
+util_is_phy_6ghz(const char *phy)
 {
-    if (c >= 1 && c <= 20)
+    char       path[64];
+
+    snprintf(path, sizeof(path), "/sys/class/net/%s/6g_maxchwidth", phy);
+    return atoi(file_geta(path) ?: "0") > 0;
+}
+
+static void
+chan_classify(int c, int *flags, const char *phy)
+{
+    bool is_6ghz = util_is_phy_6ghz(phy);
+
+    if (is_6ghz)
+        *flags |= CHAN_6GHZ;
+    else if (c >= 1 && c <= 20)
         *flags |= CHAN_2GHZ;
-    if (c >= 36 && c < 100)
+    else if (c >= 36 && c < 100)
         *flags |= CHAN_5GHZ_LOWER;
-    if (c >= 100)
+    else if (c >= 100)
         *flags |= CHAN_5GHZ_UPPER;
 }
 
@@ -202,6 +217,8 @@ chan_get_band_str(int flags)
         return "5GL";
     else if (flags & CHAN_5GHZ_UPPER)
         return "5GU";
+    else if (flags & CHAN_6GHZ)
+        return "6G";
 
     WARN_ON(1);
     return NULL;
@@ -226,7 +243,7 @@ identify_band_wlanconfig2(const char *ifname,
         if (!(chan = strsep(&line, " ")))
             continue;
 
-        chan_classify(atoi(chan), &flags);
+        chan_classify(atoi(chan), &flags, ifname);
     }
 
     *band = chan_get_band_str(flags);
@@ -284,7 +301,7 @@ identify_band_wlanconfig(const char *ifname,
         while ((word = strsep(&chanlist, "\r\t\n ")))
             if (!strcmp(word, "Channel"))
                 if ((chan = strsep(&chanlist, "\r\t\n ")))
-                    chan_classify(atoi(chan), &flags);
+                    chan_classify(atoi(chan), &flags, ifname);
     }
 #ifdef OPENSYNC_NL_SUPPORT
     buf = strexa("wlanconfig", tmp_ifname, "destroy", "-cfgtool");
@@ -318,24 +335,32 @@ identify_max_width(const char *ifname,
 {
     const char *buf_2g;
     const char *buf_5g;
+    const char *buf_6g;
     char path_2g[64];
     char path_5g[64];
+    char path_6g[64];
     int bw_2g;
     int bw_5g;
+    int bw_6g;
     int bw_max;
 
     snprintf(path_2g, sizeof(path_2g),
              "/sys/class/net/%s/2g_maxchwidth", ifname);
     snprintf(path_5g, sizeof(path_5g),
              "/sys/class/net/%s/5g_maxchwidth", ifname);
+    snprintf(path_6g, sizeof(path_6g),
+             "/sys/class/net/%s/6g_maxchwidth", ifname);
     buf_2g = strexa("cat", path_2g) ?: "0";
     buf_5g = strexa("cat", path_5g) ?: "0";
+    buf_6g = strexa("cat", path_6g) ?: "0";
     bw_2g = strtol(buf_2g, 0, 10);
     bw_5g = strtol(buf_5g, 0, 10);
+    bw_6g = strtol(buf_6g, 0, 10);
     bw_max = bw_2g > bw_5g ? bw_2g : bw_5g;
+    bw_max = bw_max > bw_6g ? bw_max : bw_6g;
 
-    LOGD("%s: htmode: 2g=%d 5g=%d max=%d",
-         ifname, bw_2g, bw_5g, bw_max);
+    LOGD("%s: htmode: 2g=%d 5g=%d 6g=%d max=%d",
+         ifname, bw_2g, bw_5g, bw_6g, bw_max);
 
     switch (bw_max) {
         case 20: *htmode = "HT20"; return 0;
@@ -383,7 +408,8 @@ wiphy_info_init_ifname(const char *ifname)
         return -1;
 
     /* Hawkeye for 11ax */
-    if (!strcmp(info->chip, "qca8074")) {
+    if (!strcmp(info->chip, "qca8074") ||
+        !strcmp(info->chip, "qcn9074")) {
         info->mode = "11ax";
     } else {
         if (strstr(info->band, "5G") == info->band)
