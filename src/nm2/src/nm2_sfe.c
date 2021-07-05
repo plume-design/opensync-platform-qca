@@ -53,7 +53,7 @@ struct eth_hdr
  */
 
 #ifndef TARGET_L2UF_IFNAME
-#define TARGET_L2UF_IFNAME     "br-home.l2uf"
+#define TARGET_L2UF_IFNAME     CONFIG_TARGET_LAN_BRIDGE_NAME".l2uf"
 #endif
 
 /* BPF syntax for capturing L2UF frames (LLC XID packets) */

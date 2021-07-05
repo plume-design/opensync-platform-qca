@@ -60,9 +60,11 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <if_athioctl.h>
 #include <linux/version.h>
 #include <qca_vendor.h>
+#include <const.h> /* opensync, ARRAY_SIZE */
 
 #include "ieee80211_external.h"
 #include "ioctl80211_client.h"
+#include "memutil.h"
 
 #ifndef _LITTLE_ENDIAN
 #define _LITTLE_ENDIAN  1234
@@ -131,6 +133,7 @@ extern uint16_t g_stainfo_len;
 extern uint8_t bsal_clients[IOCTL80211_CLIENTS_SIZE];
 extern int  _bsal_ioctl_fd;
 
+const char *qca_get_xml_path(const char *ifname);
 int readcmd(char *buf, size_t buflen, void (*xfrm)(char *), const char *fmt, ...);
 
 int ether_mac2string(char *mac_string, const uint8_t mac[IEEE80211_ADDR_LEN]);
@@ -156,8 +159,9 @@ osync_nl80211_bsal_bs_enable(int fd, const char *ifname, bool enable)
 
     // set band steering
     memset(&athdbg, 0, sizeof(athdbg));
-    athdbg.cmd = IEEE80211_DBGREQ_BSTEERING_ENABLE;
-    athdbg.data.bsteering_enable = enable;
+    athdbg.data.mesh_dbg_req.mesh_data.value = enable;
+    athdbg.data.mesh_dbg_req.mesh_cmd = MESH_BSTEERING_ENABLE;
+    athdbg.cmd = IEEE80211_DBGREQ_MESH_SET_GET_CONFIG;
 
 #ifdef OPENSYNC_NL_SUPPORT
     send_nl_command(&sock_ctx, ifname, &athdbg, sizeof(athdbg), NULL, QCA_NL80211_VENDOR_SUBCMD_DBGREQ);
@@ -178,8 +182,9 @@ osync_nl80211_bsal_bs_enable(int fd, const char *ifname, bool enable)
 #endif
     // set band steering events
     memset(&athdbg, 0, sizeof(athdbg));
-    athdbg.cmd = IEEE80211_DBGREQ_BSTEERING_ENABLE_EVENTS;
-    athdbg.data.bsteering_enable = enable;
+    athdbg.data.mesh_dbg_req.mesh_data.value = enable;
+    athdbg.data.mesh_dbg_req.mesh_cmd = MESH_BSTEERING_ENABLE_EVENTS;
+    athdbg.cmd = IEEE80211_DBGREQ_MESH_SET_GET_CONFIG;
 
 #ifdef OPENSYNC_NL_SUPPORT
     send_nl_command(&sock_ctx, ifname, &athdbg, sizeof(athdbg), NULL, QCA_NL80211_VENDOR_SUBCMD_DBGREQ);
@@ -219,21 +224,22 @@ osync_nl80211_bsal_bs_config(int fd, const bsal_ifconfig_t *ifcfg, bool enable)
 
     // Band steering parameters
     memset(&athdbg, 0, sizeof(athdbg));
-    athdbg.cmd = IEEE80211_DBGREQ_BSTEERING_SET_PARAMS;
-    athdbg.data.bsteering_param.utilization_sample_period         = ifcfg->chan_util_check_sec;
-    athdbg.data.bsteering_param.utilization_average_num_samples   = ifcfg->chan_util_avg_count;
-    athdbg.data.bsteering_param.inactivity_check_period           = ifcfg->inact_check_sec;
-    athdbg.data.bsteering_param.inactivity_timeout_overload       = ifcfg->inact_tmout_sec_overload;
-    athdbg.data.bsteering_param.low_rssi_crossing_threshold       = ifcfg->def_rssi_low_xing;
-    athdbg.data.bsteering_param.low_rate_rssi_crossing_threshold  = ifcfg->def_rssi_xing;
+    athdbg.data.mesh_dbg_req.mesh_cmd = MESH_BSTEERING_SET_PARAMS;
+    athdbg.cmd = IEEE80211_DBGREQ_MESH_SET_GET_CONFIG;
+    athdbg.data.mesh_dbg_req.mesh_data.bsteering_param.utilization_sample_period         = ifcfg->chan_util_check_sec;
+    athdbg.data.mesh_dbg_req.mesh_data.bsteering_param.utilization_average_num_samples   = ifcfg->chan_util_avg_count;
+    athdbg.data.mesh_dbg_req.mesh_data.bsteering_param.inactivity_check_period           = ifcfg->inact_check_sec;
+    athdbg.data.mesh_dbg_req.mesh_data.bsteering_param.inactivity_timeout_overload       = ifcfg->inact_tmout_sec_overload;
+    athdbg.data.mesh_dbg_req.mesh_data.bsteering_param.low_rssi_crossing_threshold       = ifcfg->def_rssi_low_xing;
+    athdbg.data.mesh_dbg_req.mesh_data.bsteering_param.low_rate_rssi_crossing_threshold  = ifcfg->def_rssi_xing;
 
     for (index = 0; index < BSTEERING_MAX_CLIENT_CLASS_GROUP; index++) {
-        athdbg.data.bsteering_param.inactivity_timeout_normal[index]         = ifcfg->inact_tmout_sec_normal;
-        athdbg.data.bsteering_param.inactive_rssi_xing_low_threshold[index]  = ifcfg->def_rssi_inact_xing;
-        athdbg.data.bsteering_param.inactive_rssi_xing_high_threshold[index] = ifcfg->def_rssi_inact_xing;
-        athdbg.data.bsteering_param.high_rate_rssi_crossing_threshold[index] = ifcfg->def_rssi_xing;
+        athdbg.data.mesh_dbg_req.mesh_data.bsteering_param.inactivity_timeout_normal[index]         = ifcfg->inact_tmout_sec_normal;
+        athdbg.data.mesh_dbg_req.mesh_data.bsteering_param.inactive_rssi_xing_low_threshold[index]  = ifcfg->def_rssi_inact_xing;
+        athdbg.data.mesh_dbg_req.mesh_data.bsteering_param.inactive_rssi_xing_high_threshold[index] = ifcfg->def_rssi_inact_xing;
+        athdbg.data.mesh_dbg_req.mesh_data.bsteering_param.high_rate_rssi_crossing_threshold[index] = ifcfg->def_rssi_xing;
         // Needed to satisfy parameter validation
-        athdbg.data.bsteering_param.high_tx_rate_crossing_threshold[index]  = 1;
+        athdbg.data.mesh_dbg_req.mesh_data.bsteering_param.high_tx_rate_crossing_threshold[index]  = 1;
     }
 #ifdef OPENSYNC_NL_SUPPORT
     send_nl_command(&sock_ctx, ifcfg->ifname, &athdbg, sizeof(athdbg), NULL, QCA_NL80211_VENDOR_SUBCMD_DBGREQ);
@@ -255,9 +261,10 @@ osync_nl80211_bsal_bs_config(int fd, const bsal_ifconfig_t *ifcfg, bool enable)
 
     // Band steering debug parameters
     memset(&athdbg, 0, sizeof(athdbg));
-    athdbg.cmd = IEEE80211_DBGREQ_BSTEERING_SET_DBG_PARAMS;
-    athdbg.data.bsteering_dbg_param.raw_chan_util_log_enable    = ifcfg->debug.raw_chan_util;
-    athdbg.data.bsteering_dbg_param.raw_rssi_log_enable         = ifcfg->debug.raw_rssi;
+    athdbg.data.mesh_dbg_req.mesh_cmd = MESH_BSTEERING_SET_DBG_PARAMS;
+    athdbg.cmd = IEEE80211_DBGREQ_MESH_SET_GET_CONFIG;
+    athdbg.data.mesh_dbg_req.mesh_data.bsteering_dbg_param.raw_chan_util_log_enable    = ifcfg->debug.raw_chan_util;
+    athdbg.data.mesh_dbg_req.mesh_data.bsteering_dbg_param.raw_rssi_log_enable         = ifcfg->debug.raw_rssi;
 
 #ifdef OPENSYNC_NL_SUPPORT
     send_nl_command(&sock_ctx, ifcfg->ifname, &athdbg, sizeof(athdbg), NULL, QCA_NL80211_VENDOR_SUBCMD_DBGREQ);
@@ -337,8 +344,9 @@ osync_nl80211_bsal_bs_client_config(int fd, const char *ifname, const uint8_t *m
 #ifdef OPENSYNC_NL_SUPPORT
     memset(&athdbg, 0, sizeof(athdbg));
     memcpy(&athdbg.dstmac, mac_addr, sizeof(athdbg.dstmac));
-    athdbg.cmd = IEEE80211_DBGREQ_BSTEERING_SET_PROBE_RESP_WH;
-    athdbg.data.bsteering_probe_resp_wh = (conf->rssi_probe_hwm || conf->rssi_probe_lwm) ? 1 : 0;
+    athdbg.data.mesh_dbg_req.mesh_cmd = MESH_BSTEERING_SET_PROBE_RESP_WH;
+    athdbg.cmd = IEEE80211_DBGREQ_MESH_SET_GET_CONFIG;
+    athdbg.data.mesh_dbg_req.mesh_data.value = (conf->rssi_probe_hwm || conf->rssi_probe_lwm) ? 1 : 0;
     send_nl_command(&sock_ctx, ifname, &athdbg, sizeof(athdbg), NULL, QCA_NL80211_VENDOR_SUBCMD_DBGREQ);
 #endif
 
@@ -453,11 +461,7 @@ osync_nl80211_sta_info(const char *ifname, const uint8_t *mac_addr, bsal_client_
 
     g_stainfo_len = 0;
     memset (bsal_clients, 0, sizeof(bsal_clients));
-    buf_tmp = (uint8_t *) malloc(LIST_STATION_CFG_ALLOC_SIZE);
-    if (!buf_tmp) {
-        LOGI("%s: Unable to allocate memory for station list", __func__);
-        return IOCTL_STATUS_ERROR;
-    }
+    buf_tmp = (uint8_t *) MALLOC(LIST_STATION_CFG_ALLOC_SIZE);
 
     buffer.data         = buf_tmp;
     buffer.length       = LIST_STATION_CFG_ALLOC_SIZE;
@@ -468,7 +472,7 @@ osync_nl80211_sta_info(const char *ifname, const uint8_t *mac_addr, bsal_client_
             QCA_NL80211_VENDOR_SUBCMD_LIST_STA, ifname,
             (char *)&buffer, buffer.length);
     if (0 > rc) {
-        free(buf_tmp);
+        FREE(buf_tmp);
         LOG(ERR,
             "Parsing %s client stats (Failed to get info '%s')",
             ifname,
@@ -479,17 +483,14 @@ osync_nl80211_sta_info(const char *ifname, const uint8_t *mac_addr, bsal_client_
     len = g_stainfo_len;
     LOGI("%s: length - %u", __func__, len);
     buf = bsal_clients;
-    free(buf_tmp);
+    FREE(buf_tmp);
 
 #else
     struct iwreq                    iwreq;
     int                             ret;
 
     len = 24*1024;
-    if(!(buf = malloc(len))) {
-        LOGE("Failed to allocate memory for STA list!");
-        return -1;
-    }
+    buf = MALLOC(len);
 
     memset(&iwreq, 0, sizeof(iwreq));
     STRSCPY(iwreq.ifr_name, ifname);
@@ -501,17 +502,14 @@ osync_nl80211_sta_info(const char *ifname, const uint8_t *mac_addr, bsal_client_
     if(ret < 0) {
         LOGE("%s: Failed to get station list, errno = %d (%s)",
               ifname, errno, strerror(errno));
-        free(buf);
+        FREE(buf);
         return -1;
     }
     else if(ret > 0) {
         // Wasn't enough space, let's realloc
         len = ret;
-        free(buf);
-        if(!(buf = malloc(len))) {
-            LOGE("Failed to allocate memory for STA list! (%d bytes)", len);
-            return -1;
-        }
+        FREE(buf);
+        buf = MALLOC(len);
 
         memset(&iwreq, 0, sizeof(iwreq));
         STRSCPY(iwreq.ifr_name, ifname);
@@ -523,7 +521,7 @@ osync_nl80211_sta_info(const char *ifname, const uint8_t *mac_addr, bsal_client_
         if(ret < 0) {
             LOGE("%s: Failed to get station list, errno = %d (%s)",
                   ifname, errno, strerror(errno));
-            free(buf);
+            FREE(buf);
             return -1;
         }
     }
@@ -560,7 +558,7 @@ osync_nl80211_sta_info(const char *ifname, const uint8_t *mac_addr, bsal_client_
         }
     }
 #ifndef OPENSYNC_NL_SUPPORT
-    free(buf);
+    FREE(buf);
 #endif
     if (info->connected)
         qca_bsal_client_stats(ifname, mac_addr, info);
@@ -573,9 +571,10 @@ osync_nl80211_bsal_client_measure(const char *ifname, const uint8_t *mac_addr, i
     struct ieee80211req_athdbg      athdbg;
 
     memset(&athdbg, 0, sizeof(athdbg));
-    athdbg.cmd = IEEE80211_DBGREQ_BSTEERING_GET_RSSI;
+    athdbg.data.mesh_dbg_req.mesh_cmd = MESH_BSTEERING_GET_RSSI;
+    athdbg.cmd = IEEE80211_DBGREQ_MESH_SET_GET_CONFIG;
     memcpy(&athdbg.dstmac, mac_addr, sizeof(athdbg.dstmac));
-    athdbg.data.bsteering_rssi_num_samples = num_samples;
+    athdbg.data.mesh_dbg_req.mesh_data.value = num_samples;
 
 #ifdef OPENSYNC_NL_SUPPORT
     return send_nl_command(&sock_ctx, ifname, &athdbg, sizeof(athdbg), NULL, QCA_NL80211_VENDOR_SUBCMD_DBGREQ);
@@ -910,55 +909,130 @@ osync_nl80211_radio_type_get(char	*ifName,
         radio_type_t               *type)
 {
 #ifdef OPENSYNC_NL_SUPPORT
+    char *phy;
+    size_t i;
+    char *buf;
     char *line;
-    int c;
-    bool has_upper = false;
-    bool has_lower = false;
-    bool has_24g = false;
-    char *chan;
-    char *keyword = NULL;
-    char *buf = NULL;
-    char cmd[128];
-    const char *phy = NULL;
+    char *p;
+    bool has_2g = false;
+    bool has_5gl = false;
+    bool has_5gu = false;
+    bool has_6g = false;
+    bool freq = 0;
+    int band = 0;
+    int chan;
+    const struct {
+        bool has_2g;
+        bool has_5gl;
+        bool has_5gu;
+        bool has_6g;
+        radio_type_t type;
+    } types[] = {
+        { 1, 0, 0, 0, RADIO_TYPE_2G },
+        { 0, 1, 1, 0, RADIO_TYPE_5G },
+        { 0, 1, 0, 0, RADIO_TYPE_5GL },
+        { 0, 0, 1, 0, RADIO_TYPE_5GU },
+        { 0, 0, 0, 1, RADIO_TYPE_6G },
+    };
 
-    snprintf(cmd, sizeof(cmd), "/sys/class/net/%s/parent", ifName);
-    phy = strexa("cat", cmd) ?: "0";
-    buf = strexa("exttool", "--interface", phy, "--list");
-    if (!buf)
+#define IW_BAND_2G 1
+#define IW_BAND_5G 2
+#define IW_BAND_60G 3 /* 11ad, unused */
+#define IW_BAND_6G 4
+
+    phy = file_geta(strfmta("/sys/class/net/%s/phy80211/name", ifName)) ?: "";
+    phy = strchomp(phy, "\r\n ");
+    buf = strexa("iw", phy, "info");
+    if (WARN_ON(!buf))
         return IOCTL_STATUS_ERROR;
+#if 0
+        Band 2:
+                Capabilities: 0x19e7
+                        RX LDPC
+                        HT20/HT40
+...
+                Frequencies:
+                        * 5180 MHz [36] (20.0 dBm)
+                        * 5200 MHz [40] (20.0 dBm)
+                        * 5220 MHz [44] (20.0 dBm)
+                        * 5240 MHz [48] (20.0 dBm)
+                        * 5260 MHz [52] (20.0 dBm)
+                        * 5280 MHz [56] (20.0 dBm)
+#endif
+
+    /* Opensync assumes single-band radio configurations. As
+     * such if a radio type is ambiguous this needs to
+     * return an error and have system integrator fix it up
+     * so the assumption is fulfilled, eg. by changing
+     * device driver provisioning.
+     */
 
     while ((line = strsep(&buf, "\n"))) {
-        if (!(keyword = strsep(&line, " ")))
+        if (strstr(line, "\tBand ") == line) {
+            p = strchr(line, ' ');
+            if (!p) continue;
+            p += 1;
+            band = atoi(p);
+
+            switch (band) {
+                case IW_BAND_2G: has_2g = true; break;
+                case IW_BAND_6G: has_6g = true; break;
+                /* 5G band is distinguished based on 5GL /
+                 * 5GU later on based on discovered
+                 * frequencies.
+                 */
+            }
             continue;
-        if (!(chan = strsep(&line, " ")))
+        }
+
+        if (strstr(line, "\t\tFrequencies:")) {
+            freq = true;
             continue;
-
-        c = atoi(chan);
-        if(c < 100)
-            has_lower = true;
-        if(c >= 100)
-            has_upper = true;
-
-        if (c >= 1 && c <= 20)
-            has_24g = true;
-
-        if (has_24g) {
-            *type = RADIO_TYPE_2G;
-            break;
         }
-        else if (has_upper && has_lower) {
-            *type = RADIO_TYPE_5G;
+
+        if (strstr(line, "\t\t\t") != line) {
+            freq = false;
+            continue;
         }
-        else if (has_lower) {
-            *type = RADIO_TYPE_5GL;
-        }
-        else if (has_upper) {
-            *type = RADIO_TYPE_5GU;
-        } else {
-		    LOG(ERR,"Parsing %s radio type (Invalid type)",	phy);
-	        return IOCTL_STATUS_ERROR;
+
+        if (freq) {
+            /* eg. "\t\t\t* 5180 MHz [36] (20.0 dBm)" */
+            p = strchr(line, '[');
+            if (!p) continue;
+            p += 1;
+            chan = atoi(p);
+
+            /* This is arbitrary OpenSync specific
+             * distinction, not an 802.11 distinction.
+             */
+            if (band == IW_BAND_5G) {
+                if (chan < 100)
+                    has_5gl = true;
+                else
+                    has_5gu = true;
+            }
         }
     }
+
+    for (i = 0; i < ARRAY_SIZE(types); i++) {
+        if (types[i].has_2g == has_2g &&
+            types[i].has_5gl == has_5gl &&
+            types[i].has_5gu == has_5gu &&
+            types[i].has_6g == has_6g) {
+            *type = types[i].type;
+            return IOCTL_STATUS_OK;
+        }
+    }
+
+#undef IW_BAND_2G
+#undef IW_BAND_5G
+#undef IW_BAND_60G
+#undef IW_BAND_6G
+
+    LOGW("%s: ambiguous radio type: 2g=%d 5gl=%d 5gu=%d 6g=%d",
+            ifName, has_2g, has_5gl, has_5gu, has_6g);
+    WARN_ON(1);
+    return IOCTL_STATUS_ERROR;
 #if 0
     char buf[64];
     if (WARN(-1 == util_exec_read(rtrimnl, buf, sizeof(buf),
@@ -1119,15 +1193,27 @@ osync_nl80211_get_essid(int sock_fd, const char *ifname, char *dest, int dest_le
 
 #if defined (OSYNC_IOCTL_LIB) && (OSYNC_IOCTL_LIB == 3)
 extern struct socket_context sock_ctx;
+
+const char *
+qca_get_xml_path(const char *ifname)
+{
+    if (strstr(ifname, "wifi") == ifname)
+        return "/lib/wifi/qcacommands_ol_radio.xml";
+
+    return "/lib/wifi/qcacommands_vap.xml";
+}
+
 #ifdef OPENSYNC_NL_SUPPORT
 static int
 util_qca_set_int(const char *ifname, const char *iwprivname, int v)
 {
     char arg[16];
     char command[32] = "--";
+    const char *xml_path = qca_get_xml_path(ifname);
+
     strcat(command,iwprivname);
 
-    const char *argv[] = { "cfg80211tool.1", "-i", ifname, "-h", "none", "--START_CMD", command, "--value0", arg,
+    const char *argv[] = { "cfg80211tool.1", "-i", ifname, "-f", xml_path, "-h", "none", "--START_CMD", command, "--value0", arg,
                            "--RESPONSE", command, "--END_CMD", NULL };
     char c;
 
@@ -1318,11 +1404,12 @@ static inline bool
 qca_get_int(const char *ifname, const char *iwprivname, int *v)
 {
     char *p;
+    const char *xml_path = qca_get_xml_path(ifname);
 
 #ifdef OPENSYNC_NL_SUPPORT
     char command[32] = "--";
     strcat(command,iwprivname);
-    const char *argv[] = { "cfg80211tool.1", "-i", ifname, "-h", "none", "--START_CMD", command, "--RESPONSE", command,
+    const char *argv[] = { "cfg80211tool.1", "-i", ifname, "-f", xml_path, "-h", "none", "--START_CMD", command, "--RESPONSE", command,
                             "--END_CMD", NULL };
 #else
     const char *argv[] = { "iwpriv", ifname, iwprivname, NULL };
@@ -1411,28 +1498,6 @@ nl80211_device_txchainmask_get(radio_entry_t              *radio_cfg,
 #define QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION 74
 extern struct socket_context sock_ctx;
 
-int send_scan_req(struct socket_context *sock_ctx, const char *ifname, void *buf,
-        size_t buflen, void (*callback) (struct cfg80211_data *arg), int cmd)
-{
-    int msg;
-    struct cfg80211_data buffer;
-    if (sock_ctx->cfg80211) {
-        buffer.data = buf;
-        buffer.length = buflen;
-        buffer.callback = callback;
-        buffer.parse_data = 0;
-        msg = wifi_cfg80211_send_generic_command(&(sock_ctx->cfg80211_ctxt),
-                QCA_NL80211_VENDOR_SUBCMD_TRIGGER_SCAN,
-                cmd, ifname, (char *)&buffer, buflen);
-        if (msg < 0) {
-            LOG(ERR,"Could not send NL scan command");
-            return -1;
-        }
-        return buffer.length;
-    }
-    return 0;
-}
-
 #ifdef OPENSYNC_NL_SUPPORT
 static void  bss_info_handler(struct cfg80211_data *buffer)
 {
@@ -1487,29 +1552,5 @@ osync_nl80211_scan_results_fetch(radio_entry_t *radio_cfg_ctx)
 #endif
 }
 
-static inline int
-osync_nl80211_scan_channel(char *ifname, struct iw_scan_req *iw_scan_options ,int iw_scan_flags)
-{
-    int rc;
-#ifdef OPENSYNC_NL_SUPPORT
-    rc = send_scan_req(&sock_ctx, ifname, iw_scan_options, sizeof(struct iw_scan_req), NULL, 0);
-#else
-    struct iwreq request;
-
-    memset(&request, 0, sizeof(request));
-
-    request.u.data.pointer = iw_scan_options;
-    request.u.data.length = sizeof(struct iw_scan_req);
-    request.u.data.flags = iw_scan_flags;
-    /* Initiate wireless scanning **/
-    rc =
-        ioctl80211_request_send(
-            ioctl80211_fd_get(),
-            ifname,
-            SIOCSIWSCAN,
-            &request);
-#endif
-    return rc;
-}
 #endif
 #endif /* IOCTL80211_NETLINK_11AX_H_INCLUDED */

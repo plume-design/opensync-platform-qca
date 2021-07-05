@@ -33,6 +33,7 @@ static void argv2str(const char **argv, char *buf, int len);
 void rtrimws(char *str);
 void rtrimnl(char *str);
 int readcmd(char *buf, size_t buflen, void (*xfrm)(char *), const char *fmt, ...);
+const char *qca_get_xml_path(const char *ifname);
 
 static inline bool qca_get_int(const char *ifname, const char *iwprivname, int *v)
 {
@@ -40,8 +41,10 @@ static inline bool qca_get_int(const char *ifname, const char *iwprivname, int *
 
 #ifdef OPENSYNC_NL_SUPPORT
     char command[32] = "--";
+    const char *xml_path = qca_get_xml_path(ifname);
+
     strcat(command,iwprivname);
-    const char *argv[] = { "cfg80211tool.1", "-i", ifname, "-h", "none", "--START_CMD",
+    const char *argv[] = { "cfg80211tool.1", "-i", ifname, "-f", xml_path, "-h", "none", "--START_CMD",
                             command, "--RESPONSE", command, "--END_CMD", NULL };
 #else
     const char *argv[] = { "iwpriv", ifname, iwprivname, NULL };
@@ -73,7 +76,9 @@ static inline int qca_set_int(const char *ifname, const char *iwprivname, int v)
     char command[32] = "--";
     strcat(command,iwprivname);
 
-    const char *argv[] = { "cfg80211tool.1", "-i", ifname, "-h", "none", "--START_CMD",
+    const char *xml_path = qca_get_xml_path(ifname);
+
+    const char *argv[] = { "cfg80211tool.1", "-i", ifname, "-f", xml_path, "-h", "none", "--START_CMD",
                             command, "--value0", arg, "--RESPONSE", command, "--END_CMD", NULL };
 #else
     const char *argv[] = { "iwpriv", ifname, iwprivname, arg, NULL };
@@ -98,7 +103,9 @@ static inline char *qca_getmac(const char *vif, char *buf, int len)
             return buf;
 
 #ifdef OPENSYNC_NL_SUPPORT
-    if ((err = util_exec_read(NULL, buf, len, "cfg80211tool.1", "-i", vif, "-h", "none",
+    const char *xml_path = qca_get_xml_path(vif);
+
+    if ((err = util_exec_read(NULL, buf, len, "cfg80211tool.1", "-i", vif, "-f", xml_path, "-h", "none",
                                 "--START_CMD", "--getmac", "--RESPONSE", "--getmac", "--END_CMD"))) {
             LOGW("%s: failed to get mac list: %d", vif, err);
             return NULL;
@@ -131,6 +138,8 @@ static inline void qca_setmac(const char *vif, const char *want)
     char *p;
     char *q;
 
+    const char *xml_path = qca_get_xml_path(vif);
+
     if (!(has = util_qca_getmac(vif, A(4096)))) {
             LOGW("%s: acl: failed to get mac list", vif);
             has = "";
@@ -144,7 +153,7 @@ static inline void qca_setmac(const char *vif, const char *want)
         if (!strstr(has, mac)) {
                 LOGI("%s: acl: adding mac: %s", vif, mac);
 #ifdef OPENSYNC_NL_SUPPORT
-            if (E("cfg80211tool.1", "-i", vif, "-h", "none", "--START_CMD", "--addmac",
+            if (E("cfg80211tool.1", "-i", vif, "-f", xml_path, "-h", "none", "--START_CMD", "--addmac",
                 "--value0", mac,"--RESPONSE", "--addmac", "--END_CMD"))
 #else
             if (E("iwpriv", vif, "addmac", mac))
@@ -158,7 +167,7 @@ static inline void qca_setmac(const char *vif, const char *want)
         if (!strstr(want, mac)) {
             LOGI("%s: acl: deleting mac: %s", vif, mac);
 #ifdef OPENSYNC_NL_SUPPORT
-        if (E("cfg80211tool.1", "-i", vif, "-h", "none", "--START_CMD", "--delmac",
+        if (E("cfg80211tool.1", "-i", vif, "-f", xml_path, "-h", "none", "--START_CMD", "--delmac",
             "--value0", mac,"--RESPONSE", "--delmac", "--END_CMD"))
 #else
         if (E("iwpriv", vif, "delmac", mac))
@@ -168,18 +177,19 @@ static inline void qca_setmac(const char *vif, const char *want)
         }
     }
 
-    free(p);
-    free(q);
+    FREE(p);
+    FREE(q);
 }
 
 static inline bool qca_get_ht_mode(const char *vif, char *htmode, int htmode_len)
 {
     char buf[120];
     char *p;
+    const char *xml_path = qca_get_xml_path(vif);
 
     if (WARN(-1 == util_exec_read(rtrimnl, buf, sizeof(buf),
 #ifdef OPENSYNC_NL_SUPPORT
-                "cfg80211tool.1", "-i", vif, "-h", "none", "--START_CMD", "--get_mode",
+                "cfg80211tool.1", "-i", vif, "-f", xml_path, "-h", "none", "--START_CMD", "--get_mode",
                 "--RESPONSE", "--get_mode", "--END_CMD"),
 #else
                 "iwpriv", vif, "get_mode"),
@@ -204,6 +214,8 @@ static inline int qca_set_str_lazy(const char *device_ifname,
 {
     char buf[64];
     char *p;
+    const char *xml_path = qca_get_xml_path(device_ifname);
+
 #ifdef OPENSYNC_NL_SUPPORT
     char command_get[32] = "--";
     strcat(command_get,iwpriv_get);
@@ -213,7 +225,7 @@ static inline int qca_set_str_lazy(const char *device_ifname,
 
     if (WARN(-1 == util_exec_read(rtrimnl, buf, sizeof(buf),
 #ifdef OPENSYNC_NL_SUPPORT
-            "cfg80211tool.1", "-i", device_ifname, "-h", "none", "--START_CMD", command_get,
+            "cfg80211tool.1", "-i", device_ifname, "-f", xml_path, "-h", "none", "--START_CMD", command_get,
             "--RESPONSE", command_get, "--END_CMD"),
 #else
             "iwpriv", device_ifname, iwpriv_get),
@@ -232,7 +244,7 @@ static inline int qca_set_str_lazy(const char *device_ifname,
 
     LOGI("%s: setting '%s' = '%s'", device_ifname, iwpriv_set, v);
 #ifdef OPENSYNC_NL_SUPPORT
-    if (WARN(-1 == util_exec_simple("cfg80211tool.1", "-i", device_ifname, "-h", "none", "--START_CMD", command_set,
+    if (WARN(-1 == util_exec_simple("cfg80211tool.1", "-i", device_ifname, "-f", xml_path, "-h", "none", "--START_CMD", command_set,
                                         "--value0", v,"--RESPONSE", command_set, "--END_CMD"),
 #else
     if (WARN(-1 == util_exec_simple("iwpriv", device_ifname, iwpriv_set, v),

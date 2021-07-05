@@ -44,6 +44,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "log.h"
 #include "util.h"
+#include "memutil.h"
 
 #include "ioctl80211.h"
 #include "ioctl80211_scan.h"
@@ -146,15 +147,11 @@ int ioctl80211_priv_request_send(
 {
     int                         rc;
     struct iwreq                request;
-    void *ptr;
+    void *ptr = NULL;
 
     *args = NULL;
     // alloc max size
-    ptr = calloc(sizeof(struct iw_priv_args), IOCTL80211_PRIV_CMDS_MAX);
-    if (!ptr) {
-        LOGE("%s: Failed to allocate memory for private ioctl data", ifname);
-        return (-1);
-    }
+    ptr = CALLOC(sizeof(struct iw_priv_args), IOCTL80211_PRIV_CMDS_MAX);
     memset (&request, 0, sizeof(request));
     request.u.data.pointer = (caddr_t) ptr;
     request.u.data.length = IOCTL80211_PRIV_CMDS_MAX;
@@ -166,11 +163,11 @@ int ioctl80211_priv_request_send(
                 &request);
     if (rc >= 0) {
         // trim excess allocation
-        ptr = realloc(ptr, sizeof(struct iw_priv_args) * request.u.data.length);
+        ptr = REALLOC(ptr, sizeof(struct iw_priv_args) * request.u.data.length);
         *args = ptr;
         return (request.u.data.length);
     }
-    free(ptr);
+    FREE(ptr);
 
     return (-1);
 }
@@ -250,9 +247,7 @@ static int ioctl80211_get_priv_ioctl_list(
     priv = NULL;
 
     for (n = 64; n <= 1024; n *= 2) {
-        new = realloc(priv, n * sizeof(priv[0]));
-        if (!new)
-            break;
+        new = REALLOC(priv, n * sizeof(priv[0]));
 
         priv = new;
         memset(&wrq, 0, sizeof(wrq));
@@ -271,7 +266,7 @@ static int ioctl80211_get_priv_ioctl_list(
     }
 
     if (priv)
-        free(priv);
+        FREE(priv);
 
     return -1;
 }
@@ -305,7 +300,7 @@ int ioctl80211_get_priv_ioctl(
 
 free:
     if (priv)
-        free(priv);
+        FREE(priv);
 
     return rc;
 }

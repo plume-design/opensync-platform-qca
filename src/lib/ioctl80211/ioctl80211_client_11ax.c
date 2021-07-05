@@ -52,6 +52,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "log.h"
 #include "os.h"
 #include "kconfig.h"
+#include "memutil.h"
 
 #include "ioctl80211.h"
 #include "ioctl80211_client.h"
@@ -1195,11 +1196,7 @@ ioctl_status_t ioctl80211_clients_list_fetch(
     struct cfg80211_data            buffer;
     uint8_t                        *buf;
 
-    buf = malloc(LIST_STATION_CFG_ALLOC_SIZE);
-    if (!buf) {
-        LOGI("%s: Unable to allocate memory for station list\n", __func__);
-        return IOCTL_STATUS_ERROR;
-    }
+    buf = MALLOC(LIST_STATION_CFG_ALLOC_SIZE);
 
     buffer.data         = buf;
     buffer.length       = LIST_STATION_CFG_ALLOC_SIZE;
@@ -1210,7 +1207,7 @@ ioctl_status_t ioctl80211_clients_list_fetch(
             QCA_NL80211_VENDOR_SUBCMD_LIST_STA, ifName,
             (char *)&buffer, buffer.length);
     if (0 > rc) {
-        free(buf);
+        FREE(buf);
         LOG(ERR,
             "Parsing %s %s client stats (Failed to get info '%s')",
             radio_get_name_from_type(radio_type),
@@ -1221,7 +1218,7 @@ ioctl_status_t ioctl80211_clients_list_fetch(
 
     length = buffer.length;
     LOGD("%s: length - %u\n", __func__, length);
-    free(buf);
+    FREE(buf);
 #else
     struct iwreq                    request;
 
@@ -1546,9 +1543,7 @@ ioctl_status_t ioctl80211_peer_list_fetch(
     if(f==NULL)
         return -1;
 
-    stats = (iwstats*)malloc(sizeof(iwstats));
-    if(stats == NULL)
-        return -1;
+    stats = (iwstats*)MALLOC(sizeof(iwstats));
     while(fgets(buf,255,f))
     {
             bp=buf;

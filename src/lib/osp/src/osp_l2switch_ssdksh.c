@@ -31,6 +31,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "os_util.h"
 #include "osp_l2switch.h"
 #include "target_switch.h"
+#include "memutil.h"
 
 #define ETH_PREFIX "eth"
 #define ETH_PREFIX_LEN 3
@@ -85,7 +86,7 @@ bool osp_l2switch_new(char *ifname)
         return true;
     }
     LOGD("osp_l2switch: Creating new entry for port[%s]", ifname);
-    self = malloc(sizeof(osp_l2switch_cfg_t));
+    self = MALLOC(sizeof(osp_l2switch_cfg_t));
 
     memset(self, 0, sizeof(osp_l2switch_cfg_t));
     for (idx = 0; idx < 4096; idx++)
@@ -157,7 +158,7 @@ void osp_l2switch_del(char *ifname)
         return;
 
     ds_tree_remove(&l2swport_list, self);
-    free(self);
+    FREE(self);
 
     LOGD("osp_l2switch: Deleting port[%s]'s vlan config successful.", ifname);
     return;

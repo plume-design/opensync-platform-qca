@@ -29,6 +29,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "ds.h"
 #include "ds_dlist.h"
+#include "memutil.h"
 
 #include "dpp_client.h"
 
@@ -95,10 +96,8 @@ ioctl80211_client_record_t *ioctl80211_client_record_alloc()
 {
     ioctl80211_client_record_t *record = NULL;
 
-    record = malloc(sizeof(ioctl80211_client_record_t));
-    if (record) {
-        memset(record, 0, sizeof(ioctl80211_client_record_t));
-    }
+    record = MALLOC(sizeof(ioctl80211_client_record_t));
+    memset(record, 0, sizeof(ioctl80211_client_record_t));
 
     return record;
 }
@@ -107,7 +106,7 @@ static inline
 void ioctl80211_client_record_free(ioctl80211_client_record_t *record)
 {
     if (NULL != record) {
-        free(record);
+        FREE(record);
     }
 }
 

@@ -50,6 +50,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "log.h"
 #include "util.h"
+#include "memutil.h"
 #include "ioctl80211.h"
 #include "ioctl80211_priv.h"
 
@@ -119,11 +120,7 @@ ioctl80211_priv_init(const char *ifname, int fd)
         }
     }
 
-    priv_data = calloc(1, sizeof(*priv_data));
-    if (!priv_data) {
-        LOGE("%s: Failed to allocate memory for private ioctl data", ifname);
-        return NULL;
-    }
+    priv_data = CALLOC(1, sizeof(*priv_data));
 
     priv_data->fd = fd;
     STRSCPY(priv_data->ifname, ifname);
@@ -134,7 +131,7 @@ ioctl80211_priv_init(const char *ifname, int fd)
                 &priv_data->args);
     if (priv_data->nargs < 0) {
         LOGE("%s: Failed to retrieve priv information", priv_data->ifname);
-        free(priv_data);
+        FREE(priv_data);
         return NULL;
     }
 
@@ -151,10 +148,10 @@ ioctl80211_priv_free(ioctl80211_priv_t priv)
     ioctl80211_priv_data_t  *priv_data = (ioctl80211_priv_data_t *)priv;
 
     if (priv_data->args)
-        free(priv_data->args);
+        FREE(priv_data->args);
 
     if (priv_data)
-        free(priv_data);
+        FREE(priv_data);
 
     return;
 }

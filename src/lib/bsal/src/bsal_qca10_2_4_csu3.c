@@ -71,6 +71,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "evsched.h"
 #include "ioctl80211.h"
 #include "ds_tree.h"
+#include "memutil.h"
 
 #include "target.h"
 #include "qca_bsal.h"
@@ -511,10 +512,7 @@ static void qca_bsal_event_process(void)
         return;
     }
 
-    if (!(event = calloc(1, sizeof(*event)))) {
-        LOGE("Failed to allocate memory for new event!");
-        return;
-    }
+    event = CALLOC(1, sizeof(*event));
 
     STRSCPY(event->ifname, ifname);
 
@@ -614,7 +612,7 @@ static void qca_bsal_event_process(void)
         if (!c_get_value_by_key(map_disc_source, bsev->data.bs_disconnect_ind.source, &val)) {
             LOGE("qca_bsal_event_process(ATH_EVENT_BSTEERING_CLIENT_DISCONNECTED): Unknown source %d",
                                                  bsev->data.bs_disconnect_ind.source);
-            free(event);
+            FREE(event);
             return;
         }
         event->data.disconnect.source = val;
@@ -622,7 +620,7 @@ static void qca_bsal_event_process(void)
         if (!c_get_value_by_key(map_disc_type, bsev->data.bs_disconnect_ind.type, &val)) {
             LOGE("qca_bsal_event_process(ATH_EVENT_BSTEERING_CLIENT_DISCONNECTED): Unknown type %d",
                                                bsev->data.bs_disconnect_ind.type);
-            free(event);
+            FREE(event);
             return;
         }
         event->data.disconnect.type = val;
@@ -654,7 +652,7 @@ static void qca_bsal_event_process(void)
                                 bsev->data.bs_rssi_xing.inact_rssi_xing, &val)) {
             LOGE("qca_bsal_event_process(ATH_EVENT_BSTEERING_CLIENT_RSSI_CROSSING): Unknown inact %d",
                                 bsev->data.bs_rssi_xing.inact_rssi_xing);
-            free(event);
+            FREE(event);
             return;
         }
         event->data.rssi_change.inact_xing = val;
@@ -663,7 +661,7 @@ static void qca_bsal_event_process(void)
                                 bsev->data.bs_rssi_xing.rate_rssi_xing, &val)) {
             LOGE("qca_bsal_event_process(ATH_EVENT_BSTEERING_CLIENT_RSSI_CROSSING): Unknown rate %d",
                                 bsev->data.bs_rssi_xing.rate_rssi_xing);
-            free(event);
+            FREE(event);
             return;
         }
         event->data.rssi_change.high_xing = val;
@@ -672,7 +670,7 @@ static void qca_bsal_event_process(void)
                                 bsev->data.bs_rssi_xing.low_rssi_xing, &val)) {
             LOGE("qca_bsal_event_process(ATH_EVENT_BSTEERING_CLIENT_RSSI_CROSSING): Unknown low %d",
                                 bsev->data.bs_rssi_xing.low_rssi_xing);
-            free(event);
+            FREE(event);
             return;
         }
         event->data.rssi_change.low_xing = val;
@@ -701,7 +699,7 @@ static void qca_bsal_event_process(void)
 
     default:
         /* ignore this event */
-        free(event);
+        FREE(event);
         return;
     }
 
@@ -710,7 +708,7 @@ static void qca_bsal_event_process(void)
     // Free the memory allocated for event here, as _bsal_event_cb will
     // allocate the memory and copy the contents
     if (event) {
-        free(event);
+        FREE(event);
     }
 
     return;
@@ -1104,10 +1102,7 @@ int qca_bsal_client_info(
     memset(info, 0, sizeof(*info));
 
     len = 24*1024;
-    if (!(buf = malloc(len))) {
-        LOGE("Failed to allocate memory for STA list!");
-        return -1;
-    }
+    buf = MALLOC(len);
 
     memset(&iwreq, 0, sizeof(iwreq));
     STRSCPY(iwreq.ifr_name, ifname);
@@ -1119,17 +1114,14 @@ int qca_bsal_client_info(
     if (ret < 0) {
         LOGE("%s: Failed to get station list, errno = %d (%s)",
                                             ifname, errno, strerror(errno));
-        free(buf);
+        FREE(buf);
         return -1;
     }
     else if (ret > 0) {
         // Wasn't enough space, let's realloc
         len = ret;
-        free(buf);
-        if (!(buf = malloc(len))) {
-            LOGE("Failed to allocate memory for STA list! (%d bytes)", len);
-            return -1;
-        }
+        FREE(buf);
+        buf = MALLOC(len);
 
         memset(&iwreq, 0, sizeof(iwreq));
         STRSCPY(iwreq.ifr_name, ifname);
@@ -1141,7 +1133,7 @@ int qca_bsal_client_info(
         if (ret < 0) {
             LOGE("%s: Failed to get station list, errno = %d (%s)",
                                             ifname, errno, strerror(errno));
-            free(buf);
+            FREE(buf);
             return -1;
         }
     }
@@ -1178,7 +1170,7 @@ int qca_bsal_client_info(
         }
     }
 
-    free(buf);
+    FREE(buf);
 
     if (info->connected)
         qca_bsal_client_stats(ifname, mac_addr, info);

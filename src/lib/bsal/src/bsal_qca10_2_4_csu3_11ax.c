@@ -71,6 +71,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "evsched.h"
 #include "ioctl80211.h"
 #include "ds_tree.h"
+#include "memutil.h"
 
 #include "target.h"
 #include "qca_bsal.h"
@@ -512,10 +513,7 @@ static void qca_bsal_event_process(void)
         return;
     }
 
-    if (!(event = calloc(1, sizeof(*event)))) {
-        LOGE("Failed to allocate memory for new event!");
-        return;
-    }
+    event = CALLOC(1, sizeof(*event));
 
     STRSCPY(event->ifname, ifname);
 
@@ -615,7 +613,7 @@ static void qca_bsal_event_process(void)
         if (!c_get_value_by_key(map_disc_source, bsev->data.bs_disconnect_ind.source, &val)) {
             LOGE("qca_bsal_event_process(ATH_EVENT_BSTEERING_CLIENT_DISCONNECTED): Unknown source %d",
                                                  bsev->data.bs_disconnect_ind.source);
-            free(event);
+            FREE(event);
             return;
         }
         event->data.disconnect.source = val;
@@ -623,7 +621,7 @@ static void qca_bsal_event_process(void)
         if (!c_get_value_by_key(map_disc_type, bsev->data.bs_disconnect_ind.type, &val)) {
             LOGE("qca_bsal_event_process(ATH_EVENT_BSTEERING_CLIENT_DISCONNECTED): Unknown type %d",
                                                bsev->data.bs_disconnect_ind.type);
-            free(event);
+            FREE(event);
             return;
         }
         event->data.disconnect.type = val;
@@ -655,7 +653,7 @@ static void qca_bsal_event_process(void)
                                 bsev->data.bs_rssi_xing.inact_rssi_xing, &val)) {
             LOGE("qca_bsal_event_process(ATH_EVENT_BSTEERING_CLIENT_RSSI_CROSSING): Unknown inact %d",
                                 bsev->data.bs_rssi_xing.inact_rssi_xing);
-            free(event);
+            FREE(event);
             return;
         }
         event->data.rssi_change.inact_xing = val;
@@ -664,7 +662,7 @@ static void qca_bsal_event_process(void)
                                 bsev->data.bs_rssi_xing.rate_rssi_xing, &val)) {
             LOGE("qca_bsal_event_process(ATH_EVENT_BSTEERING_CLIENT_RSSI_CROSSING): Unknown rate %d",
                                 bsev->data.bs_rssi_xing.rate_rssi_xing);
-            free(event);
+            FREE(event);
             return;
         }
         event->data.rssi_change.high_xing = val;
@@ -673,7 +671,7 @@ static void qca_bsal_event_process(void)
                                 bsev->data.bs_rssi_xing.low_rssi_xing, &val)) {
             LOGE("qca_bsal_event_process(ATH_EVENT_BSTEERING_CLIENT_RSSI_CROSSING): Unknown low %d",
                                 bsev->data.bs_rssi_xing.low_rssi_xing);
-            free(event);
+            FREE(event);
             return;
         }
         event->data.rssi_change.low_xing = val;
@@ -702,7 +700,7 @@ static void qca_bsal_event_process(void)
 
     default:
         /* ignore this event */
-        free(event);
+        FREE(event);
         return;
     }
 
@@ -711,7 +709,7 @@ static void qca_bsal_event_process(void)
     // Free the memory allocated for event here, as _bsal_event_cb will
     // allocate the memory and copy the contents
     if (event) {
-        free(event);
+        FREE(event);
     }
 
     return;
@@ -742,7 +740,8 @@ int qca_bsal_client_get_datarate_info(
     int                             result = 0;
 
     memset(&athdbg, 0, sizeof(athdbg));
-    athdbg.cmd = IEEE80211_DBGREQ_BSTEERING_GET_DATARATE_INFO;
+    athdbg.data.mesh_dbg_req.mesh_cmd = MESH_BSTEERING_GET_DATARATE_INFO;
+    athdbg.cmd = IEEE80211_DBGREQ_MESH_SET_GET_CONFIG;
     athdbg.needs_reply = DBGREQ_REPLY_IS_REQUIRED;
     memcpy(&athdbg.dstmac, mac_addr, sizeof(athdbg.dstmac));
 #ifdef OPENSYNC_NL_SUPPORT
@@ -761,13 +760,13 @@ int qca_bsal_client_get_datarate_info(
         return result;
     }
 #endif
-    datarate->max_chwidth = athdbg.data.bsteering_datarate_info.max_chwidth;
-    datarate->max_streams = athdbg.data.bsteering_datarate_info.num_streams;
-    datarate->phy_mode = athdbg.data.bsteering_datarate_info.phymode;
-    datarate->max_MCS = athdbg.data.bsteering_datarate_info.max_MCS;
-    datarate->max_txpower = athdbg.data.bsteering_datarate_info.max_txpower;
-    datarate->is_static_smps = athdbg.data.bsteering_datarate_info.is_static_smps;
-    datarate->is_mu_mimo_supported = athdbg.data.bsteering_datarate_info.is_mu_mimo_supported;
+    datarate->max_chwidth = athdbg.data.mesh_dbg_req.mesh_data.bsteering_datarate_info.max_chwidth;
+    datarate->max_streams = athdbg.data.mesh_dbg_req.mesh_data.bsteering_datarate_info.num_streams;
+    datarate->phy_mode = athdbg.data.mesh_dbg_req.mesh_data.bsteering_datarate_info.phymode;
+    datarate->max_MCS = athdbg.data.mesh_dbg_req.mesh_data.bsteering_datarate_info.max_MCS;
+    datarate->max_txpower = athdbg.data.mesh_dbg_req.mesh_data.bsteering_datarate_info.max_txpower;
+    datarate->is_static_smps = athdbg.data.mesh_dbg_req.mesh_data.bsteering_datarate_info.is_static_smps;
+    datarate->is_mu_mimo_supported = athdbg.data.mesh_dbg_req.mesh_data.bsteering_datarate_info.is_mu_mimo_supported;
 
     return result;
 }

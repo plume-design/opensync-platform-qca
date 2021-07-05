@@ -182,7 +182,7 @@ bool os_nif_nss_check(void)
 
 #if !defined(USE_NSS_GRE) && !defined(USE_OVS_GRE)
 static const char *os_nif_gretap_softwds_module = "/sys/module/softwds";
-static const char *os_nif_gretap_softwds_script = "/usr/plume/bin/softwdsgre.sh";
+static const char *os_nif_gretap_softwds_script = CONFIG_TARGET_PATH_BIN"/softwdsgre.sh";
 
 
 static bool
@@ -307,12 +307,16 @@ bool os_nif_gretap_create(
     /*
      * OVS GRE tunnels
      */
-    char *br = "br-home";
+    char *br = CONFIG_TARGET_LAN_BRIDGE_NAME;
 
     /* g-*-* interfaces are typically added to br-wan */
     if (strncmp(ifname, "g-", strlen("g-")) == 0)
     {
+#ifdef CONFIG_TARGET_WAN_BRIDGE_NAME
+        br = CONFIG_TARGET_WAN_BRIDGE_NAME;
+#else
         br = "br-wan";
+#endif
     }
 
     snprintf(cmd, sizeof(cmd),
@@ -406,12 +410,16 @@ bool os_nif_gretap_destroy(char *ifname)
     /*
      * OVS GRE tunnels
      */
-    char *br = "br-home";
+    char *br = CONFIG_TARGET_LAN_BRIDGE_NAME;
 
     /* g-*-* interfaces are typically added to br-wan */
     if (strncmp(ifname, "g-", strlen("g-")) == 0)
     {
+#ifdef CONFIG_TARGET_WAN_BRIDGE_NAME
+        br = CONFIG_TARGET_WAN_BRIDGE_NAME;
+#else
         br = "br-wan";
+#endif
     }
 
     snprintf(cmd, sizeof(cmd), "ovs-vsctl del-port %s %s", br, ifname);

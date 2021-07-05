@@ -28,6 +28,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define IOCTL80211_SURVEY_H_INCLUDED
 
 #include "dpp_survey.h"
+#include "memutil.h"
 
 #include "ioctl80211_api.h"
 
@@ -75,10 +76,8 @@ ioctl80211_survey_record_t *ioctl80211_survey_record_alloc()
 {
     ioctl80211_survey_record_t *record = NULL;
 
-    record = malloc(sizeof(ioctl80211_survey_record_t));
-    if (record) {
-        memset(record, 0, sizeof(ioctl80211_survey_record_t));
-    }
+    record = MALLOC(sizeof(ioctl80211_survey_record_t));
+    memset(record, 0, sizeof(ioctl80211_survey_record_t));
 
     return record;
 }
@@ -87,7 +86,7 @@ static inline
 void ioctl80211_survey_record_free(ioctl80211_survey_record_t *record)
 {
     if (NULL != record) {
-        free(record);
+        FREE(record);
     }
 }
 

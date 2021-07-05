@@ -36,6 +36,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "log.h"
 #include "util.h"
+#include "memutil.h"
 
 #include "inet_unit.h"
 
@@ -220,11 +221,7 @@ inet_t *inet_nssgre_new(const char *ifname)
 {
     inet_nssgre_t *self = NULL;
 
-    self = malloc(sizeof(*self));
-    if (self == NULL)
-    {
-        goto error;
-    }
+    self = MALLOC(sizeof(*self));
 
     if (!inet_nssgre_init(self, ifname))
     {
@@ -235,7 +232,7 @@ inet_t *inet_nssgre_new(const char *ifname)
     return (inet_t *)self;
 
  error:
-    if (self != NULL) free(self);
+    if (self != NULL) FREE(self);
     return NULL;
 }
 

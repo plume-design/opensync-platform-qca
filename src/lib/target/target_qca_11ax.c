@@ -78,6 +78,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "util.h"
+#include "memutil.h"
 #include "os_nif.h"
 
 /* See target_radio_config_init2() for details */
@@ -456,15 +457,13 @@ util_kv_set(const char *key, const char *val)
         return;
 
     if (!(i = util_kv_get(key))) {
-        if (!(i = malloc(sizeof(*i))))
-            return;
-        else
-            ds_dlist_insert_tail(&g_kvstore_list, i);
+        i = MALLOC(sizeof(*i));
+        ds_dlist_insert_tail(&g_kvstore_list, i);
     }
 
     if (!val) {
         ds_dlist_remove(&g_kvstore_list, i);
-        free(i);
+        FREE(i);
         LOGT("%s: '%s'=nil", __func__, key);
         return;
     }
@@ -511,7 +510,7 @@ util_kv_get_fallback_parents(const char *phy, struct fallback_parent *parent, in
         strscpy(parent[num].bssid, bssid, sizeof(parent[num].bssid));
         num++;
     }
-    free(buffer);
+    FREE(buffer);
 
     return num;
 }
@@ -1953,7 +1952,7 @@ util_thermal_config_set(const struct schema_Wifi_Radio_Config *rconf)
     if (t) {
         ds_dlist_remove(&g_thermal_list, t);
         ev_timer_stop(target_mainloop, &t->timer);
-        free(t);
+        FREE(t);
     }
 
     if (!rconf->thermal_integration_exists &&
@@ -1966,12 +1965,7 @@ util_thermal_config_set(const struct schema_Wifi_Radio_Config *rconf)
 
     LOGD("%s: thermal: configuring", rconf->if_name);
 
-    t = calloc(1, sizeof(*t));
-    if (!t) {
-        LOGW("%s: thermal: failed to allocate timer",
-                rconf->if_name);
-        return;
-    }
+    t = CALLOC(1, sizeof(*t));
 
     STRSCPY(t->phy, rconf->if_name);
     t->tx_chainmask_capab = util_thermal_get_chainmask_capab(rconf->if_name);
@@ -3192,10 +3186,11 @@ util_radio_country_get(const char *phy, char *country, int country_len)
     char buf[256];
     char *p;
     int err;
+    const char *xml_path = qca_get_xml_path(phy);
 
     memset(country, '\0', country_len);
 #ifdef OPENSYNC_NL_SUPPORT
-    if ((err = util_exec_read(rtrimws, buf, sizeof(buf), "cfg80211tool.1", "-i", phy, "-h", "none", "--START_CMD", "--getCountry","--RESPONSE", "--getCountry", "--END_CMD"))) {
+    if ((err = util_exec_read(rtrimws, buf, sizeof(buf), "cfg80211tool.1", "-i", phy, "-f", xml_path, "-h", "none", "--START_CMD", "--getCountry","--RESPONSE", "--getCountry", "--END_CMD"))) {
         LOGW("%s: failed to get country: %d", phy, err);
         return false;
     }
@@ -3331,7 +3326,7 @@ bool target_radio_state_get(char *phy, struct schema_Wifi_Radio_State *rstate)
         }
     }
 
-    if ((kv = util_kv_get(F("%s.dfs_usenol", phy)))) {
+    /*if ((kv = util_kv_get(F("%s.dfs_usenol", phy)))) {
         WARN(-1 == util_exec_read(rtrimws, buf, sizeof(buf),
                                   "radartool", "-i", phy),
              "%s: failed to read radartool status: %d (%s)",
@@ -3351,7 +3346,7 @@ bool target_radio_state_get(char *phy, struct schema_Wifi_Radio_State *rstate)
             snprintf(rstate->hw_config[n], sizeof(rstate->hw_config[n]), "%d", v);
             n++;
         }
-    }
+    }*/
 
     if ((kv = util_kv_get(F("%s.dfs_enable", phy)))) {
         STRSCPY(rstate->hw_config_keys[n], "dfs_enable");
@@ -3437,7 +3432,7 @@ util_hw_config_set(const struct schema_Wifi_Radio_Config *rconf)
     }
     util_kv_set(F("%s.cwm_extbusythres", phy), strlen(p) ? p : NULL);
 
-    if (strlen(p = SCHEMA_KEY_VAL(rconf->hw_config, "dfs_usenol")) > 0) {
+    /*if (strlen(p = SCHEMA_KEY_VAL(rconf->hw_config, "dfs_usenol")) > 0) {
         LOGI("%s: setting '%s' = '%s'", phy, "dfs_usenol", p);
         WARN(0 != E("radartool", "-i", phy, "usenol", p),
              "%s: failed to set radartool '%s': %d (%s)",
@@ -3459,7 +3454,7 @@ util_hw_config_set(const struct schema_Wifi_Radio_Config *rconf)
              "%s: failed to set radartool '%s': %d (%s)",
              phy, "dfs_ignorecac", errno, strerror(errno));
     }
-    util_kv_set(F("%s.dfs_ignorecac", phy), strlen(p) ? p : NULL);
+    util_kv_set(F("%s.dfs_ignorecac", phy), strlen(p) ? p : NULL);*/
 }
 
 static bool
@@ -3951,6 +3946,7 @@ target_vif_config_set2(const struct schema_Wifi_VIF_Config *vconf,
     int o;
     int err;
     char buf[128];
+    const char *xml_path = qca_get_xml_path(phy);
 
     if (!rconf ||
         changed->enabled ||
@@ -3992,7 +3988,7 @@ target_vif_config_set2(const struct schema_Wifi_VIF_Config *vconf,
             if (strstr(rconf->freq_band, "5G") && util_qca_get_int(vif, "get_dfsdomain", &v) && v == 0) {
                 LOGI("%s: we need to restore dfs domain", phy);
 #ifdef OPENSYNC_NL_SUPPORT
-                WARN_ON(util_exec_simple("cfg80211tool.1", "-i", phy, "-h", "none", "--START_CMD", "--setCountry",
+                WARN_ON(util_exec_simple("cfg80211tool.1", "-i", phy, "-f", xml_path, "-h", "none", "--START_CMD", "--setCountry",
                                         "--RESPONSE", "--setCountry", "--END_CMD"));
 #else
                 WARN_ON(util_exec_simple("iwpriv", phy, "setCountry"));
@@ -4333,8 +4329,8 @@ target_radio_config_init2(void)
     ok = true;
 
 free:
-    free(g_rconfs);
-    free(g_vconfs);
+    FREE(g_rconfs);
+    FREE(g_vconfs);
     g_rconfs = NULL;
     g_vconfs = NULL;
     g_num_rconfs = 0;
