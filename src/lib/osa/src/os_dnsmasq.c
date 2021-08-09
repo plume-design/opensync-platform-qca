@@ -99,11 +99,7 @@ bool os_dnsmasq_startconf(void)
         fprintf(fconf, "server=/lan/\n");
         fprintf(fconf, "dhcp-leasefile=/tmp/dhcp.leases\n");
         fprintf(fconf, "resolv-file=/tmp/resolv.conf\n");
-#ifdef CONFIG_TARGET_WAN_BRIDGE_NAME
-        fprintf(fconf, "no-dhcp-interface=%s,eth0,eth1\n",CONFIG_TARGET_WAN_BRIDGE_NAME);
-#else
         fprintf(fconf, "no-dhcp-interface=eth0,eth1\n");
-#endif
         fprintf(fconf, "address=/plume.lan/192.168.1.1\n");
         fprintf(fconf, "ptr-record=1.1.168.192.in-addr.arpa,plume.lan\n");
         /*

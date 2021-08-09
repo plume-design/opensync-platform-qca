@@ -309,16 +309,6 @@ bool os_nif_gretap_create(
      */
     char *br = CONFIG_TARGET_LAN_BRIDGE_NAME;
 
-    /* g-*-* interfaces are typically added to br-wan */
-    if (strncmp(ifname, "g-", strlen("g-")) == 0)
-    {
-#ifdef CONFIG_TARGET_WAN_BRIDGE_NAME
-        br = CONFIG_TARGET_WAN_BRIDGE_NAME;
-#else
-        br = "br-wan";
-#endif
-    }
-
     snprintf(cmd, sizeof(cmd),
             "ovs-vsctl add-port %s %s -- set interface %s type=gre options:remote_ip=" PRI(os_ipaddr_t),
             br,
@@ -411,16 +401,6 @@ bool os_nif_gretap_destroy(char *ifname)
      * OVS GRE tunnels
      */
     char *br = CONFIG_TARGET_LAN_BRIDGE_NAME;
-
-    /* g-*-* interfaces are typically added to br-wan */
-    if (strncmp(ifname, "g-", strlen("g-")) == 0)
-    {
-#ifdef CONFIG_TARGET_WAN_BRIDGE_NAME
-        br = CONFIG_TARGET_WAN_BRIDGE_NAME;
-#else
-        br = "br-wan";
-#endif
-    }
 
     snprintf(cmd, sizeof(cmd), "ovs-vsctl del-port %s %s", br, ifname);
 

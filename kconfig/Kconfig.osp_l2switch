@@ -1,0 +1,30 @@
+if PLATFORM_IS_QCA
+    config QCA_L2SWITCH_PORT_ISOLATION
+        bool "Use L2 switch port isolation (Qualcomm only)"
+        default n
+        depends on OSP_L2SWITCH_NULL
+        help
+            When enabled, this option installs a boot time script that configures
+            the internal switch to use port isolation.
+
+            The changes that the script applies to the system allow for seamless
+            configuration of native VLANs. This means that switch configuration is
+            no longer necessary when the script is in effect. For this reason, this
+            option requires the L2switch NULL backend as other backends may override
+            configuration knobs that were set by the script.
+
+    if QCA_L2SWITCH_PORT_ISOLATION
+        config QCA_L2SWITCH_PORT_ISOLATION_CPU
+            int "CPU Port"
+            default 0
+            help
+                The L2 switch port number facing the CPU
+
+        config QCA_L2SWITCH_PORT_ISOLATION_PORTS
+            string "Isolated Interface Ports"
+            default "5 4"
+            help
+                This is a whitespace sepeareted list representing the
+                L2 switch port numbers facing ethernet interfaces.
+    endif
+endif

@@ -3206,6 +3206,26 @@ util_radio_country_get(const char *phy, char *country, int country_len)
     return strlen(country);
 }
 
+static int
+util_radio_get_nol(const char *phy)
+{
+    char buf[1024] = {0};
+
+    WARN(-1 == util_exec_read(rtrimws, buf, sizeof(buf),
+                              "radartool", "-i", phy),
+         "%s: failed to read radartool status: %d (%s)",
+         phy, errno, strerror(errno));
+
+    if (strstr(buf, "No Channel Switch announcement"))
+        return 2;
+    else if (strstr(buf, "Use NOL: yes"))
+        return 1;
+    else if (strstr(buf, "Use NOL: no"))
+        return 0;
+    else
+        return -1;
+}
+
 /******************************************************************************
  * Radio implementation
  *****************************************************************************/
@@ -3326,27 +3346,14 @@ bool target_radio_state_get(char *phy, struct schema_Wifi_Radio_State *rstate)
         }
     }
 
-    /*if ((kv = util_kv_get(F("%s.dfs_usenol", phy)))) {
-        WARN(-1 == util_exec_read(rtrimws, buf, sizeof(buf),
-                                  "radartool", "-i", phy),
-             "%s: failed to read radartool status: %d (%s)",
-             phy, errno, strerror(errno));
-
-        if (strstr(buf, "No Channel Switch announcement"))
-            v = 2;
-        else if (strstr(buf, "Use NOL: yes"))
-            v = 1;
-        else if (strstr(buf, "Use NOL: no"))
-            v = 0;
-        else
-            v = -1;
-
+    if ((kv = util_kv_get(F("%s.dfs_usenol", phy)))) {
+        v = util_radio_get_nol(phy);
         if (v >= 0) {
             STRSCPY(rstate->hw_config_keys[n], "dfs_usenol");
             snprintf(rstate->hw_config[n], sizeof(rstate->hw_config[n]), "%d", v);
             n++;
         }
-    }*/
+    }
 
     if ((kv = util_kv_get(F("%s.dfs_enable", phy)))) {
         STRSCPY(rstate->hw_config_keys[n], "dfs_enable");
@@ -3416,6 +3423,7 @@ util_hw_config_set(const struct schema_Wifi_Radio_Config *rconf)
     const struct dirent *d;
     const char *phy = rconf->if_name;
     const char *p;
+    int nol;
     DIR *dir;
 
     if (strlen(p = SCHEMA_KEY_VAL(rconf->hw_config, "cwm_extbusythres")) > 0)
@@ -3432,11 +3440,20 @@ util_hw_config_set(const struct schema_Wifi_Radio_Config *rconf)
     }
     util_kv_set(F("%s.cwm_extbusythres", phy), strlen(p) ? p : NULL);
 
-    /*if (strlen(p = SCHEMA_KEY_VAL(rconf->hw_config, "dfs_usenol")) > 0) {
-        LOGI("%s: setting '%s' = '%s'", phy, "dfs_usenol", p);
-        WARN(0 != E("radartool", "-i", phy, "usenol", p),
-             "%s: failed to set radartool '%s': %d (%s)",
-             phy, "dfs_usenol", errno, strerror(errno));
+    if (strlen(p = SCHEMA_KEY_VAL(rconf->hw_config, "dfs_usenol")) > 0) {
+        nol = util_radio_get_nol(phy);
+        /* Setting NOL on 11ax regardless of the value will
+         * schedule microcode panic in 21 minutes. This is
+         * done to discourage dfs non-compliance in the
+         * field. As such avoid setting NOL if it already
+         * matches (which is =1 by default).
+         */
+        if (nol != atoi(p)) {
+            LOGI("%s: setting '%s' = '%s' (was %d)", phy, "dfs_usenol", p, nol);
+            WARN(0 != E("radartool", "-i", phy, "usenol", p),
+                 "%s: failed to set radartool '%s': %d (%s)",
+                 phy, "dfs_usenol", errno, strerror(errno));
+        }
     }
     util_kv_set(F("%s.dfs_usenol", phy), strlen(p) ? p : NULL);
 
@@ -3454,7 +3471,7 @@ util_hw_config_set(const struct schema_Wifi_Radio_Config *rconf)
              "%s: failed to set radartool '%s': %d (%s)",
              phy, "dfs_ignorecac", errno, strerror(errno));
     }
-    util_kv_set(F("%s.dfs_ignorecac", phy), strlen(p) ? p : NULL);*/
+    util_kv_set(F("%s.dfs_ignorecac", phy), strlen(p) ? p : NULL);
 }
 
 static bool

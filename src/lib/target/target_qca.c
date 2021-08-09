@@ -3217,8 +3217,10 @@ util_radio_ht_mode_get(char *phy, char *htmode, int htmode_len)
     char *vifr = vifs;
     char *vif;
     char ht_mode_vif[32];
+    char ht_mode_sta[32];
 
     memset(ht_mode_vif, '\0', sizeof(ht_mode_vif));
+    memset(ht_mode_sta, '\0', sizeof(ht_mode_sta));
 
     if (util_wifi_get_phy_vifs(phy, vifs, sizeof(vifs))) {
         LOGE("%s: get vifs failed", phy);
@@ -3236,8 +3238,13 @@ util_radio_ht_mode_get(char *phy, char *htmode, int htmode_len)
                         return false;
                     }
                 }
+            } else if (strstr(vif, "bhaul-sta") == vif) {
+                util_iwpriv_get_ht_mode(vif, ht_mode_sta, sizeof(ht_mode_sta));
             }
         }
+    }
+    if (strlen(htmode) == 0 && strlen(ht_mode_sta) > 0) {
+        strscpy(htmode, ht_mode_sta, htmode_len);
     }
     if (strlen(htmode) == 0) {
         if (util_radio_ht_mode_get_max(phy, ht_mode_vif, sizeof(ht_mode_vif))) {
@@ -4031,7 +4038,6 @@ target_vif_config_set2(const struct schema_Wifi_VIF_Config *vconf,
         if (util_policy_get_csa_interop(vif)) {
             util_iwpriv_set_int_lazy(vif, "gcsainteropphy", "scsainteropphy", 1);
             util_iwpriv_set_int_lazy(vif, "gcsainteropauth", "scsainteropauth", 1);
-            util_iwpriv_set_int_lazy(vif, "gcsainteropaggr", "scsainteropaggr", 1);
         }
 
         if ((p = SCHEMA_KEY_VAL(rconf->hw_config, "cwm_extbusythres")))
