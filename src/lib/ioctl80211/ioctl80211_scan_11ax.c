@@ -643,6 +643,22 @@ ioctl_status_t ioctl80211_scan_channel(
            QSDK driver supports changes through SIOCGIWSCAN while on
            LSDK driver we need to use direct scan on SSID using IEEE80211_IOC_SCAN_REQ
          */
+#ifdef OPENSYNC_NL_SUPPORT
+        struct ieee80211req_athdbg req = { 0 };
+
+        if (WARN_ON(chan_num == 0))
+            return IOCTL_STATUS_ERROR;
+
+        req.cmd = IEEE80211_DBGREQ_OFFCHAN_RX;
+        req.needs_reply = DBGREQ_REPLY_IS_NOT_REQUIRED;
+
+        req.data.offchan_req.band = radio_type;
+        WARN_ON(chan_num > 1);
+        req.data.offchan_req.ieee_chan = chan_list[0];
+        req.data.offchan_req.dwell_time = dwell_time;
+
+        rc = send_nl_command(&sock_ctx, radio_cfg->if_name, &req, sizeof(req), NULL, QCA_NL80211_VENDOR_SUBCMD_DBGREQ);
+#else
         struct iw_scan_req              iw_scan_options;
         int                             iw_scan_flags = 0;
 
@@ -692,7 +708,21 @@ ioctl_status_t ioctl80211_scan_channel(
                 iw_scan_options.min_channel_time);
         }
 
-        rc = osync_nl80211_scan_channel(radio_cfg->if_name, &iw_scan_options, iw_scan_flags);
+        struct iwreq request;
+
+        memset(&request, 0, sizeof(request));
+
+        request.u.data.pointer = &iw_scan_options;
+        request.u.data.length = sizeof(struct iw_scan_req);
+        request.u.data.flags = iw_scan_flags;
+       /* Initiate wireless scanning **/
+        rc =
+            ioctl80211_request_send(
+                ioctl80211_fd_get(),
+                radio_cfg->if_name,
+                SIOCSIWSCAN,
+                &request);
+#endif
         if (0 > rc)
         {
             LOG(ERR,

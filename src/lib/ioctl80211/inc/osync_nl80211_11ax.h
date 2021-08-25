@@ -1411,28 +1411,6 @@ nl80211_device_txchainmask_get(radio_entry_t              *radio_cfg,
 #define QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION 74
 extern struct socket_context sock_ctx;
 
-int send_scan_req(struct socket_context *sock_ctx, const char *ifname, void *buf,
-        size_t buflen, void (*callback) (struct cfg80211_data *arg), int cmd)
-{
-    int msg;
-    struct cfg80211_data buffer;
-    if (sock_ctx->cfg80211) {
-        buffer.data = buf;
-        buffer.length = buflen;
-        buffer.callback = callback;
-        buffer.parse_data = 0;
-        msg = wifi_cfg80211_send_generic_command(&(sock_ctx->cfg80211_ctxt),
-                QCA_NL80211_VENDOR_SUBCMD_TRIGGER_SCAN,
-                cmd, ifname, (char *)&buffer, buflen);
-        if (msg < 0) {
-            LOG(ERR,"Could not send NL scan command");
-            return -1;
-        }
-        return buffer.length;
-    }
-    return 0;
-}
-
 #ifdef OPENSYNC_NL_SUPPORT
 static void  bss_info_handler(struct cfg80211_data *buffer)
 {
@@ -1487,29 +1465,5 @@ osync_nl80211_scan_results_fetch(radio_entry_t *radio_cfg_ctx)
 #endif
 }
 
-static inline int
-osync_nl80211_scan_channel(char *ifname, struct iw_scan_req *iw_scan_options ,int iw_scan_flags)
-{
-    int rc;
-#ifdef OPENSYNC_NL_SUPPORT
-    rc = send_scan_req(&sock_ctx, ifname, iw_scan_options, sizeof(struct iw_scan_req), NULL, 0);
-#else
-    struct iwreq request;
-
-    memset(&request, 0, sizeof(request));
-
-    request.u.data.pointer = iw_scan_options;
-    request.u.data.length = sizeof(struct iw_scan_req);
-    request.u.data.flags = iw_scan_flags;
-    /* Initiate wireless scanning **/
-    rc =
-        ioctl80211_request_send(
-            ioctl80211_fd_get(),
-            ifname,
-            SIOCSIWSCAN,
-            &request);
-#endif
-    return rc;
-}
 #endif
 #endif /* IOCTL80211_NETLINK_11AX_H_INCLUDED */

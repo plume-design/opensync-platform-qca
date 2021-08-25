@@ -103,6 +103,9 @@ is_parent_identical() {
 recreate_sta_vap() {
 	ssid=$(ovsh s -Ur Wifi_VIF_Config ssid -w mode==sta | sed 1q | rtrim | grep .) || die "Failed to get ssid"
 	security=$(ovsh s -Ur Wifi_VIF_Config security -w mode==sta | sed 1q | rtrim | grep .) || die "Failed to get security"
+	wpa=$(ovsh s -Ur Wifi_VIF_Config wpa -w mode==sta | sed 1q | rtrim | grep .) || die "Failed to get wpa"
+	wpa_key_mgmt=$(ovsh s -Ur Wifi_VIF_Config wpa_key_mgmt -w mode==sta | sed 1q | rtrim | grep .) || die "Failed to get wpa_key_mgmt"
+	wpa_psks=$(ovsh s -Ur Wifi_VIF_Config wpa_psks -w mode==sta | sed 1q | rtrim | grep .) || die "Failed to get wpa_psks"
 
 	for i in $(ovsh s -Ur Wifi_Radio_Config if_name)
 	do
@@ -121,6 +124,9 @@ recreate_sta_vap() {
 		mode:=sta \
 		enabled:=true \
 		"security::$security" \
+		"wpa:=$wpa" \
+		"wpa_key_mgmt:=$wpa_key_mgmt" \
+		"wpa_psks::$wpa_psks" \
 		vif_radio_idx:=0)
 
 	ovsh u Wifi_Radio_Config -w if_name==$radio vif_configs::"$(
