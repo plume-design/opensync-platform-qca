@@ -74,6 +74,7 @@ static const struct {
     { 0x0056, 0x168c, 0, "qca9888", "Besra" },
     { 0x1104, 0x17cb, 0, "qcn9074", "Pine" },
     { 0, 0, "qca,wifi-ipq40xx", "qca4019", "Dakota" },
+    { 0, 0, "qcom,cnss-qca5018", "qca5018", "Maple" },
     { 0, 0, "qca,wifi-ar956x", "qca9563", "Dragonfly" },
     { 0, 0, "qcom,cnss-qca8074", "qca8074", "Hawkeye" },
     { 0, 0, "qcom,cnss-qca8074v2", "qca8074", "Hawkeye" },
@@ -409,7 +410,8 @@ wiphy_info_init_ifname(const char *ifname)
 
     /* Hawkeye for 11ax */
     if (!strcmp(info->chip, "qca8074") ||
-        !strcmp(info->chip, "qcn9074")) {
+        !strcmp(info->chip, "qcn9074") ||
+        !strcmp(info->chip, "qca5018")) {
         info->mode = "11ax";
     } else {
         if (strstr(info->band, "5G") == info->band)
