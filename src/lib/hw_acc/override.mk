@@ -22,11 +22,15 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+########################################################################
+#
+# Hardware Acceleration Flow Flush Libraries
+#
+########################################################################
 
-# Add ECM handlers
+UNIT_SRC := $(filter-out src/hw_acc.c,$(UNIT_SRC))
+UNIT_SRC_TOP += $(OVERRIDE_DIR)/src/hw_acc.c
 
-UNIT_SRC_TOP += $(OVERRIDE_DIR)/src/nm2_sfe.c
-
-UNIT_LDFLAGS += -lpcap
-
-UNIT_DEPS += src/lib/hw_acc
+UNIT_DEPS := src/lib/log
+UNIT_DEPS += src/lib/kconfig
+UNIT_DEPS += src/lib/common

@@ -511,11 +511,12 @@ ioctl_status_t ioctl80211_scan_results_parse(
              util_get_chanwidth(ssid + sr->isr_ssid_len, sr->isr_ie_len);
 
     LOG(TRACE,
-        "Parsed %s neighbor {chan='%u' from freq='%u'"
+        "Parsed %s neighbor BSSID %s {chan='%u' from freq='%u'"
         " signal='%d'"
         " ssid='%s'"
         " chanwidth='%d'}",
         radio_get_name_from_type(radio_type),
+        neighbor_record->bssid,
         neighbor_record->chan,
         sr->isr_freq,
         neighbor_record->sig,

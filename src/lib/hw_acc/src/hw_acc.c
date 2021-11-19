@@ -30,57 +30,26 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #define _GNU_SOURCE
 #include <stdio.h>
-#include <string.h>
 
+#include "hw_acc.h"
 #include "os.h"
 #include "log.h"
-
-#include "target.h"
+#include "kconfig.h"
 
 #define MODULE_ID LOG_MODULE_ID_TARGET
 
-static void ecm_sfe_invalidate(const char *openflow_rule)
+
+bool hw_acc_flush_flow_per_mac(const char *mac)
 {
-    char        *flow       = strdupa(openflow_rule);
-    char        *ptr        = NULL;
-    const char  *k          = NULL;
-    const char  *v          = NULL;
-    char cmd[256];
-    bool ret = false;
-
-    /* Openflow rules are of the type
-     * "udp6,tp_dst=53,dl_src=a4:e9:75:48:a3:7f,dl_dst=aa:bb:cc:dd:ee:ff"
-     * "tcp,tp_dst=80,dl_src=ff:ff:ff:ff:ff:ff" */
-    while ((ptr = strsep(&flow, ",")))
-        if ((k = strsep(&ptr, "=")) && (v = strsep(&ptr, "")))
-            if (!strcmp(k, "dl_src") || !strcmp(k, "dl_dst")) {
-                snprintf(cmd, sizeof(cmd),"echo %s > /sys/kernel/debug/sfe_drv/flush_mac", v);
-
-        ret = !cmd_log(cmd);
-        if (!ret) {
-            LOGE("flush mac failed: %s", cmd);
-        }
-        LOGD("ecm_sfe: flushed mac '%s'", v);
-    }
-}
-
-bool target_om_hook(target_om_hook_t hook, const char *openflow_rule)
-{
-    switch (hook)
+    if (file_put(CONFIG_QCA_HW_ACC_FILE_PATH, mac) == -1)
     {
-        case TARGET_OM_POST_ADD:
-        case TARGET_OM_POST_DEL:
-            ecm_sfe_invalidate(openflow_rule);
-            break;
-
-        case TARGET_OM_PRE_ADD:
-        case TARGET_OM_PRE_DEL:
-            break;
-
-        default:
-            break;
+        return false;
     }
-
+    LOGD("hw_acc: flushed mac '%s'", mac);
     return true;
 }
 
+bool hw_acc_flush_all_flows(void)
+{
+    return true;
+}

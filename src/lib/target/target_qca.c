@@ -204,7 +204,6 @@ readcmd(char *buf, size_t buflen, void (*xfrm)(char *), const char *fmt, ...)
     int i;
 
     memset(cmd, 0, sizeof(cmd));
-    memset(buf, 0, buflen);
 
     va_start(ap, fmt);
     vsnprintf(cmd, sizeof(cmd), fmt, ap);
@@ -213,6 +212,8 @@ readcmd(char *buf, size_t buflen, void (*xfrm)(char *), const char *fmt, ...)
     LOGT("%s: fmt(%s) => %s", __func__, fmt, cmd);
 
     if (buf) {
+        memset(buf, 0, buflen);
+
         p = popen(cmd, "r");
         if (!p) {
             LOGW("%s: failed to popen('%s' => '%s'): %d (%s)",

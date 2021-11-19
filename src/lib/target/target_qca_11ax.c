@@ -62,6 +62,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "wiphy_info.h"
 #include "log.h"
 #include "ds_dlist.h"
+#include "kconfig.h"
 
 #include "wpa_ctrl.h"
 
@@ -92,6 +93,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <linux/un.h>
 #include <opensync-ctrl.h>
+#include <opensync-ctrl-dpp.h>
 #include <opensync-wpas.h>
 #include <opensync-hapd.h>
 
@@ -205,7 +207,6 @@ readcmd(char *buf, size_t buflen, void (*xfrm)(char *), const char *fmt, ...)
     int i;
 
     memset(cmd, 0, sizeof(cmd));
-    memset(buf, 0, buflen);
 
     va_start(ap, fmt);
     vsnprintf(cmd, sizeof(cmd), fmt, ap);
@@ -214,6 +215,8 @@ readcmd(char *buf, size_t buflen, void (*xfrm)(char *), const char *fmt, ...)
     LOGT("%s: fmt(%s) => %s", __func__, fmt, cmd);
 
     if (buf) {
+        memset(buf, 0, buflen);
+
         p = popen(cmd, "r");
         if (!p) {
             LOGW("%s: failed to popen('%s' => '%s'): %d (%s)",
@@ -385,25 +388,16 @@ static int
 util_exec_scripts(const char *vif)
 {
     int err;
-    char cmd[512];
 
     /* FIXME: target_scripts_dir() points to something
      *        different than on WM1. This needs to be
      *        killed fast!
      */
     LOGI("%s: running hook scripts", vif);
-    sprintf(cmd, "{ cd %s/wm.d 2>/dev/null || cd %s/../scripts/wm.d 2>/dev/null; } && for i in *.sh; do sh $i %s; done; exit 0",
-                 target_bin_dir(),
-                 target_bin_dir(),
-                 vif);
-#if 0
     err = runcmd("{ cd %s/wm.d 2>/dev/null || cd %s/../scripts/wm.d 2>/dev/null; } && for i in *.sh; do sh $i %s; done; exit 0",
                  target_bin_dir(),
                  target_bin_dir(),
                  vif);
-#endif
-
-    err = system(cmd);
     if (err) {
         LOGW("%s: failed to run command", vif);
         return err;
@@ -1284,6 +1278,27 @@ qca_wpas_report(struct wpas *wpas)
 /* ctrl -> target */
 
 static void
+qca_ctrl_dpp_chirp_received(struct ctrl *ctrl, const struct target_dpp_chirp_obj *chirp)
+{
+    if (WARN_ON(!rops.op_dpp_announcement)) return;
+    rops.op_dpp_announcement(chirp);
+}
+
+static void
+qca_ctrl_dpp_conf_sent(struct ctrl *ctrl, const struct target_dpp_conf_enrollee *enrollee)
+{
+    if (WARN_ON(!rops.op_dpp_conf_enrollee)) return;
+    rops.op_dpp_conf_enrollee(enrollee);
+}
+
+static void
+qca_ctrl_dpp_conf_received(struct ctrl *ctrl, const struct target_dpp_conf_network *conf)
+{
+    if (WARN_ON(!rops.op_dpp_conf_network)) return;
+    rops.op_dpp_conf_network(conf);
+}
+
+static void
 qca_hapd_sta_connected(struct hapd *hapd, const char *mac, const char *keyid)
 {
     qca_hapd_sta_report(hapd, mac);
@@ -1396,6 +1411,9 @@ qca_ctrl_discover(const char *bss)
         hapd->ctrl.opened = qca_hapd_ctrl_opened;
         hapd->ctrl.closed = qca_hapd_ctrl_closed;
         hapd->ctrl.overrun = qca_hapd_ctrl_opened;
+        hapd->ctrl.dpp_chirp_received = qca_ctrl_dpp_chirp_received;
+        hapd->ctrl.dpp_conf_sent = qca_ctrl_dpp_conf_sent;
+        hapd->ctrl.dpp_conf_received = qca_ctrl_dpp_conf_received;
         hapd->sta_connected = qca_hapd_sta_connected;
         hapd->sta_disconnected = qca_hapd_sta_disconnected;
         hapd->ap_enabled = qca_hapd_ap_enabled;
@@ -1426,6 +1444,9 @@ qca_ctrl_discover(const char *bss)
         wpas->ctrl.opened = qca_wpas_ctrl_opened;
         wpas->ctrl.closed = qca_wpas_ctrl_closed;
         wpas->ctrl.overrun = qca_wpas_ctrl_opened;
+        wpas->ctrl.dpp_chirp_received = qca_ctrl_dpp_chirp_received;
+        wpas->ctrl.dpp_conf_sent = qca_ctrl_dpp_conf_sent;
+        wpas->ctrl.dpp_conf_received = qca_ctrl_dpp_conf_received;
         wpas->connected = qca_wpas_connected;
         wpas->disconnected = qca_wpas_disconnected;
         wpas->respect_multi_ap = 1;
@@ -2181,6 +2202,23 @@ util_csa_get_chwidth(const char *phy, const char *mode)
 }
 
 static int
+util_get_radio_band(const char *freq_band)
+{
+    if (!(strcmp(freq_band, SCHEMA_CONSTS_RADIO_TYPE_STR_6G))) {
+        return 3;
+    } else if (!(strcmp(freq_band, SCHEMA_CONSTS_RADIO_TYPE_STR_5G))
+               || !(strcmp(freq_band, SCHEMA_CONSTS_RADIO_TYPE_STR_5GU))
+               || !(strcmp(freq_band, SCHEMA_CONSTS_RADIO_TYPE_STR_5GL))) {
+        return 2;
+    } else if (!(strcmp(freq_band, SCHEMA_CONSTS_RADIO_TYPE_STR_2G))) {
+        return 1;
+    } else {
+        LOGE("Invalid frequency band");
+        return 0;
+    }
+}
+
+static int
 util_csa_is_sec_offset_supported(const char *phy,
                               int channel,
                               const char *offset_str)
@@ -2359,7 +2397,6 @@ util_csa_start(const char *phy,
                int channel)
 {
     char mode[32];
-    char cmd[1024];
     int err;
 
     if (util_cac_in_progress(phy)) {
@@ -2374,18 +2411,13 @@ util_csa_start(const char *phy,
         return err ? -1 : 0;
     }
 
-    sprintf(cmd, "exttool --chanswitch --interface %s --chan %d --numcsa %d --chwidth %d --secoffset %d", phy, channel, CSA_COUNT, util_csa_get_chwidth(phy, ht_mode), util_csa_get_secoffset(phy, channel));
-
-    err = system(cmd);
-
-#if 0
-    err = runcmd("exttool --chanswitch --interface %s --chan %d --numcsa %d --chwidth %d --secoffset %d",
+    err = runcmd("exttool --chanswitch --interface %s --chan %d --band %d --numcsa %d --chwidth %d --secoffset %d",
                  phy,
                  channel,
+                 util_get_radio_band(freq_band),
                  CSA_COUNT,
                  util_csa_get_chwidth(phy, ht_mode),
                  util_csa_get_secoffset(phy, channel));
-#endif
     if (err) {
         LOGW("%s: failed to run exttool; is csa already running? invalid channel? nop active?",
              phy);
@@ -3033,9 +3065,10 @@ util_radio_bgcac_recalc(const char *phy, const struct schema_Wifi_Radio_State *r
     LOGI("%s background CAC restart vdev(s) chan %d @ %s %d",
          phy, rstate->channel, rstate->ht_mode, restart);
 
-    runcmd("exttool --chanswitch --interface %s --chan %d --numcsa %d --chwidth %d --secoffset %d --force",
+    runcmd("exttool --chanswitch --interface %s --chan %d --band %d --numcsa %d --chwidth %d --secoffset %d --force",
             phy,
             rstate->channel,
+            util_get_radio_band(rstate->freq_band),
             CSA_COUNT,
             util_csa_get_chwidth(phy, rstate->ht_mode),
             util_csa_get_secoffset(phy, rstate->channel));
@@ -3507,7 +3540,7 @@ util_mode_reconfig(
     if (WARN_ON(!mode))
         return;
 
-    if (!strcmp(mode->hwmode, hw_mode))
+    if (!strcmp(mode->hwmode, hw_mode) && !strcmp(mode->htmode, ht_mode))
         return;
 
     err = util_qca_get_mode(hw_mode, ht_mode, freq_band, newmode, sizeof(newmode));
@@ -3998,7 +4031,7 @@ target_vif_config_set2(const struct schema_Wifi_VIF_Config *vconf,
 
         if (!strcmp("ap", vconf->mode)) {
             LOGI("%s: setting channel %d", vif, rconf->channel);
-            if (E("iwconfig", vif, "channel", F("%d", rconf->channel)))
+            if (E("cfg80211tool.1", "-i", vif, "-f", xml_path, "-h", "none", "--START_CMD", "--channel", "--value0", F("%d", rconf->channel), "--value1", F("%d", util_get_radio_band(rconf->freq_band)), "--RESPONSE", "--channel", "--END_CMD"))
                 LOGW("%s: failed to set channel %d: %d (%s)",
                      vif, rconf->channel, errno, strerror(errno));
 
@@ -4020,7 +4053,7 @@ target_vif_config_set2(const struct schema_Wifi_VIF_Config *vconf,
 
         if (strstr(rconf->freq_band, "5G") && util_wifi_get_phy_vifs_cnt(phy) == 1) {
             LOGI("%s: we need to restore NOL", phy);
-//            WARN_ON(runcmd("%s/nol.sh restore", target_bin_dir()));
+            WARN_ON(runcmd("%s/nol.sh restore", target_bin_dir()));
         }
 
         if (util_policy_get_rts(phy, rconf->freq_band)) {
@@ -4153,6 +4186,9 @@ target_vif_config_set2(const struct schema_Wifi_VIF_Config *vconf,
     if (changed->mac_list_type || changed->mac_list)
         util_vif_acl_enforce(phy, vif, vconf);
 
+    if (changed->dpp_cc)
+        util_qca_set_int_lazy(vif, "gdppcc", "sdppcc", vconf->dpp_cc);
+
     if (!strcmp(vconf->mode, "ap"))
         if (changed->min_hw_mode)
             util_vif_min_hw_mode_set(vif, vconf->min_hw_mode);
@@ -4249,6 +4285,9 @@ bool target_vif_state_get(char *vif, struct schema_Wifi_VIF_State *vstate)
     if ((vstate->channel_exists = util_iwconfig_get_chan(NULL, vif, &v)))
         vstate->channel = v;
 
+    if (util_qca_get_int(vif, "gdppcc", &v))
+        SCHEMA_SET_INT(vstate->dpp_cc, v);
+
     util_kv_set(F("%s.last_channel", vif),
                 vstate->channel_exists ? F("%d", vstate->channel) : "");
 
@@ -4270,6 +4309,20 @@ bool target_vif_state_get(char *vif, struct schema_Wifi_VIF_State *vstate)
     if (wpas) wpas_bss_get(wpas, vstate);
 
     return true;
+}
+
+/******************************************************************************
+ * DPP implementation
+ *****************************************************************************/
+
+bool target_dpp_supported(void)
+{
+    return kconfig_enabled(CONFIG_QCA_USE_DPP);
+}
+
+bool target_dpp_config_set(const struct schema_DPP_Config **config)
+{
+    return ctrl_dpp_config(config);
 }
 
 /******************************************************************************

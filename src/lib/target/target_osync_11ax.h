@@ -112,7 +112,7 @@ static inline char *qca_getmac(const char *vif, char *buf, int len)
     }
 
     // cfg80211tool.1 getmac gives no output for bhaul-sta-* interfaces
-    if (strlen(buf) == 0) return NULL;
+    if (strlen(buf) == 0) return buf;
 
 #else
     if ((err = util_exec_read(NULL, buf, len, "iwpriv", vif, "getmac"))) {

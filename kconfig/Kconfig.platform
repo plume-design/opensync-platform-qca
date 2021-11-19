@@ -9,14 +9,14 @@ config QCA_SDK_PATH
     string "Qualcomm SDK PATH"
 
 config QCA_RATE_HISTO_TO_EXPECTED_TPUT
-    bool "use mcs histograms to compute expected throughput phyrates"
+    bool "Use MCS histograms to compute expected throughput phyrates"
     default y
     help
         This makes sense only for 11ac and older devices which
-        originally were intended to report mcs histograms. Some of
+        originally were intended to report MCS histograms. Some of
         them couldn't be updated to deliver (reliable) expected
-        throughput phyrates. Instead mcs histograms can be utilized to
-        esimate them.
+        throughput phyrates. Instead MCS histograms can be utilized to
+        estimate them.
 
         If unsure, say 'y'
 
@@ -58,7 +58,7 @@ config QCA_USE_GRE_NSS
         a inet_nssgre_t class.
 
 config QCA_USE_DPP
-    bool "Use DPP for WPA Key Managment"
+    bool "Use DPP for WPA Key Management"
     default n
     help
         Add support for WFA Easy Connect (DPP).
@@ -69,5 +69,18 @@ config QCA_NF_NAT_HELPERS
     help
         This will overwrite /etc/modules.d/nf-nathelper-extra
         with preferred OpenSync options.
+
+config QCA_HW_ACC_FILE_PATH
+    string "Hardware acceleration file path"
+    default "/sys/kernel/debug/sfe_drv/flush_mac"
+    help
+        This is the file where MAC addresses of Openflow rules
+        are stored for flushing.
+
+config QCA_HW_ACC_NSS
+    bool "Enable NSS acceleration support"
+    default n
+    help
+        Enable NSS acceleration support
 
 endif

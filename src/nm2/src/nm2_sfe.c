@@ -35,6 +35,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "const.h"
 #include "execsh.h"
 #include "target.h"
+#include "hw_acc.h"
 
 #define NM2_L2UF_PCAP_SNAPLEN       1024
 #define NM2_L2UF_PCAP_BUFFER_SIZE   (64*1024)
@@ -222,7 +223,6 @@ void nm2_l2uf_recv(
     (void)self;
     (void)pkt;
     char smac[32];
-    int rc;
 
     struct eth_hdr *eth = (void *)packet;
     snprintf(smac, sizeof(smac), "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -234,12 +234,15 @@ void nm2_l2uf_recv(
             eth->eth_src[5]);
     LOG(NOTICE, "l2uf: Received L2UF frame from %s", smac);
 
-    /*
-     * SFE flush for mac
-     * exit code is number of flows flushed
-     */
-    rc = execsh_log(LOG_SEVERITY_INFO, _S(echo "$1" > /sys/kernel/debug/sfe_drv/flush_mac), smac);
-    LOG(INFO, "l2uf: nm2 flushed sfe flows for %s", smac);
+    if (hw_acc_flush_flow_per_mac(smac))
+    {
+        LOG(INFO, "l2uf: nm2 flushed sfe flows for %s", smac);
+    }
+    else
+    {
+        hw_acc_flush_all_flows();
+        LOG(INFO, "l2uf: nm2 flushed all sfe flows");
+    }
 }
 
 static void nm2_fc_init_fn(struct ev_loop *loop, ev_timer *w, int revent)
