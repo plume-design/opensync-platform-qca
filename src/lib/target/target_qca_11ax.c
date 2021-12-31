@@ -1468,7 +1468,7 @@ qca_ctrl_discover(const char *bss)
         ctrl_enable(&hapd->ctrl);
         caps = strchomp(R(F("/sys/class/net/%s/cfg80211_htcaps", bss)), "\r\n ");
         if (caps != NULL) STRSCPY_WARN(hapd->htcaps, caps);
-        STRSCAT(hapd->htcaps, "[SHORT-GI]");
+        STRSCAT(hapd->htcaps, "[SHORT-GI-20][SHORT-GI-40]");
         caps = strchomp(R(F("/sys/class/net/%s/cfg80211_vhtcaps", bss)), "\r\n ");
         if (caps != NULL) STRSCPY_WARN(hapd->vhtcaps, caps);
         hapd = NULL;

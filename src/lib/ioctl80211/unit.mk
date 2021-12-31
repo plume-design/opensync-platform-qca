@@ -77,4 +77,5 @@ UNIT_DEPS := src/lib/common
 UNIT_DEPS += src/lib/evsched
 UNIT_DEPS += src/lib/schema
 UNIT_DEPS += src/lib/const
+UNIT_DEPS += src/lib/protobuf
 

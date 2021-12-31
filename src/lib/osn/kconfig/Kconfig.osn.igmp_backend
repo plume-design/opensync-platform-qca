@@ -1,0 +1,10 @@
+config OSN_BACKEND_IGMP_QCA
+    bool "QCA mcproxy"
+
+    select OSN_LINUX_ENABLED
+    help
+        Use the Qualcomm `mcproxy` utility for managing IGMP.
+
+        Qualcomm platforms use mcproxy binary for correctly configuring up IGMP
+        traffic.
+

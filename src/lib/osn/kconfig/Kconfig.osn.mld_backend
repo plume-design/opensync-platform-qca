@@ -1,0 +1,10 @@
+config OSN_BACKEND_MLD_QCA
+    bool "QCA mcproxy"
+
+    select OSN_LINUX_ENABLED
+    help
+        Use the Qualcomm `mcproxy` utility for managing MLD.
+
+        Qualcomm platforms use mcproxy binary for correctly configuring up MLD
+        traffic.
+

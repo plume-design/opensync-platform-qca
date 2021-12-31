@@ -22,18 +22,13 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-QCA_OSA_SRC_NIF_GRE := $(OVERRIDE_DIR)/src/os_nif_gre.c
-QCA_OSA_SRC_DNSMASQ := $(OVERRIDE_DIR)/src/os_dnsmasq.c
-QCA_OSA_SRC_SSDK    := $(OVERRIDE_DIR)/src/os_ssdk.c
+UNIT_NAME := fut_platform_qca_lib_override
 
-QCA_OSA_SRC += $(QCA_OSA_SRC_NIF_GRE)
-QCA_OSA_SRC += $(QCA_OSA_SRC_DNSMASQ)
-QCA_OSA_SRC += $(QCA_OSA_SRC_SSDK)
-QCA_OSA_SRC += $(QCA_OSA_SRC_MCPROXY)
+UNIT_DISABLE := n
 
-UNIT_SRC_TOP += $(QCA_OSA_SRC)
+# Template type:
+UNIT_TYPE := FUT
+# Output directory
+UNIT_DIR := shell/lib/override/
 
-UNIT_CFLAGS += -I$(OVERRIDE_DIR)/inc
-UNIT_EXPORT_CFLAGS  += -I$(OVERRIDE_DIR)/inc
-
-UNIT_DEPS += src/lib/common
+UNIT_FILE := qca_platform_override.sh

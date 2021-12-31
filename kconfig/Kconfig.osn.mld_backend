@@ -1,0 +1,7 @@
+#
+# QCA MLD implementation
+#
+if PLATFORM_IS_QCA
+orsource "../src/lib/osn/kconfig/Kconfig.osn.mld_backend"
+endif
+
