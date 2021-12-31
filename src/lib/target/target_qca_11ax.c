@@ -605,6 +605,9 @@ util_net_get_macaddr(const char *ifname,
  * Wireless helpers
  *****************************************************************************/
 
+static int
+util_wifi_get_phy_vifs_cnt(const char *phy);
+
 static bool
 util_wifi_is_ap_vlan(const char *ifname)
 {
@@ -644,10 +647,45 @@ util_wifi_is_phy_vif_match(const char *phy,
 }
 
 static void
-util_wifi_transform_macaddr(char *mac, int idx)
+util_wifi_transform_macaddr(const char *phy, char *mac, int idx)
 {
+    const char *mbss_cache;
+    char *ic_config;
+    const char *line;
+    uint8_t max_bssid = 0;
+    int vifs_cnt = 0;
+
     if (idx == 0)
         return;
+
+    if (access(F("/proc/%s/dump_mbss_ie", phy), F_OK) == 0)
+        mbss_cache = R(F("/proc/%s/dump_mbss_ie", phy));
+    else
+        mbss_cache = R(F("/proc/%s/dump_mbss_cache", phy));
+
+    if (!strstr(mbss_cache, "not enabled!")) {
+        LOGI("%s: MBSS IE feature is enabled", phy);
+        ic_config = R(F("/proc/%s/ic_config", phy));
+        while ((line = strsep(&ic_config, "\r\n")) != NULL)
+            if (strstr(line, "ic_mbss.max_bssid:")) {
+                ic_config = strpbrk(line, ":");
+                ic_config += 1; /* skip the : */
+                max_bssid = 1 << atoi(ic_config);
+                break;
+            }
+
+        vifs_cnt = util_wifi_get_phy_vifs_cnt(phy);
+        if (max_bssid <= vifs_cnt) {
+            LOGW("%s: supports only %d vaps", phy, max_bssid);
+            return;
+        }
+
+        mac[0] = ((mac[5] & (max_bssid - 1)) << 2) | 0x2;
+        mac[5] = (mac[5] & ~(max_bssid - 1))
+               | ((max_bssid - 1) & (mac[5] + idx));
+
+        return;
+    }
 
     mac[0] = ((((mac[0] >> 4) + 8 + idx - 2) & 0xf) << 4)
                | (mac[0] & 0xf)
@@ -668,7 +706,7 @@ util_wifi_gen_macaddr(const char *phy,
         return err;
     }
 
-    util_wifi_transform_macaddr(macaddr, idx);
+    util_wifi_transform_macaddr(phy, macaddr, idx);
 
     return 0;
 }
@@ -2161,9 +2199,11 @@ int target_bsal_send_action(const char *ifname, const uint8_t *mac_addr,
 
 #define EXTTOOL_HT40_PLUS_STR "CU"
 #define EXTTOOL_HT40_MINUS_STR "CL"
-#define EXTTOOL_HT40_PLUS 1
-#define EXTTOOL_HT40_MINUS 3
-#define EXTTOOL_HT40_DEFAULT EXTTOOL_HT40_PLUS
+#define EXTTOOL_HE40_PLUS_STR "HU"
+#define EXTTOOL_HE40_MINUS_STR "HL"
+#define EXTTOOL_SECOFFSET_PLUS 1
+#define EXTTOOL_SECOFFSET_MINUS 3
+#define EXTTOOL_SECOFFSET_DEFAULT EXTTOOL_SECOFFSET_PLUS
 
 #define CSA_COUNT 15
 
@@ -2240,7 +2280,7 @@ util_csa_is_sec_offset_supported(const char *phy,
         if (!(atoi(chan) == channel)) {
             continue;
         }
-        if (strstr(line, offset_str))
+        if (line && strstr(line, offset_str))
             return 1;
         else
             return 0;
@@ -2252,14 +2292,20 @@ static int
 util_csa_get_secoffset(const char *phy, int channel)
 {
     if (util_csa_is_sec_offset_supported(phy, channel, EXTTOOL_HT40_PLUS_STR))
-        return EXTTOOL_HT40_PLUS;
+        return EXTTOOL_SECOFFSET_PLUS;
 
     if (util_csa_is_sec_offset_supported(phy, channel, EXTTOOL_HT40_MINUS_STR))
-        return EXTTOOL_HT40_MINUS;
+        return EXTTOOL_SECOFFSET_MINUS;
+
+    if (util_csa_is_sec_offset_supported(phy, channel, EXTTOOL_HE40_PLUS_STR))
+        return EXTTOOL_SECOFFSET_PLUS;
+
+    if (util_csa_is_sec_offset_supported(phy, channel, EXTTOOL_HE40_MINUS_STR))
+        return EXTTOOL_SECOFFSET_MINUS;
 
     LOGW("%s: failed to find suitable csa channel offset, defaulting to: %d",
-         phy, EXTTOOL_HT40_DEFAULT);
-    return EXTTOOL_HT40_DEFAULT;
+         phy, EXTTOOL_SECOFFSET_DEFAULT);
+    return EXTTOOL_SECOFFSET_DEFAULT;
 }
 
 static bool
@@ -2378,7 +2424,11 @@ util_cac_in_progress(const char *phy)
     const char *line;
     char *buf;
 
+#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+    if (WARN_ON(!(buf = strexa("exttool", "--list_chan_state", "--interface", phy))))
+#else
     if (WARN_ON(!(buf = strexa("exttool", "--interface", phy, "--list"))))
+#endif
         return 0;
 
     while ((line = strsep(&buf, "\r\n")))
@@ -2928,6 +2978,15 @@ util_radio_channel_state(const char *line)
     *     "cac_started" - dfs/CAC started
     *     "cac_completed" - dfs/pass CAC beaconing
     */
+
+#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+    if (strstr(line, " NON_DFS"))
+        return"{\"state\":\"allowed\"}";
+    if (strstr(line, " DFS_CAC_REQUIRED"))
+        return "{\"state\": \"nop_finished\"}";
+    if (strstr(line, " DFS_NOL"))
+        return "{\"state\": \"nop_started\"}";
+#else
     if (!strstr(line, " DFS"))
         return"{\"state\":\"allowed\"}";
 
@@ -2935,6 +2994,7 @@ util_radio_channel_state(const char *line)
         return "{\"state\": \"nop_finished\"}";
     if (strstr(line, " DFS_NOP_STARTED"))
         return "{\"state\": \"nop_started\"}";
+#endif
     if (strstr(line, " DFS_CAC_STARTED"))
         return "{\"state\": \"cac_started\"}";
     if (strstr(line, " DFS_CAC_COMPLETED"))
@@ -2965,7 +3025,11 @@ util_radio_bgcac_active(const char *phy, int chan, const char *ht_mode)
         return false;
 
     /* Check if any of current channels have CAC started */
+#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+    if (WARN_ON(!(buf = strexa("exttool", "--list_chan_state", "--interface", phy))))
+#else
     if (WARN_ON(!(buf = strexa("exttool", "--interface", phy, "--list"))))
+#endif
         return false;
 
     while ((line = strsep(&buf, "\r\n"))) {
@@ -3085,15 +3149,27 @@ util_radio_channel_list_get(const char *phy, struct schema_Wifi_Radio_State *rst
 
     buf = buffer;
 
+#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+    err = readcmd(buffer, sizeof(buffer), 0, "exttool --list_chan_state --interface %s", phy);
+#else
     err = readcmd(buffer, sizeof(buffer), 0, "exttool --interface %s --list", phy);
+#endif
     if (err) {
         LOGW("%s: readcmd() failed: %d (%s)", phy, errno, strerror(errno));
         return;
     }
 
     while ((line = strsep(&buf, "\n")) != NULL) {
+#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+        if ((!strstr(line, "chan")) && (!strstr(line, "dfs")))
+            break;
+#endif
         LOGD("%s line: |%s|", phy, line);
+#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+        if (sscanf(line, "chan %d", &channel) != 1) {
+#else
         if (sscanf(line, "chan %d", &channel) == 1) {
+#endif
             rstate->allowed_channels[rstate->allowed_channels_len++] = channel;
             SCHEMA_KEY_VAL_APPEND(rstate->channels, F("%d", channel), util_radio_channel_state(line));
         }

@@ -52,6 +52,11 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define MODULE_ID LOG_MODULE_ID_IOCTL
 #define QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION 74
 
+#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+#define CFG80211_GET_CHAN_SURVEY_HOME_CHANNEL_STATS (1)
+#define CFG80211_GET_CHAN_SURVEY_SCAN_CHANNEL_STATS (2)
+#endif
+
 uint32_t                        g_chan_idx;
 extern struct socket_context    sock_ctx;
 struct ps_uapi_ioctl            g_bss_data;
@@ -80,7 +85,103 @@ static const unsigned           NL80211_ATTR_MAX_INTERNAL = 256;
 /******************************************************************************
  *  PUBLIC definitions
  *****************************************************************************/
+#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+void parse_channel_survey_stats_cb(struct cfg80211_data *arg)
+{
+    char                   *vendata = arg->nl_vendordata;
+    int                     datalen = arg->nl_vendordata_len;
+    struct nlattr          *attr_vendor[NL80211_ATTR_MAX_INTERNAL];
+    u_int32_t               num_chan_stats = 0;
+    uint32_t                flags = 0;
+    uint32_t                chan_stats_len = 0;
+    struct channel_stats   *chan_stats = NULL;
+    uint16_t                chan_stats_index = 0;
+    uint16_t                chan_index = 0;
 
+    /* extract data from NL80211_ATTR_VENDOR_DATA attributes */
+    nla_parse(attr_vendor, QCA_WLAN_VENDOR_ATTR_GENERIC_PARAM_MAX,
+            (struct nlattr *)vendata,
+            datalen, NULL);
+
+    if (attr_vendor[QCA_WLAN_VENDOR_ATTR_PARAM_DATA]) {
+        chan_stats = nla_data(attr_vendor[QCA_WLAN_VENDOR_ATTR_PARAM_DATA]);
+    }
+
+    if (attr_vendor[QCA_WLAN_VENDOR_ATTR_PARAM_LENGTH]) {
+        chan_stats_len = nla_get_u32(attr_vendor[QCA_WLAN_VENDOR_ATTR_PARAM_LENGTH]);
+    }
+
+    if (attr_vendor[QCA_WLAN_VENDOR_ATTR_PARAM_FLAGS]) {
+        flags = nla_get_u32(attr_vendor[QCA_WLAN_VENDOR_ATTR_PARAM_FLAGS]);
+    }
+
+    if (!chan_stats) {
+        LOGE("%s: Channel stats are not populated", __func__);
+        return;
+    }
+
+    num_chan_stats =  chan_stats_len / sizeof(*chan_stats);
+
+    if (flags == CFG80211_GET_CHAN_SURVEY_HOME_CHANNEL_STATS) {
+        if (num_chan_stats != 1) {
+            LOGE("%s: Unexpected number of channel stats %u", __func__, num_chan_stats);
+            return;
+        }
+
+        memset(&g_bss_data, 0, sizeof(g_bss_data));
+        g_bss_data.u.survey_bss.get.total      = chan_stats->cycle_cnt;
+        g_bss_data.u.survey_bss.get.busy       = chan_stats->clear_cnt;
+        g_bss_data.u.survey_bss.get.tx         = chan_stats->tx_frm_cnt;
+        g_bss_data.u.survey_bss.get.rx_bss     = chan_stats->bss_rx_cnt;
+        g_bss_data.u.survey_bss.get.rx         = chan_stats->rx_frm_cnt;
+        g_bss_data.u.survey_bss.get.busy_ext   = chan_stats->ext_busy_cnt;
+#ifdef IEEE80211_CHAN_NOISE_FLOOR_SUPPORTED
+        g_bss_data.u.survey_bss.get.nf         = chan_stats->noise_floor;
+#endif
+        LOGD("Home channel survey stats:");
+        LOGD("freq: %4d, rx_bss: %12"PRIu64", total: %12"PRIu64" tx: %12"PRIu64", "
+             "rx: %12"PRIu64", busy: %12"PRIu64", busy_ext: %12"PRIu64"",
+             chan_stats->freq, chan_stats->bss_rx_cnt, chan_stats->cycle_cnt,
+             chan_stats->tx_frm_cnt, chan_stats->rx_frm_cnt, chan_stats->clear_cnt,
+             chan_stats->ext_busy_cnt);
+#ifdef IEEE80211_CHAN_NOISE_FLOOR_SUPPORTED
+        LOGD("noise_floor: %"PRIi16"", chan_stats->noise_floor);
+#endif
+        LOGD("Scan channel survey stats:");
+        memset(&g_chan_data, 0, sizeof(g_chan_data));
+    } else if (flags == CFG80211_GET_CHAN_SURVEY_SCAN_CHANNEL_STATS) {
+        for (chan_stats_index = 0, chan_index = 0; chan_stats_index < num_chan_stats; chan_stats_index++) {
+            if (chan_stats->cycle_cnt) {
+                g_chan_data.u.survey_chan.get.channels[chan_stats_index].freq  = chan_stats->freq;
+                g_chan_data.u.survey_chan.get.channels[chan_stats_index].total = chan_stats->cycle_cnt;
+                g_chan_data.u.survey_chan.get.channels[chan_stats_index].busy  = chan_stats->clear_cnt;
+                g_chan_data.u.survey_chan.get.channels[chan_stats_index].tx    = chan_stats->tx_frm_cnt;
+                g_chan_data.u.survey_chan.get.channels[chan_stats_index].rx    = chan_stats->rx_frm_cnt;
+#ifdef IEEE80211_CHAN_NOISE_FLOOR_SUPPORTED
+                g_chan_data.u.survey_chan.get.channels[chan_stats_index].nf    = chan_stats->noise_floor;
+#endif
+                LOGD("freq: %4d, rx_bss: %12"PRIu64", total: %12"PRIu64", tx: %12"PRIu64", "
+                     "rx: %12"PRIu64", busy: %12"PRIu64", busy_ext: %12"PRIu64"",
+                     chan_stats->freq, chan_stats->bss_rx_cnt, chan_stats->cycle_cnt,
+                     chan_stats->tx_frm_cnt, chan_stats->rx_frm_cnt, chan_stats->clear_cnt,
+                     chan_stats->ext_busy_cnt);
+#ifdef IEEE80211_CHAN_NOISE_FLOOR_SUPPORTED
+                LOGD("noise_floor: %"PRIi16"", chan_stats->noise_floor);
+#endif
+                chan_index++;
+            }
+            chan_stats++;
+        }
+    } else {
+        LOGW("%s: Invalid flag %u", __func__, flags);
+    }
+
+    if (chan_index != 0)
+        g_chan_idx = chan_index;
+
+    return;
+}
+#else
 void parse_channel_survey_stats_cb(struct cfg80211_data *arg)
 {
     char                    *vendata = arg->nl_vendordata;
@@ -155,6 +256,7 @@ void parse_channel_survey_stats_cb(struct cfg80211_data *arg)
     }
     return;
 }
+#endif
 
 ioctl_status_t ioctl80211_survey_results_get(
         radio_entry_t              *radio_cfg,
@@ -215,6 +317,9 @@ ioctl_status_t ioctl80211_survey_results_get(
             data.u.survey_chan.get.channels[index].rx    = g_chan_data.u.survey_chan.get.channels[index].rx;
             data.u.survey_chan.get.channels[index].nf    = g_chan_data.u.survey_chan.get.channels[index].nf;
         }
+#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+        g_chan_idx = 0;
+#endif
     }
 #else
     struct iwreq                    request;

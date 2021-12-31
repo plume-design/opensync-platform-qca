@@ -86,7 +86,9 @@ typedef int16_t  s16;
 #endif /* QCA_10_4 */
 
 #include "ieee80211_external.h"
+#ifndef NETLINK_BAND_STEERING_EVENT
 #include <ieee80211_band_steering_api.h>
+#endif
 #endif /* !X86*/
 
 #define IOCTL80211_IFNAME_LEN       17

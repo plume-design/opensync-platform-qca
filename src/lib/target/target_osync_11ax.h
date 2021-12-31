@@ -271,7 +271,7 @@ wlanconfig_nl80211_create_intreface(const char *dvif,
     p = strexa("cat", phy_name) ?: "0";
 
     if (!strcmp(vconf->mode,"sta")) {
-        if (E("wlanconfig", dvif, "create", "wlandev", dphy, "wlanmode", "managed",
+        if (E("wlanconfig", dvif, "create", "wlandev", dphy, "wlanmode", vconf->mode,
             "-bssid", F("%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx",
             macaddr[0], macaddr[1], macaddr[2], macaddr[3], macaddr[4], macaddr[5]),
             "vapid", F("%d", vconf->vif_radio_idx), "-cfg80211")) {

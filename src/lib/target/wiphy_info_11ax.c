@@ -234,11 +234,19 @@ identify_band_wlanconfig2(const char *ifname,
     int flags = 0;
     char *buf = NULL;
 
+#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+    buf = strexa("exttool", "--list_chan_state", "--interface", ifname);
+#else
     buf = strexa("exttool", "--interface", ifname, "--list");
+#endif
     if (!buf)
         return -EOPNOTSUPP;
 
     while ((line = strsep(&buf, "\r\n"))) {
+#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+        if(!strstr(line, "chan"))
+            continue;
+#endif
         if (!(strsep(&line, " ")))
             continue;
         if (!(chan = strsep(&line, " ")))

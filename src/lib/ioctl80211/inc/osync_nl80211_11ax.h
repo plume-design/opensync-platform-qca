@@ -361,10 +361,17 @@ osync_nl80211_bsal_bs_client_config(int fd, const char *ifname, const uint8_t *m
     athdbg.data.acl_cli_param.auth_rssi_lwm        = conf->rssi_auth_lwm;      // Set LWM here for Auth pkts
     athdbg.data.acl_cli_param.auth_reject_reason   = conf->auth_reject_reason; // 0 = drop, > 0 = reject reason code
 
+#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+    athdbg.data.acl_cli_param.inact_snr_xing       = conf->rssi_inact_xing;
+    athdbg.data.acl_cli_param.low_snr_xing         = conf->rssi_low_xing;
+    athdbg.data.acl_cli_param.high_rate_snr_xing   = conf->rssi_high_xing;
+    athdbg.data.acl_cli_param.low_rate_snr_xing    = conf->rssi_high_xing;
+#else
     athdbg.data.acl_cli_param.inact_rssi_xing      = conf->rssi_inact_xing;
     athdbg.data.acl_cli_param.low_rssi_xing        = conf->rssi_low_xing;
     athdbg.data.acl_cli_param.high_rate_rssi_xing  = conf->rssi_high_xing;
     athdbg.data.acl_cli_param.low_rate_rssi_xing   = conf->rssi_high_xing;
+#endif
 
 #ifdef OPENSYNC_NL_SUPPORT
     athdbg.data.acl_cli_param.auth_block           = (conf->rssi_auth_hwm || conf->rssi_auth_lwm) ? 1 : 0;
@@ -457,13 +464,12 @@ osync_nl80211_sta_info(const char *ifname, const uint8_t *mac_addr, bsal_client_
 #ifdef OPENSYNC_NL_SUPPORT
     struct cfg80211_data            buffer;
     int                             rc;
-    uint8_t                         *buf_tmp;
+    char sta_list_size[LIST_STATION_CFG_ALLOC_SIZE];
 
     g_stainfo_len = 0;
     memset (bsal_clients, 0, sizeof(bsal_clients));
-    buf_tmp = (uint8_t *) MALLOC(LIST_STATION_CFG_ALLOC_SIZE);
 
-    buffer.data         = buf_tmp;
+    buffer.data         = sta_list_size;
     buffer.length       = LIST_STATION_CFG_ALLOC_SIZE;
     buffer.callback     = &bsal_stainfo_cb;
     buffer.parse_data   = 0;
@@ -472,7 +478,6 @@ osync_nl80211_sta_info(const char *ifname, const uint8_t *mac_addr, bsal_client_
             QCA_NL80211_VENDOR_SUBCMD_LIST_STA, ifname,
             (char *)&buffer, buffer.length);
     if (0 > rc) {
-        FREE(buf_tmp);
         LOG(ERR,
             "Parsing %s client stats (Failed to get info '%s')",
             ifname,
@@ -483,7 +488,6 @@ osync_nl80211_sta_info(const char *ifname, const uint8_t *mac_addr, bsal_client_
     len = g_stainfo_len;
     LOGI("%s: length - %u", __func__, len);
     buf = bsal_clients;
-    FREE(buf_tmp);
 
 #else
     struct iwreq                    iwreq;
@@ -726,8 +730,14 @@ osync_nl80211_interfaces_get(int	sock_fd,
     util_iwconfig_get_opmode(interface->ifname, &opmode, sizeof(opmode));
     if (opmode == IEEE80211_M_HOSTAP)
         mode = IW_MODE_MASTER;
-    else
+    else if (opmode == IEEE80211_M_STA)
         mode = IW_MODE_INFRA;
+    else {
+        LOG(TRACE,
+            "Skip processing non wireless interface %s",
+            interface->ifname);
+        return IOCTL_STATUS_OK;
+    }
 
     interface->sta = false;
     switch (mode)
@@ -1501,6 +1511,15 @@ extern struct socket_context sock_ctx;
 #ifdef OPENSYNC_NL_SUPPORT
 static void  bss_info_handler(struct cfg80211_data *buffer)
 {
+    if ((res_len + buffer->length) >= g_iw_scan_results_capacity)
+    {
+        LOG(ERR,
+                "No space left in scan results buffer to store the scan data (%u bytes of scan data, %u bytes left in buffer)",
+                buffer->length,
+                g_iw_scan_results_capacity - res_len);
+        return;
+    }
+
     memcpy(g_iw_scan_results + res_len, buffer->data,buffer->length);
     res_len += buffer->length;
     g_iw_scan_results_size += buffer->length;

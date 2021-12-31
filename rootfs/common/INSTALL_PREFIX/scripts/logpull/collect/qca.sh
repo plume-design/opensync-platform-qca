@@ -81,11 +81,29 @@ collect_qcawl()
             collect_cmd plume $PHY peer_rx_stats $BSSID
         fi
     done
+
+    # Collect mcsd conifgs
+    pgrep mcsd && collect_file /tmp/mcs.conf
+}
+
+collect_acceleration()
+{
+    [ -e /sys/kernel/debug/ecm/ecm_nss_ipv4 ] && collect_cmd ecm_dump.sh
+    [ -e /sys/kernel/debug/ecm/ecm_sfe_ipv4 ] && collect_cmd sfe_dump
+}
+
+collect_switch()
+{
+    for s in $(swconfig list | grep Found: | awk '{ print $2 }'); do
+        collect_cmd swconfig dev $s show
+    done
 }
 
 collect_platform_qca()
 {
     collect_qcawl
+    collect_acceleration
+    collect_switch
 }
 
 collect_platform_qca

@@ -62,7 +62,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #endif
 
 #include <ieee80211_external.h>
+#ifndef NETLINK_BAND_STEERING_EVENT
 #include <ieee80211_band_steering_api.h>
+#endif
 #include <ieee80211_rrm.h>
 
 #include "log.h"
@@ -425,8 +427,10 @@ static int qca_bsal_if_netlink_init(const bsal_ifconfig_t *ifcfg, bool enable)
 {
     int                 ret;
     struct sockaddr_nl  addr;
-    struct nlmsghdr     nhdr;
     uint32_t sys_index;
+    const size_t buf_size = NLMSG_SPACE(sizeof(sys_index));
+    char buf[buf_size];
+    struct nlmsghdr *nhdr = (struct nlmsghdr *)&buf;
 
     sys_index = if_nametoindex(ifcfg->ifname);
     if (!sys_index) {
@@ -439,18 +443,19 @@ static int qca_bsal_if_netlink_init(const bsal_ifconfig_t *ifcfg, bool enable)
     addr.nl_pid         = 0;
     addr.nl_groups      = 0;
 
-    memset(&nhdr, 0, sizeof(nhdr));
-    nhdr.nlmsg_len      = NLMSG_SPACE(0);
-    nhdr.nlmsg_flags    = sys_index;
-    nhdr.nlmsg_type     = 0;
+    memset(nhdr, 0, buf_size);
+    nhdr->nlmsg_len      = buf_size;
+    nhdr->nlmsg_flags    = sys_index;
+    nhdr->nlmsg_type     = 0;
+    memcpy(NLMSG_DATA(nhdr), &sys_index, sizeof(sys_index));
 
     if (enable) {
-        nhdr.nlmsg_pid  = getpid();
+        nhdr->nlmsg_pid  = getpid();
     } else {
-        nhdr.nlmsg_pid  = 0;
+        nhdr->nlmsg_pid  = 0;
     }
 
-    ret = sendto(_bsal_netlink_fd, &nhdr, nhdr.nlmsg_len, 0,
+    ret = sendto(_bsal_netlink_fd, nhdr, nhdr->nlmsg_len, 0,
                  (const struct sockaddr *)&addr, sizeof(addr));
     if (ret < 0) {
         LOGE("Failed to set netlink events for %s, errno=%d,(%s)",

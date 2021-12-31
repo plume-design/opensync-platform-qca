@@ -31,6 +31,11 @@ choice
 
     config PLATFORM_QCA_QSDK110
         bool "QSDK 11.0"
+
+    if PLATFORM_QCA_QSDK110
+        config PLATFORM_QCA_QSDK11_SUB_VER4
+            bool "QSDK 11.4"
+    endif
 endchoice
 
 config QSDK_VERSION

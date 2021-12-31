@@ -57,13 +57,14 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define IOCTL80211_MAX_NEIGHBOR_SIZE    (256 * 1024)  /* 256k limit */
 #define IOCTL80211_DRIVER_NOISE         -95
 
-#define IOCTL80211_SCAN_MAX_RESULTS     0xFFFF
+#define IOCTL80211_SCAN_MAX_RESULTS     0x40000
 /* This is a global storage for all scans scheduled in FIFO g_scan_ctx_list
    
    Having one global storage wthout locks is only possible because of FIFO
    is preventing multiple access. The upper layer reads and coverts data from 
    this storage
  */
+static const size_t                 g_iw_scan_results_capacity = IOCTL80211_SCAN_MAX_RESULTS;
 static char                         g_iw_scan_results[IOCTL80211_SCAN_MAX_RESULTS];
 static size_t                       g_iw_scan_results_size;
 static unsigned int                 res_len;
@@ -613,6 +614,32 @@ restart_timer:
     return;
 }
 
+#ifdef OPENSYNC_NL_SUPPORT
+static
+enum wlan_band_id get_band_id_from_radio_type(radio_type_t radio_type)
+{
+    enum wlan_band_id band_id = WLAN_BAND_UNSPECIFIED;
+
+    switch (radio_type) {
+        case RADIO_TYPE_NONE:
+            band_id = WLAN_BAND_UNSPECIFIED;
+            break;
+        case RADIO_TYPE_2G:
+            band_id = WLAN_BAND_2GHZ;
+            break;
+        case RADIO_TYPE_5G:
+        case RADIO_TYPE_5GL:
+        case RADIO_TYPE_5GU:
+            band_id = WLAN_BAND_5GHZ;
+            break;
+        case RADIO_TYPE_6G:
+            band_id = WLAN_BAND_6GHZ;
+            break;
+    }
+
+    return band_id;
+}
+#endif
 
 /******************************************************************************
  *  PUBLIC definitions
@@ -653,7 +680,7 @@ ioctl_status_t ioctl80211_scan_channel(
         req.cmd = IEEE80211_DBGREQ_OFFCHAN_RX;
         req.needs_reply = DBGREQ_REPLY_IS_NOT_REQUIRED;
 
-        req.data.offchan_req.band = radio_type;
+        req.data.offchan_req.band = get_band_id_from_radio_type(radio_type);
         WARN_ON(chan_num > 1);
         req.data.offchan_req.ieee_chan = chan_list[0];
         req.data.offchan_req.dwell_time = dwell_time;
