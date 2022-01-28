@@ -1250,7 +1250,7 @@ ioctl_status_t ioctl80211_clients_list_fetch(
 #endif
 
     for (   ieee80211_client_offset = 0;
-            length - ieee80211_client_offset >= (int)sizeof(*ieee80211_client);)
+            (ssize_t)length - ieee80211_client_offset >= (int)sizeof(*ieee80211_client);)
     {
         ieee80211_client =
             (struct ieee80211req_sta_info *)
@@ -1361,6 +1361,10 @@ ioctl_status_t ioctl80211_clients_list_fetch(
 
         /* Move to the next client */
         ieee80211_client_offset += ieee80211_client->isi_len;
+        if (!ieee80211_client->isi_len)
+        {
+            return IOCTL_STATUS_OK;
+        }
         continue;
 
 error:

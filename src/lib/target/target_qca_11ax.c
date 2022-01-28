@@ -2643,6 +2643,7 @@ util_wifi_phy_has_sta(const char *phy)
     char vifs[1024];
     char *vifr;
     char *vif;
+    char opmode[32] = {0};
 
     if (util_wifi_get_phy_vifs(phy, vifs, sizeof(vifs)) < 0) {
         LOGW("%s: failed to get phy vif list: %d (%s)", phy, errno, strerror(errno));
@@ -2650,7 +2651,8 @@ util_wifi_phy_has_sta(const char *phy)
     }
 
     for (vif = strtok_r(vifs, " ", &vifr); vif; vif = strtok_r(NULL, " ", &vifr)) {
-        if (strstr(vif, "bhaul-sta"))
+        util_iwconfig_get_opmode(vif, opmode, sizeof(opmode));
+        if (!strcmp(opmode, "sta"))
             return true;
     }
 
@@ -3251,8 +3253,11 @@ util_radio_ht_mode_get(char *phy, char *htmode, int htmode_len)
     char *vifr = vifs;
     char *vif;
     char ht_mode_vif[32];
+    char ht_mode_sta[32];
+    char opmode[32] = {0};
 
     memset(ht_mode_vif, '\0', sizeof(ht_mode_vif));
+    memset(ht_mode_sta, '\0', sizeof(ht_mode_sta));
 
     if (util_wifi_get_phy_vifs(phy, vifs, sizeof(vifs))) {
         LOGE("%s: get vifs failed", phy);
@@ -3261,7 +3266,8 @@ util_radio_ht_mode_get(char *phy, char *htmode, int htmode_len)
 
     while ((vif = strsep(&vifr, " "))) {
         if (strlen(vif)) {
-            if (strstr(vif, "bhaul-sta") == NULL) {
+            util_iwconfig_get_opmode(vif, opmode, sizeof(opmode));
+            if (!strcmp(opmode, "ap")) {
                 if (util_qca_get_ht_mode(vif, htmode, htmode_len)) {
                     if (strlen(ht_mode_vif) == 0) {
                         STRSCPY(ht_mode_vif, htmode);
@@ -3270,8 +3276,13 @@ util_radio_ht_mode_get(char *phy, char *htmode, int htmode_len)
                         return false;
                     }
                 }
+            } else if (!strcmp(opmode, "sta")) {
+                util_qca_get_ht_mode(vif, ht_mode_sta, sizeof(ht_mode_sta));
             }
         }
+    }
+    if (strlen(htmode) == 0 && strlen(ht_mode_sta) > 0) {
+        strscpy(htmode, ht_mode_sta, htmode_len);
     }
     if (strlen(htmode) == 0) {
         if (util_radio_ht_mode_get_max(phy, ht_mode_vif, sizeof(ht_mode_vif))) {

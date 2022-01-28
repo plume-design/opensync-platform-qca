@@ -486,7 +486,7 @@ osync_nl80211_sta_info(const char *ifname, const uint8_t *mac_addr, bsal_client_
     }
 
     len = g_stainfo_len;
-    LOGI("%s: length - %u", __func__, len);
+    LOGT("%s: length - %u", __func__, len);
     buf = bsal_clients;
 
 #else
