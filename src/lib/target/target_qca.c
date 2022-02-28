@@ -60,6 +60,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "wiphy_info.h"
 #include "log.h"
 #include "ds_dlist.h"
+#include "ds_tree.h"
 #include "kconfig.h"
 
 #include "wpa_ctrl.h"
@@ -1064,79 +1065,113 @@ util_cb_phy_state_update(const char *phy)
  * Target delayed callback helpers
  *****************************************************************************/
 
-static ev_timer g_util_cb_timer;
+struct util_cb_phy {
+    struct ds_tree_node node;
+    char name[32];
+};
 
-#define UTIL_CB_PHY "phy"
-#define UTIL_CB_VIF "vif"
-#define UTIL_CB_KV_KEY "delayed_update_ifname_list"
-#define UTIL_CB_DELAY_SEC 1
+struct util_cb_vif {
+    struct ds_tree_node node;
+    char name[32];
+};
 
-static void
-util_cb_delayed_update_timer(struct ev_loop *loop,
-                             ev_timer *timer,
-                             int revents)
+static struct util_cb {
+    ev_timer timer;
+    struct ds_tree phys;
+    struct ds_tree vifs;
+} g_util_cb = {
+    .phys = DS_TREE_INIT(ds_str_cmp, struct util_cb_phy, node),
+    .vifs = DS_TREE_INIT(ds_str_cmp, struct util_cb_vif, node),
+};
+
+enum util_cb_type {
+    UTIL_CB_PHY,
+    UTIL_CB_VIF,
+};
+
+#define UTIL_CB_DELAY_SEC 1.0
+#define UTIL_CB_DELAY_AGAIN_SEC 0.0
+#define UTIL_CB_SPLIT true
+
+static bool
+util_cb_work(struct util_cb *cb, bool split)
 {
-    const struct kvstore *kv;
-    char *ifname;
-    char *type;
-    char *p;
-    char *q;
-    char *i;
+    struct ds_tree *phys = &cb->phys;
+    struct ds_tree *vifs = &cb->vifs;
+    struct util_cb_phy *phy;
+    struct util_cb_phy *vif;
 
-    if (!(kv = util_kv_get(UTIL_CB_KV_KEY)))
-        return;
+    while ((vif = ds_tree_head(vifs))) {
+        util_cb_vif_state_update(vif->name);
+        ds_tree_remove(vifs, vif);
+        FREE(vif);
+        if (split == true) return true;
+    }
 
-    p = strdupa(kv->val);
-    util_kv_set(UTIL_CB_KV_KEY, NULL);
+    while ((phy = ds_tree_head(phys))) {
+        util_cb_phy_state_update(phy->name);
+        ds_tree_remove(phys, phy);
+        FREE(phy);
+        if (split == true) return true;
+    }
 
-    /* The ordering is intentional here. It
-     * reduces the churn when vif states are
-     * updated, e.g. due to channel change events
-     * in which case updating phy will need to be
-     * done once afterwards.
-     */
-
-    q = strdupa(p);
-    while ((i = strsep(&q, " ")))
-        if ((type = strsep(&i, ":")) && !strcmp(type, UTIL_CB_VIF) && (ifname = strsep(&i, "")))
-            util_cb_vif_state_update(ifname);
-
-    q = strdupa(p);
-    while ((i = strsep(&q, " ")))
-        if ((type = strsep(&i, ":")) && !strcmp(type, UTIL_CB_PHY) && (ifname = strsep(&i, "")))
-            util_cb_phy_state_update(ifname);
+    return false;
 }
 
 static void
-util_cb_delayed_update(const char *type, const char *ifname)
+util_cb_arm(EV_P_ struct util_cb *cb, int seconds)
 {
-    const struct kvstore *kv;
-    char buf[512];
-    char *p;
-    char *i;
+    ev_timer_stop(EV_A_ &cb->timer);
+    ev_timer_set(&cb->timer, seconds, 0);
+    ev_timer_start(EV_A_ &cb->timer);
+}
 
-    if ((kv = util_kv_get(UTIL_CB_KV_KEY))) {
-        STRSCPY(buf, kv->val);
-        p = strdupa(buf);
-        while ((i = strsep(&p, " ")))
-            if (!strcmp(i, F("%s:%s", type, ifname)))
-                break;
-        if (i) {
-            LOGD("%s: delayed update already scheduled", ifname);
-            return;
-        }
-    } else {
-        ev_timer_init(&g_util_cb_timer, util_cb_delayed_update_timer, UTIL_CB_DELAY_SEC, 0);
-        ev_timer_start(target_mainloop, &g_util_cb_timer);
+static void
+util_cb_timer_cb(EV_P_ ev_timer *arg, int revents)
+{
+    struct util_cb *cb = container_of(arg, struct util_cb, timer);
+    bool more = util_cb_work(cb, UTIL_CB_SPLIT);
+    if (more == true) util_cb_arm(EV_A_ cb, UTIL_CB_DELAY_AGAIN_SEC);
+}
+
+static void
+util_cb_add_phy(EV_P_ struct util_cb *cb, const char *ifname)
+{
+    struct util_cb_phy *phy = ds_tree_find(&cb->phys, ifname);
+    if (phy == NULL) {
+        phy = CALLOC(1, sizeof(*phy));
+        STRSCPY_WARN(phy->name, ifname);
+        ds_tree_insert(&cb->phys, phy, phy->name);
+        util_cb_arm(EV_A_ cb, UTIL_CB_DELAY_SEC);
     }
+}
 
-    LOGD("%s: scheduling delayed update '%s' += '%s:%s'",
-         ifname, kv ? kv->val : "", type, ifname);
-    STRSCAT(buf, " ");
-    STRSCAT(buf, type);
-    STRSCAT(buf, ":");
-    STRSCAT(buf, ifname);
-    util_kv_set(UTIL_CB_KV_KEY, buf);
+static void
+util_cb_add_vif(EV_P_ struct util_cb *cb, const char *ifname)
+{
+    struct util_cb_vif *vif = ds_tree_find(&cb->vifs, ifname);
+    if (vif == NULL) {
+        vif = CALLOC(1, sizeof(*vif));
+        STRSCPY_WARN(vif->name, ifname);
+        ds_tree_insert(&cb->vifs, vif, vif->name);
+        util_cb_arm(EV_A_ cb, UTIL_CB_DELAY_SEC);
+    }
+}
+
+static void
+util_cb_delayed_update(enum util_cb_type type, const char *ifname)
+{
+    struct util_cb *cb = &g_util_cb;
+    switch (type) {
+        case UTIL_CB_PHY: util_cb_add_phy(EV_DEFAULT_ cb, ifname); break;
+        case UTIL_CB_VIF: util_cb_add_vif(EV_DEFAULT_ cb, ifname); break;
+    }
+}
+
+static void
+util_cb_init(struct util_cb *cb)
+{
+    ev_timer_init(&cb->timer, util_cb_timer_cb, 0, 0);
 }
 
 /* FIXME: forward declarations are bad */
@@ -2827,8 +2862,10 @@ util_nl_listen_cb(struct ev_loop *loop,
                   int revents)
 {
     char buf[32768];
+    int max = 256;
     int len;
 
+again:
     len = recvfrom(util_nl_fd, buf, sizeof(buf), MSG_DONTWAIT, NULL, 0);
     if (len < 0) {
         if (errno == EAGAIN)
@@ -2849,6 +2886,10 @@ util_nl_listen_cb(struct ev_loop *loop,
 
     LOGT("%s: received %d bytes", __func__, len);
     util_nl_parse(buf, len);
+
+    max--;
+    if (max > 0)
+        goto again;
 }
 
 static int
@@ -4328,6 +4369,20 @@ free:
 }
 
 static void
+target_radio_init_discover_phy(void)
+{
+    struct dirent *p;
+    DIR *d;
+
+    for (d = opendir("/sys/class/net"); d && (p = readdir(d)); )
+        if (strstr(p->d_name, "wifi") == p->d_name)
+            util_cb_delayed_update(UTIL_CB_PHY, p->d_name);
+
+    if (!WARN_ON(!d))
+        closedir(d);
+}
+
+static void
 target_radio_init_discover(EV_P_ ev_async *async, int events)
 {
     char *ifnames = strexa("iwconfig");
@@ -4345,6 +4400,7 @@ target_radio_init_discover(EV_P_ ev_async *async, int events)
                     util_cb_delayed_update(UTIL_CB_VIF, ifname);
             }
 
+    target_radio_init_discover_phy();
     ev_async_stop(EV_DEFAULT, async);
 }
 
@@ -4356,6 +4412,7 @@ target_radio_init(const struct target_radio_ops *ops)
     ovsdb_table_t table_Wifi_VIF_Config;
 
     rops = *ops;
+    util_cb_init(&g_util_cb);
     target_radio_config_init_check_runtime();
 
     if (wiphy_info_init()) {

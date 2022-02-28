@@ -605,6 +605,17 @@ osync_nl80211_bsal_client_measure(const char *ifname, const uint8_t *mac_addr, i
 #include <string.h>
 #include "util.h"
 
+#ifdef OPENSYNC_NL_SUPPORT
+static ev_io g_nl_io;
+
+static void
+nl_io_read_cb(EV_P_ ev_io *io, int events)
+{
+     LOGT("nl_io_read_cb io->fd = %d", io->fd);
+     WARN_ON(nl_recvmsgs_default(sock_ctx.cfg80211_ctxt.event_sock) < 0);
+}
+#endif
+
 static inline int
 osync_nl80211_init(struct ev_loop *loop, bool init_callback)
 {
@@ -616,15 +627,21 @@ osync_nl80211_init(struct ev_loop *loop, bool init_callback)
         sock_ctx.cfg80211_ctxt.event_callback = osync_peer_stats_event_callback;
     }
 
-    if (init_socket_context(&sock_ctx, WIFI_NL80211_CMD_SOCK_ID, WIFI_NL80211_EVENT_SOCK_ID)) {
+    if (WARN_ON(init_socket_context(&sock_ctx, WIFI_NL80211_CMD_SOCK_ID, WIFI_NL80211_EVENT_SOCK_ID))) {
         return -EIO;
     }
 
     if (init_callback) {
-        if (wifi_nl80211_start_event_thread(&sock_ctx.cfg80211_ctxt)) {
-            wifi_destroy_nl80211(&sock_ctx.cfg80211_ctxt);
-            return -EIO;
+        int fd = nl_socket_get_fd(sock_ctx.cfg80211_ctxt.event_sock);
+        if (fd < 0) {
+           LOG(ERR,"Getting file descripton failed (fd: %d)", fd);
+           wifi_destroy_nl80211(&sock_ctx.cfg80211_ctxt);
+           return -EIO;
         }
+
+        nl_socket_set_nonblocking(sock_ctx.cfg80211_ctxt.event_sock);
+        ev_io_init(&g_nl_io, nl_io_read_cb, fd, EV_READ);
+        ev_io_start(loop, &g_nl_io);
     }
 
     return IOCTL_STATUS_OK;
@@ -644,6 +661,7 @@ static inline int
 osync_nl80211_close(struct ev_loop *loop)
 {
 #ifdef OPENSYNC_NL_SUPPORT
+    ev_io_stop(loop, &g_nl_io);
     destroy_socket_context(&sock_ctx);
 #else
     close(g_ioctl80211_sock_fd);

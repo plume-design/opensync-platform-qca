@@ -44,6 +44,8 @@ collect_qcawl()
     for radio in $(cat /proc/net/wireless | grep -o wifi.); do
         collect_cmd athstats -i $radio
         collect_cmd exttool --interface $radio --list
+        collect_cmd exttool --interface $radio --list_chan_info
+        collect_cmd exttool --interface $radio --list_chan_state
     done
 
     # Collect OL radio firmware stats

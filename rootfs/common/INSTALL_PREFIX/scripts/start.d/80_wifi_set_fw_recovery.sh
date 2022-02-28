@@ -24,4 +24,16 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-grep -l $1 /sys/class/net/*/parent 2>/dev/null" " | sed 1q 2>/dev/null" " | xargs -n1 dirname 2>/dev/null" " | xargs -n1 basename 2>/dev/null" " | xargs -n1 sh -c 'wlanconfig $0 list freq'" " | sed 's/Channel/\n/g'" " |tr -s " " | cut -d " " -f2,8,9 > /tmp/chan_width_1.txt
+
+# Enable fw_recovery; this prevents an immediate reboot after a Wifi firmware
+# crash. The crash will be handled by OpenSync and it will result in a reboot
+# in the end, but this gives us time to collect logs and update the reboot
+# status
+
+for wifidev in /sys/class/net/wifi?
+do
+    wifi=$(basename $wifidev)
+    iwpriv $wifi 2>&1 | grep -q set_fw_recovery || continue
+    iwpriv $wifi set_fw_recovery 1
+done
+

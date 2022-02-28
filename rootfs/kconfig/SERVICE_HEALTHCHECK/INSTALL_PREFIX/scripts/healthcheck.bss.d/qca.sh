@@ -35,8 +35,13 @@ fi
 out_of_channels()
 {
     radio=$(cat /sys/class/net/$1/parent)
-    chan_cnt=$(exttool --list --interface $1 | wc -l)
-    nop_cnt=$(exttool --list --interface $1 | grep NOP_STARTED | wc -l)
+    if exttool --help | grep -q 'list_chan_state '; then
+        chan_cnt=$(exttool --list_chan_state --interface $1 | grep chan | wc -l)
+        nop_cnt=$(exttool --list_chan_state --interface $1 | grep DFS_NOL | wc -l)
+    else
+        chan_cnt=$(exttool --list --interface $1 | wc -l)
+        nop_cnt=$(exttool --list --interface $1 | grep NOP_STARTED | wc -l)
+    fi
 
     test \
         $chan_cnt -gt 0 -a \

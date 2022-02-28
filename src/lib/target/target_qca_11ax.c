@@ -2263,29 +2263,17 @@ util_csa_is_sec_offset_supported(const char *phy,
                               int channel,
                               const char *offset_str)
 {
-    char *buf;
-    char buffer[4096];
-    char file[4096];
-    char *line, *chan;
-
-    snprintf(buffer, sizeof(buffer), CONFIG_INSTALL_PREFIX"/bin/chan_width.sh %s", phy);
-    system(buffer);
-    snprintf(file, sizeof(file), "/tmp/chan_width_1.txt");
-    buf = strexa("cat", file);
-
-    while ((line = strsep(&buf, "\n"))) {
-        if (!(chan = strsep(&line, " "))) {
-            continue;
-        }
-        if (!(atoi(chan) == channel)) {
-            continue;
-        }
-        if (line && strstr(line, offset_str))
-            return 1;
-        else
-            return 0;
-    }
-    return 0;
+    return 0 == runcmd("grep -l %s /sys/class/net/*/parent 2>/dev/null"
+                       " | sed 1q 2>/dev/null"
+                       " | xargs -n1 dirname 2>/dev/null"
+                       " | xargs -n1 basename 2>/dev/null"
+                       " | xargs -n1 sh -c 'wlanconfig $0 list freq'"
+                       " | sed 's/Channel/\\n/g'"
+                       " | awk '$1 == %d && / %s/'"
+                       " | grep -q .",
+                       phy,
+                       channel,
+                       offset_str);
 }
 
 static int
@@ -4083,7 +4071,8 @@ target_vif_config_set2(const struct schema_Wifi_VIF_Config *vconf,
     int o;
     int err;
     char buf[128];
-    const char *xml_path = qca_get_xml_path(phy);
+    const char *phy_xml_path = qca_get_xml_path(phy);
+    const char *vif_xml_path = qca_get_xml_path(vif);
 
     if (!rconf ||
         changed->enabled ||
@@ -4118,14 +4107,14 @@ target_vif_config_set2(const struct schema_Wifi_VIF_Config *vconf,
 
         if (!strcmp("ap", vconf->mode)) {
             LOGI("%s: setting channel %d", vif, rconf->channel);
-            if (E("cfg80211tool.1", "-i", vif, "-f", xml_path, "-h", "none", "--START_CMD", "--channel", "--value0", F("%d", rconf->channel), "--value1", F("%d", util_get_radio_band(rconf->freq_band)), "--RESPONSE", "--channel", "--END_CMD"))
+            if (E("cfg80211tool.1", "-i", vif, "-f", vif_xml_path, "-h", "none", "--START_CMD", "--channel", "--value0", F("%d", rconf->channel), "--value1", F("%d", util_get_radio_band(rconf->freq_band)), "--RESPONSE", "--channel", "--END_CMD"))
                 LOGW("%s: failed to set channel %d: %d (%s)",
                      vif, rconf->channel, errno, strerror(errno));
 
             if (strstr(rconf->freq_band, "5G") && util_qca_get_int(vif, "get_dfsdomain", &v) && v == 0) {
                 LOGI("%s: we need to restore dfs domain", phy);
 #ifdef OPENSYNC_NL_SUPPORT
-                WARN_ON(util_exec_simple("cfg80211tool.1", "-i", phy, "-f", xml_path, "-h", "none", "--START_CMD", "--setCountry",
+                WARN_ON(util_exec_simple("cfg80211tool.1", "-i", phy, "-f", phy_xml_path, "-h", "none", "--START_CMD", "--setCountry",
                                         "--RESPONSE", "--setCountry", "--END_CMD"));
 #else
                 WARN_ON(util_exec_simple("iwpriv", phy, "setCountry"));
@@ -4160,12 +4149,10 @@ target_vif_config_set2(const struct schema_Wifi_VIF_Config *vconf,
                                  "get_cwmenable",
                                  "cwmenable",
                                  util_policy_get_cwm_enable(phy));
-        if (util_iwconfig_any_phy_vif_type(phy, "sta", A(32)) == NULL) {
-            util_qca_set_int_lazy(vif,
+        util_qca_set_int_lazy(vif,
                                  "g_disablecoext",
                                  "disablecoext",
                                  util_policy_get_disable_coext(vif));
-        }
 
         /*
          * The `iwpriv' command has been replaced with `wifitool'.
