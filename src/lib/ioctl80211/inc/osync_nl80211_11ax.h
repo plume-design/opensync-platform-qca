@@ -129,8 +129,6 @@ struct socket_context {
     int sock_fd;
 };
 
-extern uint16_t g_stainfo_len;
-extern uint8_t bsal_clients[IOCTL80211_CLIENTS_SIZE];
 extern int  _bsal_ioctl_fd;
 
 const char *qca_get_xml_path(const char *ifname);
@@ -211,6 +209,7 @@ osync_nl80211_bsal_bs_config(int fd, const bsal_ifconfig_t *ifcfg, bool enable)
     struct ieee80211req_athdbg      athdbg;
     int                             index;
     struct                          cfg80211_data buffer;
+    int                             fwd_to_app;
     uint32_t                         filter_value;
 
     // Have to disable before config parameters can be set
@@ -269,10 +268,25 @@ osync_nl80211_bsal_bs_config(int fd, const bsal_ifconfig_t *ifcfg, bool enable)
 #ifdef OPENSYNC_NL_SUPPORT
     send_nl_command(&sock_ctx, ifcfg->ifname, &athdbg, sizeof(athdbg), NULL, QCA_NL80211_VENDOR_SUBCMD_DBGREQ);
     /*
-     * set filter for receiving management frames - 256 is for Control frames
+     * forward action frames to app
+     */
+    fwd_to_app = 1;
+    memset(&buffer, 0, sizeof(buffer));
+    buffer.length = sizeof(int);
+    buffer.data = (uint8_t *)&fwd_to_app;
+    buffer.callback = NULL;
+    buffer.parse_data = 0;
+    wifi_cfg80211_send_setparam_command(&(sock_ctx.cfg80211_ctxt),
+                                QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS,
+                                IEEE80211_PARAM_FWD_ACTION_FRAMES_TO_APP,
+                                ifcfg->ifname, (char *)&buffer, sizeof(int));
+    /*
+     * set filter for receiving action frame from rtnetlink event
+     * IEEE80211_FILTER_TYPE_ACTION = 0x100 for action frame
      * This is required for receiving BSAL_EVENT_ACTION_FRAME
      */
     filter_value = 256;
+    memset(&buffer, 0, sizeof(buffer));
     buffer.length = sizeof(uint32_t);
     buffer.data = (uint8_t *)&filter_value;
     buffer.callback = NULL;
@@ -394,17 +408,6 @@ osync_nl80211_bsal_bs_client_config(int fd, const char *ifname, const uint8_t *m
 }
 
 void qca_bsal_fill_sta_info(bsal_client_info_t *info, struct ieee80211req_sta_info *sta);
-static inline void bsal_stainfo_cb(struct cfg80211_data *buffer)
-{
-    uint32_t    len = buffer->length;
-
-    if (len < sizeof(struct ieee80211req_sta_info)) {
-        return;
-    }
-
-    memcpy((bsal_clients + g_stainfo_len), buffer->data, len);
-    g_stainfo_len += len;
-}
 
 static inline int
 qca_bsal_client_stats(const char *ifname,
@@ -450,6 +453,46 @@ qca_bsal_client_stats(const char *ifname,
     return 0;
 }
 
+struct stainfo_ctx {
+    struct cfg80211_data data;
+    void *buf;
+    size_t size;
+};
+
+static void bsal_stainfo_cb(struct cfg80211_data *data)
+{
+    struct stainfo_ctx *ctx = container_of(data, struct stainfo_ctx, data);
+    const void *src = data->data;
+    const size_t src_size = data->length;
+    const size_t dst_offset = ctx->size;
+
+    LOGT("%s: Clients buffer dst_offset = %d src_size = %d",
+         __func__, dst_offset, src_size);
+
+    if (src_size == 0)
+        return;
+
+    if (WARN_ON(src_size < sizeof(struct ieee80211req_sta_info)))
+        return;
+
+    if (WARN_ON(src == NULL))
+        return;
+
+    /* Expected buffer allocated in the driver */
+    if (WARN_ON(src_size > LIST_STATION_CFG_ALLOC_SIZE))
+        return;
+
+    LOGT("%s: ctx addr: %p ctx buf addr: %p", __func__, ctx, ctx->buf);
+
+    ctx->size += src_size;
+    ctx->buf = REALLOC(ctx->buf, ctx->size);
+    memcpy(ctx->buf + dst_offset, src, src_size);
+    /* Data is managed by NL helper,
+     * needs to set length 0 to force always use new buffer
+     */
+    data->length = 0;
+}
+
 static inline int
 osync_nl80211_sta_info(const char *ifname, const uint8_t *mac_addr, bsal_client_info_t *info)
 {
@@ -459,25 +502,25 @@ osync_nl80211_sta_info(const char *ifname, const uint8_t *mac_addr, bsal_client_
     uint8_t                         *assoc_ies;
     uint16_t                        assoc_ies_len;
     bool                            found = false;
+    int                             ret;
 
     memset(info, 0, sizeof(*info));
 #ifdef OPENSYNC_NL_SUPPORT
-    struct cfg80211_data            buffer;
-    int                             rc;
-    char sta_list_size[LIST_STATION_CFG_ALLOC_SIZE];
+    struct stainfo_ctx ctx = {0};
 
-    g_stainfo_len = 0;
-    memset (bsal_clients, 0, sizeof(bsal_clients));
+    /* Use default NL data buffer */
+    ctx.buf              = NULL;
+    ctx.data.length      = 0;
+    ctx.data.callback    = &bsal_stainfo_cb;
+    ctx.data.parse_data  = 0;
 
-    buffer.data         = sta_list_size;
-    buffer.length       = LIST_STATION_CFG_ALLOC_SIZE;
-    buffer.callback     = &bsal_stainfo_cb;
-    buffer.parse_data   = 0;
-    rc = wifi_cfg80211_send_generic_command(&(sock_ctx.cfg80211_ctxt),
+    ret = wifi_cfg80211_send_generic_command(&(sock_ctx.cfg80211_ctxt),
             QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION,
             QCA_NL80211_VENDOR_SUBCMD_LIST_STA, ifname,
-            (char *)&buffer, buffer.length);
-    if (0 > rc) {
+            (void *)&ctx.data, ctx.data.length);
+
+    if (0 > ret) {
+        FREE(ctx.buf);
         LOG(ERR,
             "Parsing %s client stats (Failed to get info '%s')",
             ifname,
@@ -485,13 +528,10 @@ osync_nl80211_sta_info(const char *ifname, const uint8_t *mac_addr, bsal_client_
         return IOCTL_STATUS_ERROR;
     }
 
-    len = g_stainfo_len;
-    LOGT("%s: length - %u", __func__, len);
-    buf = bsal_clients;
-
+    len = ctx.size;
+    buf = ctx.buf;
 #else
     struct iwreq                    iwreq;
-    int                             ret;
 
     len = 24*1024;
     buf = MALLOC(len);
@@ -533,6 +573,8 @@ osync_nl80211_sta_info(const char *ifname, const uint8_t *mac_addr, bsal_client_
         len = iwreq.u.data.length;
     }
 #endif
+    LOGD("%s: len - %d\n", __func__, len);
+
     p = buf;
     while(len >= sizeof(*sta)) {
         sta = (struct ieee80211req_sta_info *)p;
@@ -561,9 +603,7 @@ osync_nl80211_sta_info(const char *ifname, const uint8_t *mac_addr, bsal_client_
             LOGW("%s ies_len (%u) higher than ies table (%zu)", ifname, assoc_ies_len, sizeof(info->assoc_ies));
         }
     }
-#ifndef OPENSYNC_NL_SUPPORT
     FREE(buf);
-#endif
     if (info->connected)
         qca_bsal_client_stats(ifname, mac_addr, info);
 
@@ -611,8 +651,11 @@ static ev_io g_nl_io;
 static void
 nl_io_read_cb(EV_P_ ev_io *io, int events)
 {
-     LOGT("nl_io_read_cb io->fd = %d", io->fd);
-     WARN_ON(nl_recvmsgs_default(sock_ctx.cfg80211_ctxt.event_sock) < 0);
+    LOGT("nl_io_read_cb io->fd = %d", io->fd);
+    if (nl_recvmsgs_default(sock_ctx.cfg80211_ctxt.event_sock) < 0) {
+        LOGE("Failed to receive nl message, errno = %d (%s)",
+             errno, strerror(errno));
+    }
 }
 #endif
 
@@ -634,7 +677,7 @@ osync_nl80211_init(struct ev_loop *loop, bool init_callback)
     if (init_callback) {
         int fd = nl_socket_get_fd(sock_ctx.cfg80211_ctxt.event_sock);
         if (fd < 0) {
-           LOG(ERR,"Getting file descripton failed (fd: %d)", fd);
+           LOG(ERR,"Getting file description failed (fd: %d)", fd);
            wifi_destroy_nl80211(&sock_ctx.cfg80211_ctxt);
            return -EIO;
         }
@@ -1503,7 +1546,7 @@ nl80211_device_txchainmask_get(radio_entry_t              *radio_cfg,
     if (0 > rc)
     {
         LOG(ERR,
-                "Parsing device stats (Failed to retreive %s txchainmask %s '%s')",
+                "Parsing device stats (Failed to retrieve %s txchainmask %s '%s')",
                 radio_get_name_from_type(radio_cfg->type),
                 radio_cfg->phy_name,
                 strerror(errno));

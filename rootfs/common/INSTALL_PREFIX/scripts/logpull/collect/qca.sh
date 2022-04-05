@@ -40,12 +40,16 @@ collect_qcawl()
         collect_cmd iwlist $IF scan last
     done
 
-    # Collect ATH stats and channels state
+    # Collect radio dumps
     for radio in $(cat /proc/net/wireless | grep -o wifi.); do
         collect_cmd athstats -i $radio
         collect_cmd exttool --interface $radio --list
         collect_cmd exttool --interface $radio --list_chan_info
         collect_cmd exttool --interface $radio --list_chan_state
+        collect_cmd cat /proc/$radio/ic_config
+        collect_cmd cat /proc/$radio/dump_mbss_cache
+        collect_cmd cat /proc/$radio/dump_mbss_cache_attributes
+        collect_cmd cat /proc/$radio/dump_mbss_bssid_idx_pool
     done
 
     # Collect OL radio firmware stats
@@ -70,22 +74,24 @@ collect_qcawl()
     done
 
     # Collect mcs tx/rx stats
-    for IF in $(cat /proc/net/wireless | sed 1,2d | grep -v wifi | cut -d : -f 1)
-    do
-        PHY=$(cat /sys/class/net/$IF/parent)
-        for STA in $(wlanconfig $IF list sta | sed 1d | awk '{print $1}'); do
-            collect_cmd plume $PHY peer_tx_stats $STA
-            collect_cmd plume $PHY peer_rx_stats $STA
+    if [ -x "$(command -v plume)" ]; then
+        for IF in $(cat /proc/net/wireless | sed 1,2d | grep -v wifi | cut -d : -f 1)
+        do
+            PHY=$(cat /sys/class/net/$IF/parent)
+            for STA in $(wlanconfig $IF list sta | sed 1d | awk '{print $1}'); do
+                collect_cmd plume $PHY peer_tx_stats $STA
+                collect_cmd plume $PHY peer_rx_stats $STA
+            done
+            if iwconfig $IF | grep -q Mode:Managed; then
+                BSSID=$(iwconfig $IF | awk '/Access Point/{print $NF}')
+                collect_cmd plume $PHY peer_tx_stats $BSSID
+                collect_cmd plume $PHY peer_rx_stats $BSSID
+            fi
         done
-        if iwconfig $IF | grep -q Mode:Managed; then
-            BSSID=$(iwconfig $IF | awk '/Access Point/{print $NF}')
-            collect_cmd plume $PHY peer_tx_stats $BSSID
-            collect_cmd plume $PHY peer_rx_stats $BSSID
-        fi
-    done
+    fi
 
     # Collect mcsd conifgs
-    pgrep mcsd && collect_file /tmp/mcs.conf
+    pgrep mcsd > /dev/null && collect_file /tmp/mcs.conf
 }
 
 collect_acceleration()

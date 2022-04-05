@@ -108,9 +108,6 @@ static weighted_phyrate g_peer_rx_phyrate[PEER_CLI_MAX];
 static weighted_phyrate g_peer_tx_phyrate[PEER_CLI_MAX];
 static struct avg_phyrate g_peer_avg_phyrate[PEER_CLI_MAX];
 
-uint16_t g_stainfo_len;
-uint8_t bsal_clients[IOCTL80211_CLIENTS_SIZE];
-
 #include "osync_nl80211_11ax.h"
 
 #ifndef PROC_NET_WIRELESS
@@ -1172,8 +1169,8 @@ static void stainfo_cb(struct cfg80211_data *data)
     const size_t src_size = data->length;
     const size_t dst_offset = ctx->size;
 
-    LOGT("Clients buffer dst_offset = %d src_size = %d",
-         dst_offset, src_size);
+    LOGT("%s: Clients buffer dst_offset = %d src_size = %d",
+         __func__, dst_offset, src_size);
 
     if (src_size == 0)
        return;
@@ -1188,11 +1185,16 @@ static void stainfo_cb(struct cfg80211_data *data)
     if (WARN_ON(src_size > LIST_STATION_CFG_ALLOC_SIZE))
         return;
 
+    LOGT("%s: ctx addr: %p ctx buf addr: %p", __func__, ctx, ctx->buf);
+
     ctx->size += src_size;
     ctx->buf = REALLOC(ctx->buf, ctx->size);
     memcpy(ctx->buf + dst_offset, src, src_size);
+    /* Data is managed by NL helper,
+     * needs to set length 0 to force always use new buffer
+     */
+    data->length = 0;
 }
-
 
 static
 void util_clients_buf_free(void *buf)
@@ -1411,7 +1413,7 @@ error:
         return IOCTL_STATUS_ERROR;
     }
     util_clients_buf_free(ieee80211_clients_buf);
-    LOGT("%s: clients number: %d", radio_get_name_from_type(radio_type), client_cnt);
+    LOGT("%s: clients number: %d", ifName , client_cnt);
     return IOCTL_STATUS_OK;
 }
 

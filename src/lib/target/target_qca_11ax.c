@@ -4370,8 +4370,7 @@ bool target_vif_state_get(char *vif, struct schema_Wifi_VIF_State *vstate)
 
     if ((p = util_qca_getmac(vif, A(4096)))) {
         for_each_iwpriv_mac2(mac, p) {
-            STRSCPY(vstate->mac_list[vstate->mac_list_len], mac);
-            vstate->mac_list_len++;
+            SCHEMA_VAL_APPEND(vstate->mac_list, mac);
         }
     }
 
