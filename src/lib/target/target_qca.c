@@ -4038,7 +4038,6 @@ target_vif_config_set2(const struct schema_Wifi_VIF_Config *vconf,
         if (util_policy_get_csa_interop(vif)) {
             util_iwpriv_set_int_lazy(vif, "gcsainteropphy", "scsainteropphy", 1);
             util_iwpriv_set_int_lazy(vif, "gcsainteropauth", "scsainteropauth", 1);
-            util_iwpriv_set_int_lazy(vif, "gcsainteropaggr", "scsainteropaggr", 1);
         }
 
         if ((p = SCHEMA_KEY_VAL(rconf->hw_config, "cwm_extbusythres")))
