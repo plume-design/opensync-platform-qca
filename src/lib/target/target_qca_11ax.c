@@ -549,15 +549,6 @@ static void util_kv_radar_set(const char *phy, const unsigned char chan)
  * Networking helpers
  *****************************************************************************/
 
-static bool
-util_net_ifname_exists(const char *ifname, int *v)
-{
-    char path[128];
-    snprintf(path, sizeof(path), "/sys/class/net/%s/wireless", ifname);
-    *v = 0 == access(path, X_OK);
-    return true;
-}
-
 static int
 util_net_get_macaddr_str(const char *ifname, char *buf, int len)
 {
@@ -659,9 +650,9 @@ util_wifi_transform_macaddr(const char *phy, char *mac, int idx)
         return;
 
     if (access(F("/proc/%s/dump_mbss_ie", phy), F_OK) == 0)
-        mbss_cache = R(F("/proc/%s/dump_mbss_ie", phy));
+        mbss_cache = R(F("/proc/%s/dump_mbss_ie", phy)) ?: "";
     else
-        mbss_cache = R(F("/proc/%s/dump_mbss_cache", phy));
+        mbss_cache = R(F("/proc/%s/dump_mbss_cache", phy)) ?: "";
 
     if (!strstr(mbss_cache, "not enabled!")) {
         LOGI("%s: MBSS IE feature is enabled", phy);
@@ -2760,6 +2751,7 @@ util_nl_parse(const void *buf, unsigned int len)
     int attrlen;
     int iwelen;
     bool created;
+    bool updated;
     bool deleted;
 
     util_nl_each_msg(buf, hdr, len)
@@ -2799,8 +2791,9 @@ util_nl_parse(const void *buf, unsigned int len)
 
             ifm = NLMSG_DATA(hdr);
             created = (hdr->nlmsg_type == RTM_NEWLINK) && (ifm->ifi_change == ~0U);
+            updated = (hdr->nlmsg_type == RTM_NEWLINK) && (ifm->ifi_change & IFF_UP);
             deleted = (hdr->nlmsg_type == RTM_DELLINK);
-            if ((created || deleted) &&
+            if ((created || updated || deleted) &&
                 (access(F("/sys/class/net/%s/parent", ifname), R_OK) == 0))
                 util_cb_delayed_update(UTIL_CB_VIF, ifname);
             if (deleted && util_wifi_is_ap_vlan(ifname))
@@ -4291,6 +4284,7 @@ bool target_vif_state_get(char *vif, struct schema_Wifi_VIF_State *vstate)
     char *p;
     int err;
     int v;
+    bool isup;
 
     memset(vstate, 0, sizeof(*vstate));
 
@@ -4302,8 +4296,11 @@ bool target_vif_state_get(char *vif, struct schema_Wifi_VIF_State *vstate)
     STRSCPY(vstate->if_name, vif);
     vstate->if_name_exists = true;
 
-    if ((vstate->enabled_exists = util_net_ifname_exists(vif, &v)))
-        vstate->enabled = !!v;
+    vstate->enabled_exists = true;
+    if (os_nif_is_up(vif, &isup))
+    {
+        SCHEMA_SET_INT(vstate->enabled, isup);
+    }
 
     util_kv_set(F("%s.last_channel", vif), NULL);
 

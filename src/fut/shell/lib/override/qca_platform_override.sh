@@ -71,18 +71,17 @@ start_qca_wpa_supplicant()
 
 ###############################################################################
 # DESCRIPTION:
-#   Function starts wireless driver on a device.
-#   Raises exception on fail.
+#   Function starts wireless driver on the device.
 # INPUT PARAMETER(S):
 #   None.
 # RETURNS:
-#   None.
-#   See DESCRIPTION.
+#   0   Wireless driver started on device.
 # USAGE EXAMPLE(S):
 #   start_wireless_driver
 ###############################################################################
 start_wireless_driver()
 {
+    log "qca_platform_override:start_wireless_driver - Starting wireless driver"
     start_qca_hostapd &&
         log -deb "qca_platform_override:start_wireless_driver - start_qca_hostapd - Success" ||
         raise "FAIL: start_qca_hostapd - Could not start qca host" -l "qca_platform_override:start_wireless_driver" -ds
@@ -93,125 +92,26 @@ start_wireless_driver()
 
 ###############################################################################
 # DESCRIPTION:
-#   Function retrieves interface regulatory domain.
+#   Function clears the DNS cache.
 # INPUT PARAMETER(S):
-#   $1  Physical Radio interface name for which to retrieve regulatory domain (string, required)
-# ECHOES:
-#   Interface regulatory domain - defaults to US if any failure occurs
-# NOTE:
-#   Function first checks Wifi_Radio_State interface 'country' field, if it is not populated, it retrieves
-#   Wifi_Radio_State 'hw_params' field and looks for 'reg_domain' entry
+#   None.
+# RETURNS:
+#   0   If DNS cache on the device was cleared.
 # USAGE EXAMPLE(S):
-#   get_iface_regulatory_domain wifi0
+#   clear_dns_cache
 ###############################################################################
-get_iface_regulatory_domain()
+clear_dns_cache()
 {
-    local NARGS=1
-    [ $# -ne ${NARGS} ] &&
-        raise "wm2_lib:get_iface_regulatory_domain requires ${NARGS} input argument(s), $# given" -arg
-    # shellcheck disable=SC2034
-    if_name="${1}"
-    country_found=1
-    country=$(get_ovsdb_entry_value Wifi_Radio_State country -w if_name "${if_name}")
-    if [ "${country}" == "[\"set\",[]]" ]; then
-        log -deb "wm2_lib:get_iface_regulatory_domain - Country is not set in Wifi_Radio_State."
-        hw_params_reg_domain=$(get_ovsdb_entry_value Wifi_Radio_State hw_params -w if_name "${if_name}" -json_value reg_domain)
-        log -deb "wm2_lib:get_iface_regulatory_domain - Trying to acquire country region trough hw_params: ${hw_params_reg_domain}"
-        # 58 (3a hex) US | 55 (37 hex) EU
-        if [ ${?} == 0 ]; then
-            if [ ${hw_params_reg_domain} == '"58"' ]; then
-                country='US'
-            elif [ ${hw_params_reg_domain} == '"55"' ]; then
-                country='EU'
-            else
-                log -deb "wm2_lib:get_iface_regulatory_domain - Failed to retrieve device regulatory domain. Defaulting to US regulatory rules!"
-                country='US'
-            fi
-        else
-            log -deb "wm2_lib:get_iface_regulatory_domain - Failed to retrieve device regulatory domain. Defaulting to US regulatory rules!"
-            country='US'
-        fi
-        country_found=0
-    else
-        country_found=0
-    fi
-    if [ "${country_found}" == 1 ];then
-        log -deb "wm2_lib:get_iface_regulatory_domain - Failed to retrieve device regulatory domain. Defaulting to US regulatory rules!"
-        country='US'
-    fi
-    echo "${country}"
+    log "qca_platform_override:clear_dns_cache - Not clearing DNS cache on the device - not required."
 }
 
 ###############################################################################
 # DESCRIPTION:
-#   Function checks if country is applied at OS - LEVEL2.
-#   Uses iwpriv to get Tx Power info.
-#   Provide override function if iwpriv not available on device.
-#   Raises exception on fail.
+#   Function returns Radio TX Power set at OS - LEVEL2.
 # INPUT PARAMETER(S):
-#   $1  Country (string, required)
-#   $2  Interface name (string, required)
+#   $1  VIF interface name (string, required)
 # RETURNS:
-#   0   Country is as expected.
-#   See DESCRIPTION.
-# USAGE EXAMPLE(S):
-#   check_country_at_os_level US <IF_NAME>
-###############################################################################
-check_country_at_os_level()
-{
-    local NARGS=2
-    [ $# -ne ${NARGS} ] &&
-        raise "qca_platform_override:check_country_at_os_level requires ${NARGS} input argument(s), $# given" -arg
-    wm2_country=$1
-    wm2_if_name=$2
-
-    log -deb "qca_platform_override:check_country_at_os_level - Checking 'country' at OS - LEVEL2"
-    wait_for_function_response 0 "iwpriv $wm2_if_name getCountryID | grep -F getCountryID:$wm2_country"
-    if [ $? = 0 ]; then
-        log -deb "qca_platform_override:check_country_at_os_level - Country '$wm2_country' is set at OS - LEVEL2"
-        return 0
-    else
-        raise "FAIL: Country '$wm2_country' is not set at OS - LEVEL2" -l "qca_platform_override:check_country_at_os_level" -tc
-    fi
-}
-
-###############################################################################
-# DESCRIPTION:
-#   Function simulates DFS (Dynamic Frequency Shift) radar event on interface.
-# INPUT PARAMETER(S):
-#   $1  channel (int, required)
-# RETURNS:
-#   0   Simulation was a success.
-# USAGE EXAMPLE(S):
-#   simulate_dfs_radar <IF_NAME>
-###############################################################################
-simulate_dfs_radar()
-{
-    local NARGS=1
-    [ $# -ne ${NARGS} ] &&
-        raise "qca_platform_override:simulate_dfs_radar requires ${NARGS} input argument(s), $# given" -arg
-    wm2_if_name=$1
-
-    log -deb "qca_platform_override:simulate_dfs_radar - Triggering DFS radar event on ${wm2_if_name}"
-    wait_for_function_response 0 "radartool -i $wm2_if_name bangradar"
-    if [ $? = 0 ]; then
-        log -deb "qca_platform_override:simulate_dfs_radar - DFS event: $wm2_if_name simulation was SUCCESSFUL"
-        return 0
-    else
-        log -err "qca_platform_override:simulate_dfs_radar - DFS event: $wm2_if_name simulation was UNSUCCESSFUL"
-    fi
-}
-
-###############################################################################
-# DESCRIPTION:
-#   Function returns Tx Power set at OS - LEVEL2.
-#   Uses iwconfig to get Tx Power info from VIF interface.
-# INPUT PARAMETER(S):
-#   $1  VIF interface name (required)
-# RETURNS:
-#   0   on successful Tx Power retrieval, fails otherwise
-# ECHOES:
-#   Tx Power from OS
+#   Echoes Radio TX Power set for interface
 # USAGE EXAMPLE(S):
 #   get_tx_power_from_os home-ap-24
 ###############################################################################
@@ -227,13 +127,12 @@ get_tx_power_from_os()
 
 ###############################################################################
 # DESCRIPTION:
-#   Function checks if Tx Chainmask is applied at OS - LEVEL2.
-#   Uses iwconfig to get Tx Chainmask info.
+#   Function checks if the radio TX chainmask is applied at OS - LEVEL2.
 # INPUT PARAMETER(S):
-#   $1  Tx Chainmask (int, required)
-#   $2  Interface name (string, required)
+#   $1  Radio TX Chainmask (int, required)
+#   $2  Radio interface name (string, required)
 # RETURNS:
-#   0   Tx Chainmask is as expected.
+#   0   Radio TX Chainmask on system matches expected value.
 # USAGE EXAMPLE(S):
 #   check_tx_chainmask_at_os_level 5 wifi0
 ###############################################################################
@@ -245,32 +144,31 @@ check_tx_chainmask_at_os_level()
     wm2_tx_chainmask=$1
     wm2_if_name=$2
 
-    log -deb "qca_platform_override:check_tx_chainmask_at_os_level - Checking Tx Chainmask at OS - LEVEL2"
+    log "qca_platform_override:check_tx_chainmask_at_os_level - Checking Radio TX Chainmask for interface '$wm2_if_name' at OS - LEVEL2"
     wait_for_function_response 0 "iwpriv $wm2_if_name get_txchainsoft | grep -F get_txchainsoft:$wm2_tx_chainmask"
     if [ $? = 0 ]; then
-        log -deb "qca_platform_override:check_tx_chainmask_at_os_level - Tx Chainmask $wm2_tx_chainmask is set at OS - LEVEL2"
-        return 0
+        log -deb "qca_platform_override:check_tx_chainmask_at_os_level - Tx Chainmask '$wm2_tx_chainmask' is set at OS - LEVEL2 - Success"
     else
         wait_for_function_response 0 "iwpriv $wm2_if_name get_txchainmask | grep -F get_txchainmask:$wm2_tx_chainmask"
         if [ $? = 0 ]; then
             log -deb "qca_platform_override:check_tx_chainmask_at_os_level - Tx Chainmask '$wm2_tx_chainmask' is set at OS - LEVEL2 - Success"
-            return 0
         else
             raise "FAIL: Tx Chainmask '$wm2_tx_chainmask' is not set at OS - LEVEL2" -l "qca_platform_override:check_tx_chainmask_at_os_level" -tc
         fi
     fi
+
+    return 0
 }
 
 ###############################################################################
 # DESCRIPTION:
 #   Function checks if Beacon interval is applied at OS - LEVEL2.
-#   Raises exception on fail.
+#   Function raises an exception if beacon interval is not applied.
 # INPUT PARAMETER(S):
 #   $1  Beacon interval (int, required)
-#   $2  Interface name (string, required)
+#   $2  VIF interface name (string, required)
 # RETURNS:
-#   0   Beacon interval is as expected.
-#   See DESCRIPTION.
+#   0   Beacon interval on system matches expected value
 # USAGE EXAMPLE(S):
 #   check_beacon_interval_at_os_level 600 home-ap-U50
 ###############################################################################
@@ -282,14 +180,12 @@ check_beacon_interval_at_os_level()
     wm2_bcn_int=$1
     wm2_vif_if_name=$2
 
-    log -deb "qca_platform_override:check_beacon_interval_at_os_level - Checking Beacon interval at OS - LEVEL2"
-    wait_for_function_response 0 "iwpriv $wm2_vif_if_name get_bintval | grep -F get_bintval:$wm2_bcn_int"
-    if [ $? = 0 ]; then
-        log -deb "qca_platform_override:check_beacon_interval_at_os_level - Beacon interval '$wm2_bcn_int' for '$wm2_vif_if_name' is set at OS - LEVEL2 - Success"
-        return 0
-    else
+    log "qca_platform_override:check_beacon_interval_at_os_level - Checking Beacon interval at OS - LEVEL2"
+    wait_for_function_response 0 "iwpriv $wm2_vif_if_name get_bintval | grep -F get_bintval:$wm2_bcn_int" &&
+        log -deb "qca_platform_override:check_beacon_interval_at_os_level - Beacon interval '$wm2_bcn_int' for '$wm2_vif_if_name' is set at OS - LEVEL2 - Success" ||
         raise "FAIL: Beacon interval '$wm2_bcn_int' for '$wm2_vif_if_name' is not set at OS - LEVEL2" -l "qca_platform_override:check_beacon_interval_at_os_level" -tc
-    fi
+
+    return 0
 }
 
 ###############################################################################
@@ -298,9 +194,7 @@ check_beacon_interval_at_os_level()
 # INPUT PARAMETER(S):
 #   $1  VIF interface name (string, required)
 # RETURNS:
-#   0   on successful channel retrieval, fails otherwise
-# ECHOES:
-#   Channel from OS
+#   Echoes channel set for interface
 # USAGE EXAMPLE(S):
 #   get_channel_from_os home-ap-24
 ###############################################################################
@@ -318,12 +212,10 @@ get_channel_from_os()
 # DESCRIPTION:
 #   Function returns HT mode set at OS - LEVEL2.
 # INPUT PARAMETER(S):
-#   $1  vif_if_name (string, required)
-#   $2  channel (not used, but still required, do not optimize)
+#   $1  VIF interface name (string, required)
+#   $2  channel (int, not used, but still required, do not optimize)
 # RETURNS:
-#   0   on successful channel retrieval, fails otherwise
-# ECHOES:
-#   HT mode from OS in format: HT20, HT40 (examples)
+#   Echoes HT mode set for interface
 # USAGE EXAMPLE(S):
 #   get_ht_mode_from_os home-ap-24 1
 ###############################################################################
@@ -340,12 +232,12 @@ get_ht_mode_from_os()
 
 ###############################################################################
 # DESCRIPTION:
-#   Function checks vlan interface existence at OS - LEVEL2.
+#   Function checks if vlan interface exists at OS level - LEVEL2.
 # INPUT PARAMETER(S):
-#   $1  parent_ifname (string, required)
-#   $2  vlan_id (int, required)
+#   $1  Parent interface name (string, required)
+#   $2  VLAN ID (int, required)
 # RETURNS:
-#   0   On success.
+#   0   vlan interface exists on system.
 # USAGE EXAMPLE(S):
 #  check_vlan_iface eth0 100
 ###############################################################################
@@ -358,23 +250,23 @@ check_vlan_iface()
     vlan_id=$2
 
     if_name="$parent_ifname.$vlan_id"
-    vlan_pid="/proc/net/vlan/${if_name}"
+    vlan_file="/proc/net/vlan/${if_name}"
 
-    log "qca_platform_override:check_vlan_iface: Checking for '${vlan_pid}' existence - LEVEL2"
-    wait_for_function_response 0 "[ -f ${vlan_pid} ]" &&
-        log "qca_platform_override:check_vlan_iface: LEVEL2 - PID '${vlan_pid}' is runinng - Success" ||
-        raise "FAIL: LEVEL2 - PID ${vlan_pid} is NOT running" -l "qca_platform_override:check_vlan_iface" -tc
+    log "qca_platform_override:check_vlan_iface: Checking for '${vlan_file}' existence - LEVEL2"
+    wait_for_function_response 0 "[ -e ${vlan_file} ]" &&
+        log "qca_platform_override:check_vlan_iface: LEVEL2 - PID '${vlan_file}' is runinng - Success" ||
+        raise "FAIL: LEVEL2 - PID ${vlan_file} is NOT running" -l "qca_platform_override:check_vlan_iface" -tc
 
-    log "qca_platform_override:check_vlan_iface: Output PID ${vlan_pid} info:"
-    cat "${vlan_pid}"
+    log "qca_platform_override:check_vlan_iface: Output PID ${vlan_file} info:"
+    cat "${vlan_file}"
 
     log "qca_platform_override:check_vlan_iface: Validating PID VLAN config - vlan_id == ${vlan_id} - LEVEL2"
-    wait_for_function_response 0 "cat "${vlan_pid}" | grep 'VID: ${vlan_id}'" &&
+    wait_for_function_response 0 "cat "${vlan_file}" | grep 'VID: ${vlan_id}'" &&
         log "qca_platform_override:check_vlan_iface: LEVEL2 - VID is set to 100 - Success" ||
         raise "FAIL: LEVEL2 - VID is not set" -l "qca_platform_override:check_vlan_iface" -tc
 
     log "qca_platform_override:check_vlan_iface: Check parent device for VLAN - LEVEL2"
-    wait_for_function_response 0 "cat "${vlan_pid}" | grep 'Device: ${parent_ifname}'" &&
+    wait_for_function_response 0 "cat "${vlan_file}" | grep 'Device: ${parent_ifname}'" &&
         log "qca_platform_override:check_vlan_iface: LEVEL2 - Device is set to '${parent_ifname}' - Success" ||
         raise "FAIL: LEVEL2 - Device is not set to '${parent_ifname}'" -l "qca_platform_override:check_vlan_iface" -tc
 
@@ -383,16 +275,18 @@ check_vlan_iface()
 
 ###############################################################################
 # DESCRIPTION:
-#   Function checks for CSA(Channel Switch Announcement) msg on the LEAF device
-#   sent by GW on channel change.
+#   Function checks for CSA (Channel Switch Announcement) message on the leaf
+#   device, sent by the GW upon channel change.
 # INPUT PARAMETER(S):
-#   $1  mac address of GW (string, required)
+#   $1  MAC address of GW (string, required)
 #   $2  CSA channel GW switches to (int, required)
-#   $3  HT mode of the channel (string, required)
+#   $3  HT mode (channel bandwidth) (string, required)
 # RETURNS:
-#   0   CSA message is found in LEAF device var logs, fail otherwise.
+#   0   CSA message is found in device logs.
 # USAGE EXAMPLE(S):
 #   check_sta_send_csa_message 1A:2B:3C:4D:5E:6F 6 HT20
+# EXAMPLE DEVICE LOG:
+#   Mar 18 10:29:06 WM[19842]: <INFO> TARGET: wifi0: csa rx to bssid d2:b4:f7:f0:23:26 chan 6 width 0MHz sec 0 cfreq2 0 valid 1 supported 1
 ###############################################################################
 check_sta_send_csa_message()
 {
@@ -403,8 +297,6 @@ check_sta_send_csa_message()
     gw_csa_channel=$2
     ht_mode=$3
 
-    # Example log:
-    # Mar 18 10:29:06 WM[19842]: <INFO> TARGET: wifi0: csa rx to bssid d2:b4:f7:f0:23:26 chan 6 width 0MHz sec 0 cfreq2 0 valid 1 supported 1
     wm_csa_log_grep="$LOGREAD | grep -i 'csa' | grep -i '${gw_vif_mac} chan ${gw_csa_channel}'"
     wait_for_function_response 0 "${wm_csa_log_grep}" 30 &&
         log "qca_platform_override:check_sta_send_csa_message : 'csa completed' message found in logs for channel:${gw_csa_channel} with HT mode: ${ht_mode} - Success" ||
@@ -412,19 +304,20 @@ check_sta_send_csa_message()
     return 0
 }
 
-####################### Qualcomm(QCA) PLATFORM OVERRIDE SECTION - STOP #########################
+####################### Qualcomm (QCA) PLATFORM OVERRIDE SECTION - STOP #########################
 
 
-####################### Qualcomm(QCA) UPGRADE OVERRIDE SECTION - START #########################
+####################### Qualcomm (QCA) UPGRADE OVERRIDE SECTION - START #########################
 
 ###############################################################################
 # DESCRIPTION:
 #   Function echoes upgrade manager's numerical code of identifier.
+#   It translates the identifier's string to its numerical code.
 #   Raises exception if identifier not found.
 # INPUT PARAMETER(S):
-#   $1  upgrade_identifier (string) (required)
+#   $1  upgrade_identifier (string, required)
 # RETURNS:
-#   Echoes code.
+#   Echoes upgrade status code.
 #   See DESCRIPTION.
 # USAGE EXAMPLE(S):
 #   get_um_code UPG_ERR_DL_FW
@@ -434,7 +327,7 @@ get_um_code()
 {
     local NARGS=1
     [ $# -ne ${NARGS} ] &&
-        raise "bcm_platform_override:get_um_code requires ${NARGS} input argument(s), $# given" -arg
+        raise "qca_platform_override:get_um_code requires ${NARGS} input argument(s), $# given" -arg
     upgrade_identifier=$1
 
     case "$upgrade_identifier" in
@@ -500,9 +393,9 @@ get_um_code()
             echo  "31"
             ;;
         *)
-            raise "FAIL: Unknown upgrade_identifier {given:=$upgrade_identifier}" -l "bcm_platform_override:get_um_code" -arg
+            raise "FAIL: Unknown upgrade_identifier {given:=$upgrade_identifier}" -l "qca_platform_override:get_um_code" -arg
             ;;
     esac
 }
 
-####################### Qualcomm(QCA) UPGRADE OVERRIDE SECTION - STOP ##########################
+####################### Qualcomm (QCA) UPGRADE OVERRIDE SECTION - STOP ##########################
