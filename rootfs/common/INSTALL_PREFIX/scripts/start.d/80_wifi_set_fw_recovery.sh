@@ -24,46 +24,16 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-vap=$1
 
-if ! iwconfig $vap >/dev/null 2>/dev/null
-then
-    # Possibly handled by a different driver.
-    exit 0
-fi
+# Enable fw_recovery; this prevents an immediate reboot after a Wifi firmware
+# crash. The crash will be handled by OpenSync and it will result in a reboot
+# in the end, but this gives us time to collect logs and update the reboot
+# status
 
-out_of_channels()
-{
-    radio=$(cat /sys/class/net/$1/parent)
-    if exttool --help | grep -q 'list_chan_state '; then
-        chan_cnt=$(exttool --list_chan_state --interface $1 | grep chan | wc -l)
-        nop_cnt=$(exttool --list_chan_state --interface $1 | grep DFS_NOL | wc -l)
-    else
-        chan_cnt=$(exttool --list --interface $1 | wc -l)
-        nop_cnt=$(exttool --list --interface $1 | grep NOP_STARTED | wc -l)
-    fi
+for wifidev in /sys/class/net/wifi?
+do
+    wifi=$(basename $wifidev)
+    iwpriv $wifi 2>&1 | grep -q set_fw_recovery || continue
+    iwpriv $wifi set_fw_recovery 1
+done
 
-    test \
-        $chan_cnt -gt 0 -a \
-        $chan_cnt -eq $nop_cnt
-}
-
-if out_of_channels "$vap"
-then
-    log_warn "$vap($radio): all channels happen to be dfs in this regdomain and all are unavailable"
-    exit 0
-fi
-
-if ! iwconfig "$vap" | grep -q 'Access Point: ..:..:..:..:..:..'
-then
-    log_warn "$vap: bss is not associated: no ap"
-    exit 1
-fi
-
-if iwconfig "$vap" | grep -q 'Access Point: 00:00:00:00:00:00'
-then
-    log_warn "$vap: bss is not associated: null ap"
-    exit 1
-fi
-
-exit 0

@@ -24,46 +24,8 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-vap=$1
+# {# jinja-parse #}
+# Packets with TTL=0 are causing issues in qca-nss-ecm acceleartion engine,
+# Since those packets are invalid per IP standard, we can just drop them.
 
-if ! iwconfig $vap >/dev/null 2>/dev/null
-then
-    # Possibly handled by a different driver.
-    exit 0
-fi
-
-out_of_channels()
-{
-    radio=$(cat /sys/class/net/$1/parent)
-    if exttool --help | grep -q 'list_chan_state '; then
-        chan_cnt=$(exttool --list_chan_state --interface $1 | grep chan | wc -l)
-        nop_cnt=$(exttool --list_chan_state --interface $1 | grep DFS_NOL | wc -l)
-    else
-        chan_cnt=$(exttool --list --interface $1 | wc -l)
-        nop_cnt=$(exttool --list --interface $1 | grep NOP_STARTED | wc -l)
-    fi
-
-    test \
-        $chan_cnt -gt 0 -a \
-        $chan_cnt -eq $nop_cnt
-}
-
-if out_of_channels "$vap"
-then
-    log_warn "$vap($radio): all channels happen to be dfs in this regdomain and all are unavailable"
-    exit 0
-fi
-
-if ! iwconfig "$vap" | grep -q 'Access Point: ..:..:..:..:..:..'
-then
-    log_warn "$vap: bss is not associated: no ap"
-    exit 1
-fi
-
-if iwconfig "$vap" | grep -q 'Access Point: 00:00:00:00:00:00'
-then
-    log_warn "$vap: bss is not associated: null ap"
-    exit 1
-fi
-
-exit 0
+ovs-ofctl add-flow {{ CONFIG_TARGET_LAN_BRIDGE_NAME }} table=0,priority=60000,ip,nw_ttl=0,actions=drop

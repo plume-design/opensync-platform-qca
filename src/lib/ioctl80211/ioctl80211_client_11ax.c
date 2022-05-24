@@ -118,18 +118,10 @@ uint8_t bsal_clients[IOCTL80211_CLIENTS_SIZE];
 #endif
 typedef struct iw_statistics    iwstats;
 
-typedef struct
-{
-    struct ieee80211req_sta_info        sta_info;
-    int32_t                             padding[3]; /* Apparently driver adds 12 Bytes!!!*/
-} ieee80211req_sta_info_t;
-
 #define LIST_STATION_CFG_ALLOC_SIZE 3*1024
 #define	QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION 74
 
 extern struct   socket_context sock_ctx;
-uint8_t         ieee80211_clients[IOCTL80211_CLIENTS_SIZE];
-uint16_t        g_cli_len;
 
 #ifndef min
 #define min(x, y) ((x) < (y) ? (x) : (y))
@@ -591,7 +583,9 @@ ioctl80211_client_stats_avg_tx_calc(
 {
 #ifdef DP_PEER_AVG_RATE_STATS_SUPPORTED
     struct avg_phyrate             *avg;
+#if 0
     int32_t                         snr;
+#endif
     double                          mbps;
     double                          num;
     int                             index;
@@ -634,6 +628,10 @@ ioctl80211_client_stats_avg_tx_calc(
                 MAC_ADDRESS_PRINT(data_new->info.mac));
         }
 
+/* Sometimes SU rssi value is invalid,
+ * disable it until find solution in the driver.
+ */
+#if 0
         /* Apparently the SU ack rssi is the most reliable
          * one. Others are all over the place.
          */
@@ -649,6 +647,7 @@ ioctl80211_client_stats_avg_tx_calc(
 
             client_record->stats.rssi = snr;
         }
+#endif
 
         memset(avg->stats.tx, 0, sizeof(avg->stats.tx));
     }
@@ -1160,16 +1159,52 @@ ioctl_status_t ioctl80211_clients_stats_fetch(
     return IOCTL_STATUS_OK;
 }
 
-void stainfo_cb(struct cfg80211_data *buffer)
+struct stainfo_ctx {
+    struct cfg80211_data data;
+    void *buf;
+    size_t size;
+};
+
+static void stainfo_cb(struct cfg80211_data *data)
 {
-    uint32_t    len = buffer->length;
+    struct stainfo_ctx *ctx = container_of(data, struct stainfo_ctx, data);
+    const void *src = data->data;
+    const size_t src_size = data->length;
+    const size_t dst_offset = ctx->size;
 
-    if (len < sizeof(struct ieee80211req_sta_info)) {
+    LOGT("%s: Clients buffer dst_offset = %d src_size = %d",
+         __func__, dst_offset, src_size);
+
+    if (src_size == 0)
+       return;
+
+    if (WARN_ON(src_size < sizeof(struct ieee80211req_sta_info)))
         return;
-    }
 
-    memcpy((ieee80211_clients + g_cli_len), buffer->data, len);
-    g_cli_len += len;
+    if (WARN_ON(src == NULL))
+        return;
+
+    /* Expected buffer allocated in the driver */
+    if (WARN_ON(src_size > LIST_STATION_CFG_ALLOC_SIZE))
+        return;
+
+    LOGT("%s: ctx addr: %p ctx buf addr: %p", __func__, ctx, ctx->buf);
+
+    ctx->size += src_size;
+    ctx->buf = REALLOC(ctx->buf, ctx->size);
+    memcpy(ctx->buf + dst_offset, src, src_size);
+    /* Data is managed by NL helper,
+     * needs to set length 0 to force always use new buffer
+     */
+    data->length = 0;
+}
+
+static
+void util_clients_buf_free(void *buf)
+{
+#if OPENSYNC_NL_SUPPORT
+	FREE(buf);
+#endif
 }
 
 static
@@ -1185,33 +1220,33 @@ ioctl_status_t ioctl80211_clients_list_fetch(
     ioctl80211_client_record_t     *client_entry = NULL;
     radio_type_t                    radio_type;
 
+    void                            *ieee80211_clients_buf;
     ssize_t                         ieee80211_client_offset = 0;
     struct ieee80211req_sta_info   *ieee80211_client = NULL;
+    int                            client_cnt = 0;
 
     radio_type = radio_cfg->type;
     if (NULL == client_list)
     {
         return IOCTL_STATUS_ERROR;
     }
-    memset (ieee80211_clients, 0, sizeof(ieee80211_clients));
-    g_cli_len = 0;
 
 #if OPENSYNC_NL_SUPPORT
-    struct cfg80211_data            buffer;
-    uint8_t                        *buf;
+    struct stainfo_ctx ctx = {0};
 
-    buf = MALLOC(LIST_STATION_CFG_ALLOC_SIZE);
+    /* Use default NL data buffer */
+    ctx.buf              = NULL;
+    ctx.data.length      = 0;
+    ctx.data.callback    = &stainfo_cb;
+    ctx.data.parse_data  = 0;
 
-    buffer.data         = buf;
-    buffer.length       = LIST_STATION_CFG_ALLOC_SIZE;
-    buffer.callback     = &stainfo_cb;
-    buffer.parse_data   = 0;
     rc = wifi_cfg80211_send_generic_command(&(sock_ctx.cfg80211_ctxt),
             QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION,
             QCA_NL80211_VENDOR_SUBCMD_LIST_STA, ifName,
-            (char *)&buffer, buffer.length);
+            (void *)&ctx.data, ctx.data.length);
+
     if (0 > rc) {
-        FREE(buf);
+        FREE(ctx.buf);
         LOG(ERR,
             "Parsing %s %s client stats (Failed to get info '%s')",
             radio_get_name_from_type(radio_type),
@@ -1220,12 +1255,13 @@ ioctl_status_t ioctl80211_clients_list_fetch(
         return IOCTL_STATUS_ERROR;
     }
 
-    length = buffer.length;
-    LOGD("%s: length - %u\n", __func__, length);
-    FREE(buf);
+    length = ctx.size;
+    ieee80211_clients_buf = ctx.buf;
 #else
     struct iwreq                    request;
+    uint8_t                         ieee80211_clients[IOCTL80211_CLIENTS_SIZE];
 
+    memset (ieee80211_clients, 0, sizeof(ieee80211_clients));
     memset (&request, 0, sizeof(request));
     request.u.data.pointer = ieee80211_clients;
     request.u.data.length = sizeof(ieee80211_clients);
@@ -1246,20 +1282,22 @@ ioctl_status_t ioctl80211_clients_list_fetch(
     }
 
     length = request.u.data.length;
-    LOGD("%s: length - %u\n", __func__, length);
+    ieee80211_clients_buf = ieee80211_clients;
 #endif
+    LOGD("%s: length - %d\n", __func__, length);
 
     for (   ieee80211_client_offset = 0;
-            length - ieee80211_client_offset >= (int)sizeof(*ieee80211_client);)
+            (ssize_t)length - ieee80211_client_offset >= (int)sizeof(*ieee80211_client);)
     {
         ieee80211_client =
             (struct ieee80211req_sta_info *)
-            (ieee80211_clients + ieee80211_client_offset);
+            (ieee80211_clients_buf + ieee80211_client_offset);
 
         client_entry = 
              ioctl80211_client_record_alloc();
         if (NULL == client_entry)
         {
+            util_clients_buf_free(ieee80211_clients_buf);
             LOG(ERR,
                 "Parsing %s interface client stats "
                 "(Failed to allocate memory)",
@@ -1267,6 +1305,7 @@ ioctl_status_t ioctl80211_clients_list_fetch(
             return IOCTL_STATUS_ERROR;
         }
 
+        client_cnt++;
         client_entry->is_client = true;
 
         client_entry->info.type = radio_type;
@@ -1361,16 +1400,23 @@ ioctl_status_t ioctl80211_clients_list_fetch(
 
         /* Move to the next client */
         ieee80211_client_offset += ieee80211_client->isi_len;
+        if (!ieee80211_client->isi_len)
+        {
+            util_clients_buf_free(ieee80211_clients_buf);
+            return IOCTL_STATUS_OK;
+        }
         continue;
 
 error:
+        util_clients_buf_free(ieee80211_clients_buf);
         ioctl80211_client_record_free(client_entry);
 
         /* Move to the next client */
         ieee80211_client_offset += ieee80211_client->isi_len;
         return IOCTL_STATUS_ERROR;
     }
-
+    util_clients_buf_free(ieee80211_clients_buf);
+    LOGT("%s: clients number: %d", ifName , client_cnt);
     return IOCTL_STATUS_OK;
 }
 
