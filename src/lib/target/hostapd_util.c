@@ -110,3 +110,21 @@ bool hostapd_rrm_remove_neighbor(const char *path, const char *interface, const 
 
     return ret;
 }
+
+/* To use it first check if tx=0 is supprted for your hostapd version */
+bool hostapd_remove_station(const char *path, const char *interface, const char *mac_str)
+{
+    char hostapd_cmd[512];
+    bool ret = false;
+
+    snprintf(hostapd_cmd, sizeof(hostapd_cmd),
+             "%s 5 hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s deauthenticate %s \"reason=1 tx=0\"",
+             CMD_TIMEOUT, path, interface, interface, mac_str);
+
+    ret = !cmd_log(hostapd_cmd);
+    if (!ret) {
+        LOGE("hostapd_cli execution failed: %s", hostapd_cmd);
+    }
+
+    return ret;
+}

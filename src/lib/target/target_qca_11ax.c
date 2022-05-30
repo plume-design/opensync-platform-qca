@@ -2810,7 +2810,9 @@ util_nl_listen_cb(struct ev_loop *loop,
 {
     char buf[32768];
     int len;
+    int max = 256;
 
+again:
     len = recvfrom(util_nl_fd, buf, sizeof(buf), MSG_DONTWAIT, NULL, 0);
     if (len < 0) {
         if (errno == EAGAIN)
@@ -2831,6 +2833,10 @@ util_nl_listen_cb(struct ev_loop *loop,
 
     LOGT("%s: received %d bytes", __func__, len);
     util_nl_parse(buf, len);
+
+    max--;
+    if (max > 0)
+        goto again;
 }
 
 static int
@@ -4379,6 +4385,17 @@ bool target_vif_state_get(char *vif, struct schema_Wifi_VIF_State *vstate)
     if (wpas) wpas_bss_get(wpas, vstate);
 
     return true;
+}
+
+bool target_vif_sta_remove(const char *ifname, const uint8_t *mac_addr)
+{
+    char mac_str[C_MACADDR_LEN] = {0};
+    if (!os_nif_macaddr_to_str((os_macaddr_t *)mac_addr, (char *)mac_str, PRI_os_macaddr_lower_t))
+    {
+        LOGE("%s: Failed to convert mac addres to str", __func__);
+        return false;
+    }
+    return hostapd_remove_station(HOSTAPD_CONTROL_PATH_DEFAULT, ifname, mac_str);
 }
 
 /******************************************************************************
