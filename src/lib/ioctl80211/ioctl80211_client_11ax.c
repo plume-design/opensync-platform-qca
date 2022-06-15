@@ -508,15 +508,14 @@ ioctl_status_t ioctl80211_clients_stats_rx_fetch(
         char                           *phyName,
         ioctl80211_client_record_t     *client_entry)
 {
-    int index;
 
 #ifdef OPENSYNC_NL_SUPPORT
-    index = get_cli_mac_index(client_entry->info.mac, PEER_RX_STATS);
-    if (!g_peer_rx_phyrate[index].flags)
-        return IOCTL_STATUS_ERROR;
-    client_entry->stats_cookie = g_peer_rx_phyrate[index].cookie;
-#else
+    int index;
 
+    index = get_cli_mac_index(client_entry->info.mac, PEER_RX_STATS);
+    if (g_peer_rx_phyrate[index].flags)
+        client_entry->stats_cookie = g_peer_rx_phyrate[index].cookie;
+#else
     int32_t                             rc;
     struct iwreq                        request;
     struct ps_uapi_ioctl               *ioctl_stats = &client_entry->stats_rx;
@@ -1169,7 +1168,7 @@ static void stainfo_cb(struct cfg80211_data *data)
     const size_t src_size = data->length;
     const size_t dst_offset = ctx->size;
 
-    LOGT("%s: Clients buffer dst_offset = %d src_size = %d",
+    LOGT("%s: Clients buffer dst_offset = %zu src_size = %zu",
          __func__, dst_offset, src_size);
 
     if (src_size == 0)
@@ -1197,10 +1196,315 @@ static void stainfo_cb(struct cfg80211_data *data)
 }
 
 static
+ioctl_status_t ioctl80211_peer_stats_fetch(
+        radio_type_t                radio_type,
+        char                       *ifName,
+        ioctl80211_client_record_t *client_entry)
+{
+    int32_t                         rc;
+    ioctl80211_peer_stats_t        *stats_entry = &client_entry->stats.peer;
+
+    struct ioctl80211_vap_stats     vap_stats;
+    struct ieee80211_stats         *vap_stats_data;
+    struct ieee80211_mac_stats     *vap_stats_ucast;
+    struct ieee80211_mac_stats     *vap_stats_mcast;
+
+    /* On one radio there could be multiple wireless interfaces - VAP's.
+       The VAP stats seems to hold the values that we are interested in
+       therefore sum all active VAP interfaces and get RADIO stats
+       /proc/net/dev are network stats - essid stats?
+     */
+    memset (&vap_stats, 0, sizeof(vap_stats));
+
+    rc = osync_nl80211_peer_stats_fetch(ifName,&vap_stats);
+    if (0 > rc)
+    {
+        LOG(ERR,
+            "Parsing %s %s client stats (Failed to get stats '%s')",
+            radio_get_name_from_type(radio_type),
+            ifName,
+            strerror(errno));
+        return IOCTL_STATUS_ERROR;
+    }
+
+    vap_stats_data = &vap_stats.vap_stats;
+    vap_stats_ucast = (struct ieee80211_mac_stats*)
+        (((unsigned char *)&vap_stats.vap_unicast_stats));
+    vap_stats_mcast = (struct ieee80211_mac_stats*)
+        (((unsigned char *)&vap_stats.vap_multicast_stats));
+
+    stats_entry->bytes_tx = 
+        vap_stats_ucast->ims_tx_data_bytes + vap_stats_mcast->ims_tx_data_bytes;
+    LOG(TRACE,
+        "Parsed %s peer tx_bytes %"PRIu64"",
+        radio_get_name_from_type(radio_type),
+        stats_entry->bytes_tx);
+
+    stats_entry->frames_tx = 
+        vap_stats_ucast->ims_tx_data_packets + vap_stats_mcast->ims_tx_data_packets;
+    LOG(TRACE,
+        "Parsed %s peer tx_frames %"PRIu64"",
+        radio_get_name_from_type(radio_type),
+        stats_entry->frames_tx);
+
+    stats_entry->bytes_rx = 
+        vap_stats_ucast->ims_rx_data_bytes + vap_stats_mcast->ims_rx_data_bytes;
+    LOG(TRACE,
+        "Parsed %s peer rx_bytes %"PRIu64"",
+        radio_get_name_from_type(radio_type),
+        stats_entry->bytes_rx);
+
+    stats_entry->frames_rx = 
+        vap_stats_ucast->ims_rx_data_packets + vap_stats_mcast->ims_rx_data_packets;
+    LOG(TRACE,
+        "Parsed %s peer rx_frames %"PRIu64"",
+        radio_get_name_from_type(radio_type),
+        stats_entry->frames_rx);
+
+    stats_entry->errors_rx = 
+        vap_stats_data->is_rx_tooshort +
+        vap_stats_data->is_rx_decap +
+        vap_stats_data->is_rx_nobuf +
+        vap_stats_ucast->ims_rx_wpimic  +
+        vap_stats_mcast->ims_rx_wpimic +
+        vap_stats_ucast->ims_rx_ccmpmic +
+        vap_stats_mcast->ims_rx_ccmpmic +
+        vap_stats_ucast->ims_rx_tkipicv +
+        vap_stats_mcast->ims_rx_tkipicv +
+        vap_stats_ucast->ims_rx_wepfail +
+        vap_stats_mcast->ims_rx_wepfail +
+        vap_stats_ucast->ims_rx_fcserr +
+        vap_stats_mcast->ims_rx_fcserr +
+        vap_stats_ucast->ims_rx_tkipmic +
+        vap_stats_mcast->ims_rx_tkipmic +
+        vap_stats_ucast->ims_rx_decryptcrc +
+        vap_stats_mcast->ims_rx_decryptcrc;
+    LOG(TRACE,
+        "Parsed %s peer rx_errors %"PRIu64"",
+        radio_get_name_from_type(radio_type),
+        stats_entry->errors_rx);
+
+    stats_entry->errors_tx = 
+        vap_stats_ucast->ims_tx_discard +
+        vap_stats_mcast->ims_tx_discard+
+        vap_stats_data->is_tx_nobuf +
+        vap_stats_data->is_tx_not_ok;
+    LOG(TRACE,
+        "Parsed %s peer tx_errors %"PRIu64"",
+        radio_get_name_from_type(radio_type),
+        stats_entry->errors_tx);
+
+    /* TODO: Needs verification.
+       Retry counter was taken from assumption from the following calculation:
+       all queued packets were packets actually sent and not ok - retried!!
+       packet_queued = tx_data_packets + ns_is_tx_not_ok
+     */
+    stats_entry->retries_tx = 
+        vap_stats_data->is_tx_not_ok;
+    LOG(TRACE,
+        "Parsed %s peer tx_retries %"PRIu64"",
+        radio_get_name_from_type(radio_type),
+        stats_entry->retries_tx);
+
+    stats_entry->rate_tx = 
+        vap_stats_ucast->ims_last_tx_rate;
+    LOG(TRACE,
+        "Parsed %s peer tx_rate %u",
+        radio_get_name_from_type(radio_type),
+        stats_entry->rate_tx);
+
+    return IOCTL_STATUS_OK;
+}
+
+static
+ioctl_status_t ioctl80211_peer_list_fetch(
+        radio_entry_t              *radio_cfg,
+        char                       *ifName,
+        radio_essid_t               essid,
+        mac_address_t               mac,
+        ds_dlist_t                 *client_list)
+{
+    ioctl_status_t                  status;
+    ioctl80211_client_record_t     *client_entry = NULL;
+    radio_type_t                    radio_type;
+    unsigned char                   sig8;
+
+    radio_type = radio_cfg->type;
+
+    client_entry = 
+        ioctl80211_client_record_alloc();
+    if (NULL == client_entry)
+    {
+        LOG(ERR,
+            "Parsing %s interface peer stats "
+            "(Failed to allocate memory)",
+            radio_get_name_from_type(radio_type));
+        return IOCTL_STATUS_ERROR;
+    }
+
+    client_entry->is_client = false;
+
+    client_entry->info.type = radio_type;
+
+    memcpy (client_entry->info.mac,
+            mac,
+            sizeof(client_entry->info.mac));
+
+    LOG(TRACE,
+        "Parsed %s peer MAC "MAC_ADDRESS_FORMAT,
+        radio_get_name_from_type(radio_type),
+        MAC_ADDRESS_PRINT(client_entry->info.mac));
+
+#ifdef OPENSYNC_NL_SUPPORT
+    iwstats *          stats;
+    FILE *    f;
+    char      buf[256];
+    char *    bp;
+    int       t;
+
+    f = fopen(PROC_NET_WIRELESS, "r");
+    if (f==NULL)
+        return -1;
+
+    stats = (iwstats*)MALLOC(sizeof(iwstats));
+    while (fgets(buf, 255, f))
+    {
+        bp=buf;
+        while (*bp&&isspace(*bp))
+            bp++;
+        if (strncmp(bp, radio_cfg->if_name, strlen(radio_cfg->if_name))==0 && bp[strlen(radio_cfg->if_name)]==':')
+        {
+            bp=strchr(bp, ':');
+            bp++;
+
+            bp = strtok(bp, " ");
+            sscanf(bp, "%X", &t);
+            stats->status = (unsigned short) t;
+            bp = strtok(NULL, " ");
+            if (strchr(bp, '.') != NULL)
+                stats->qual.updated |= 1;
+            sscanf(bp, "%d", &t);
+            stats->qual.qual = (unsigned char) t;
+            bp = strtok(NULL, " ");
+            if (strchr(bp, '.') != NULL)
+                stats->qual.updated |= 2;
+            sscanf(bp, "%d", &t);
+            stats->qual.level = (unsigned char) t;
+
+            bp = strtok(NULL, " ");
+            if (strchr(bp, '.') != NULL)
+                stats->qual.updated += 4;
+            sscanf(bp, "%d", &t);
+            stats->qual.noise = (unsigned char) t;
+
+            bp = strtok(NULL, " ");
+            sscanf(bp, "%d", &stats->discard.nwid);
+            bp = strtok(NULL, " ");
+            sscanf(bp, "%d", &stats->discard.code);
+            bp = strtok(NULL, " ");
+            sscanf(bp, "%d", &stats->discard.misc);
+        }
+    }
+    fclose(f);
+    sig8  = stats->qual.level;
+    sig8 -= stats->qual.noise;
+    free((void*)stats);
+#else
+    struct  iw_statistics       request_stats;
+    struct iwreq                request;
+    int32_t                     rc;
+    memset(&request_stats, 0, sizeof(request_stats));
+    request.u.data.pointer = (caddr_t) &request_stats;
+    request.u.data.length = sizeof(request_stats);
+    request.u.data.flags = 1;     /* Clear updated flag */
+    rc = 
+        ioctl80211_request_send(
+                ioctl80211_fd_get(),
+                ifName,
+                SIOCGIWSTATS,
+                &request);
+    if (0 > rc)
+    {
+        LOG(ERR,
+            "Parsing %s %s peer stats (Failed to get info '%s')",
+            radio_get_name_from_type(radio_type),
+            ifName,
+            strerror(errno));
+        goto error;
+    }
+
+    /* Note: This relies on 8-bit unsigned int wraparound */
+    sig8 = request_stats.qual.level;
+    sig8 -= request_stats.qual.noise;
+#endif
+
+    client_entry->stats.peer.rssi = sig8;
+
+    LOG(TRACE,
+        "Parsed %s peer RSSI %d",
+        radio_get_name_from_type(radio_type),
+        client_entry->stats.peer.rssi);
+
+    STRSCPY(client_entry->info.ifname,
+            ifName);
+
+    LOG(TRACE,
+            "Parsed %s peer IFNAME %s",
+            radio_get_name_from_type(radio_type),
+            client_entry->info.ifname);
+
+    memcpy (client_entry->info.essid,
+            essid,
+            sizeof(client_entry->info.essid));
+
+    LOG(TRACE,
+            "Parsed %s peer ESSID %s",
+            radio_get_name_from_type(radio_type),
+            client_entry->info.essid);
+
+    status = 
+        ioctl80211_peer_stats_fetch (
+                radio_type,
+                ifName,
+                client_entry);
+    if (IOCTL_STATUS_OK != status)
+    {
+        goto error;
+    }
+
+    status = 
+        ioctl80211_clients_stats_rx_fetch (
+                radio_type,
+                radio_cfg->phy_name,
+                client_entry);
+    if (IOCTL_STATUS_OK != status)
+    {
+        goto error;
+    }
+
+    status = 
+        ioctl80211_clients_stats_tx_fetch (
+                radio_type,
+                radio_cfg->phy_name,
+                client_entry);
+    if (IOCTL_STATUS_OK != status)
+    {
+        goto error;
+    }
+
+    ds_dlist_insert_tail(client_list, client_entry);
+    return IOCTL_STATUS_OK;
+
+error:
+    ioctl80211_client_record_free(client_entry);
+    return IOCTL_STATUS_ERROR;
+}
+
+static
 void util_clients_buf_free(void *buf)
 {
 #if OPENSYNC_NL_SUPPORT
-	FREE(buf);
+    FREE(buf);
 #endif
 }
 
@@ -1209,7 +1513,9 @@ ioctl_status_t ioctl80211_clients_list_fetch(
         radio_entry_t              *radio_cfg,
         char                       *ifName,
         radio_essid_t               essid,
-        ds_dlist_t                 *client_list)
+        ds_dlist_t                 *client_list,
+        mac_address_t               mac,
+        bool                        is_sta)
 {
     ioctl_status_t                  status;
     int32_t                         rc;
@@ -1244,12 +1550,25 @@ ioctl_status_t ioctl80211_clients_list_fetch(
 
     if (0 > rc) {
         FREE(ctx.buf);
-        LOG(ERR,
-            "Parsing %s %s client stats (Failed to get info '%s')",
-            radio_get_name_from_type(radio_type),
-            ifName,
-            strerror(errno));
-        return IOCTL_STATUS_ERROR;
+        if (is_sta && (-EPERM == rc)) {
+            // if we're STA *and* we got EPERM error, fall back to
+            // previous implementation, as the qca-wifi patch is
+            // probably not applied.
+            LOG(NOTICE, "Stats for %s might be unreliable", ifName);
+            return ioctl80211_peer_list_fetch(
+                radio_cfg,
+                ifName,
+                essid,
+                mac,
+                client_list);
+        } else {
+            LOG(ERR,
+                "Parsing %s %s client stats (Failed to get info '%s')",
+                radio_get_name_from_type(radio_type),
+                ifName,
+                strerror(errno));
+            return IOCTL_STATUS_ERROR;
+        }
     }
 
     length = ctx.size;
@@ -1373,6 +1692,9 @@ ioctl_status_t ioctl80211_clients_list_fetch(
             goto error;
         }
 
+#ifdef OPENSYNC_NL_SUPPORT
+        client_entry->stats_cookie = ieee80211_client->isi_assoc_time;
+#else
         status = 
             ioctl80211_clients_stats_rx_fetch (
                     radio_type,
@@ -1382,6 +1704,7 @@ ioctl_status_t ioctl80211_clients_list_fetch(
         {
             goto error;
         }
+#endif
 
         status = 
             ioctl80211_clients_stats_tx_fetch (
@@ -1415,312 +1738,6 @@ error:
     util_clients_buf_free(ieee80211_clients_buf);
     LOGT("%s: clients number: %d", ifName , client_cnt);
     return IOCTL_STATUS_OK;
-}
-
-static
-ioctl_status_t ioctl80211_peer_stats_fetch(
-        radio_type_t                radio_type,
-        char                       *ifName,
-        ioctl80211_client_record_t *client_entry)
-{
-    int32_t                         rc;
-    ioctl80211_peer_stats_t        *stats_entry = &client_entry->stats.peer;
-
-    struct ioctl80211_vap_stats     vap_stats;
-    struct ieee80211_stats         *vap_stats_data;
-    struct ieee80211_mac_stats     *vap_stats_ucast;
-    struct ieee80211_mac_stats     *vap_stats_mcast;
-
-    /* On one radio there could be multiple wireless interfaces - VAP's.
-       The VAP stats seems to hold the values that we are interested in
-       therefore sum all active VAP interfaces and get RADIO stats
-
-       /proc/net/dev are network stats - essid stats?
-     */
-    memset (&vap_stats, 0, sizeof(vap_stats));
-
-    rc = osync_nl80211_peer_stats_fetch(ifName,&vap_stats);
-    if (0 > rc)
-    {
-        LOG(ERR,
-            "Parsing %s %s client stats (Failed to get stats '%s')",
-            radio_get_name_from_type(radio_type),
-            ifName,
-            strerror(errno));
-        return IOCTL_STATUS_ERROR;
-    }
-
-    vap_stats_data = &vap_stats.vap_stats;
-    vap_stats_ucast = (struct ieee80211_mac_stats*)
-        (((unsigned char *)&vap_stats.vap_unicast_stats));
-    vap_stats_mcast = (struct ieee80211_mac_stats*)
-        (((unsigned char *)&vap_stats.vap_multicast_stats));
-
-    stats_entry->bytes_tx = 
-        vap_stats_ucast->ims_tx_data_bytes + vap_stats_mcast->ims_tx_data_bytes;
-    LOG(TRACE,
-        "Parsed %s peer tx_bytes %"PRIu64"",
-        radio_get_name_from_type(radio_type),
-        stats_entry->bytes_tx);
-
-    stats_entry->frames_tx = 
-        vap_stats_ucast->ims_tx_data_packets + vap_stats_mcast->ims_tx_data_packets;
-    LOG(TRACE,
-        "Parsed %s peer tx_frames %"PRIu64"",
-        radio_get_name_from_type(radio_type),
-        stats_entry->frames_tx);
-
-    stats_entry->bytes_rx = 
-        vap_stats_ucast->ims_rx_data_bytes + vap_stats_mcast->ims_rx_data_bytes;
-    LOG(TRACE,
-        "Parsed %s peer rx_bytes %"PRIu64"",
-        radio_get_name_from_type(radio_type),
-        stats_entry->bytes_rx);
-
-    stats_entry->frames_rx = 
-        vap_stats_ucast->ims_rx_data_packets + vap_stats_mcast->ims_rx_data_packets;
-    LOG(TRACE,
-        "Parsed %s peer rx_frames %"PRIu64"",
-        radio_get_name_from_type(radio_type),
-        stats_entry->frames_rx);
-
-    stats_entry->errors_rx = 
-        vap_stats_data->is_rx_tooshort +
-        vap_stats_data->is_rx_decap +
-        vap_stats_data->is_rx_nobuf +
-        vap_stats_ucast->ims_rx_wpimic  +
-        vap_stats_mcast->ims_rx_wpimic +
-        vap_stats_ucast->ims_rx_ccmpmic +
-        vap_stats_mcast->ims_rx_ccmpmic +
-        vap_stats_ucast->ims_rx_tkipicv +
-        vap_stats_mcast->ims_rx_tkipicv +
-        vap_stats_ucast->ims_rx_wepfail +
-        vap_stats_mcast->ims_rx_wepfail +
-        vap_stats_ucast->ims_rx_fcserr +
-        vap_stats_mcast->ims_rx_fcserr +
-        vap_stats_ucast->ims_rx_tkipmic +
-        vap_stats_mcast->ims_rx_tkipmic +
-        vap_stats_ucast->ims_rx_decryptcrc +
-        vap_stats_mcast->ims_rx_decryptcrc;
-    LOG(TRACE,
-        "Parsed %s peer rx_errors %"PRIu64"",
-        radio_get_name_from_type(radio_type),
-        stats_entry->errors_rx);
-
-    stats_entry->errors_tx = 
-        vap_stats_ucast->ims_tx_discard +
-        vap_stats_mcast->ims_tx_discard+
-        vap_stats_data->is_tx_nobuf +
-        vap_stats_data->is_tx_not_ok;
-    LOG(TRACE,
-        "Parsed %s peer tx_errors %"PRIu64"",
-        radio_get_name_from_type(radio_type),
-        stats_entry->errors_tx);
-
-    /* TODO: Needs verification.
-
-       Retry counter was taken from assumption from the following calculation:
-
-       all queued packets were packets actually sent and not ok - retried!!
-       packet_queued = tx_data_packets + ns_is_tx_not_ok
-     */
-    stats_entry->retries_tx = 
-        vap_stats_data->is_tx_not_ok;
-    LOG(TRACE,
-        "Parsed %s peer tx_retries %"PRIu64"",
-        radio_get_name_from_type(radio_type),
-        stats_entry->retries_tx);
-
-    stats_entry->rate_tx = 
-        vap_stats_ucast->ims_last_tx_rate;
-    LOG(TRACE,
-        "Parsed %s peer tx_rate %u",
-        radio_get_name_from_type(radio_type),
-        stats_entry->rate_tx);
-
-    return IOCTL_STATUS_OK;
-}
-static
-ioctl_status_t ioctl80211_peer_list_fetch(
-        radio_entry_t              *radio_cfg,
-        char                       *ifName,
-        radio_essid_t               essid,
-        mac_address_t               mac,
-        ds_dlist_t                 *client_list)
-{
-    ioctl_status_t                  status;
-    ioctl80211_client_record_t     *client_entry = NULL;
-    radio_type_t                    radio_type;
-    unsigned char                   sig8;
-
-    radio_type = radio_cfg->type;
-
-    client_entry = 
-        ioctl80211_client_record_alloc();
-    if (NULL == client_entry)
-    {
-        LOG(ERR,
-            "Parsing %s interface peer stats "
-            "(Failed to allocate memory)",
-            radio_get_name_from_type(radio_type));
-        return IOCTL_STATUS_ERROR;
-    }
-
-    client_entry->is_client = false;
-
-    client_entry->info.type = radio_type;
-
-    memcpy (client_entry->info.mac,
-            mac,
-            sizeof(client_entry->info.mac));
-
-    LOG(TRACE,
-        "Parsed %s peer MAC "MAC_ADDRESS_FORMAT,
-        radio_get_name_from_type(radio_type),
-        MAC_ADDRESS_PRINT(client_entry->info.mac));
-
-#ifdef OPENSYNC_NL_SUPPORT
-    iwstats *          stats;
-    FILE *    f;
-    char      buf[256];
-    char *    bp;
-    int       t;
-
-    f = fopen(PROC_NET_WIRELESS, "r");
-    if(f==NULL)
-        return -1;
-
-    stats = (iwstats*)MALLOC(sizeof(iwstats));
-    while(fgets(buf,255,f))
-    {
-            bp=buf;
-            while(*bp&&isspace(*bp))
-                    bp++;
-            if(strncmp(bp,radio_cfg->if_name,strlen(radio_cfg->if_name))==0 && bp[strlen(radio_cfg->if_name)]==':')
-            {
-                    bp=strchr(bp,':');
-                    bp++;
-
-                    bp = strtok(bp, " ");
-                    sscanf(bp, "%X", &t);
-                    stats->status = (unsigned short) t;
-                    bp = strtok(NULL, " ");
-                    if(strchr(bp,'.') != NULL)
-                            stats->qual.updated |= 1;
-                    sscanf(bp, "%d", &t);
-                    stats->qual.qual = (unsigned char) t;
-                    bp = strtok(NULL, " ");
-                    if(strchr(bp,'.') != NULL)
-                            stats->qual.updated |= 2;
-                    sscanf(bp, "%d", &t);
-                    stats->qual.level = (unsigned char) t;
-
-                    bp = strtok(NULL, " ");
-                    if(strchr(bp,'.') != NULL)
-                            stats->qual.updated += 4;
-                    sscanf(bp, "%d", &t);
-                    stats->qual.noise = (unsigned char) t;
-
-                    bp = strtok(NULL, " ");
-                    sscanf(bp, "%d", &stats->discard.nwid);
-                    bp = strtok(NULL, " ");
-                    sscanf(bp, "%d", &stats->discard.code);
-                    bp = strtok(NULL, " ");
-                    sscanf(bp, "%d", &stats->discard.misc);
-            }
-    }
-    fclose(f);
-    sig8  = stats->qual.level;
-    sig8 -= stats->qual.noise;
-#else
-    struct  iw_statistics       request_stats;
-    struct iwreq                request;
-    int32_t                     rc;
-    memset (&request_stats, 0, sizeof(request_stats));
-    request.u.data.pointer = (caddr_t) &request_stats;
-    request.u.data.length = sizeof(request_stats);
-    request.u.data.flags = 1;     /* Clear updated flag */
-    rc = 
-        ioctl80211_request_send(
-                ioctl80211_fd_get(),
-                ifName,
-                SIOCGIWSTATS,
-                &request);
-    if (0 > rc)
-    {
-        LOG(ERR,
-            "Parsing %s %s peer stats (Failed to get info '%s')",
-            radio_get_name_from_type(radio_type),
-            ifName,
-            strerror(errno));
-        goto error;
-    }
-
-    /* Note: This relies on 8-bit unsigned int wraparound */
-    sig8 = request_stats.qual.level;
-    sig8 -= request_stats.qual.noise;
-#endif
-
-    client_entry->stats.peer.rssi = sig8;
-
-    LOG(TRACE,
-        "Parsed %s peer RSSI %d",
-        radio_get_name_from_type(radio_type),
-        client_entry->stats.peer.rssi);
-
-    STRSCPY(client_entry->info.ifname,
-            ifName);
-
-    LOG(TRACE,
-            "Parsed %s peer IFNAME %s",
-            radio_get_name_from_type(radio_type),
-            client_entry->info.ifname);
-
-    memcpy (client_entry->info.essid,
-            essid,
-            sizeof(client_entry->info.essid));
-
-    LOG(TRACE,
-            "Parsed %s peer ESSID %s",
-            radio_get_name_from_type(radio_type),
-            client_entry->info.essid);
-
-    status = 
-        ioctl80211_peer_stats_fetch (
-                radio_type,
-                ifName,
-                client_entry);
-    if (IOCTL_STATUS_OK != status)
-    {
-        goto error;
-    }
-
-    status = 
-        ioctl80211_clients_stats_rx_fetch (
-                radio_type,
-                radio_cfg->phy_name,
-                client_entry);
-    if (IOCTL_STATUS_OK != status)
-    {
-        goto error;
-    }
-
-    status = 
-        ioctl80211_clients_stats_tx_fetch (
-                radio_type,
-                radio_cfg->phy_name,
-                client_entry);
-    if (IOCTL_STATUS_OK != status)
-    {
-        goto error;
-    }
-
-    ds_dlist_insert_tail(client_list, client_entry);
-    return IOCTL_STATUS_OK;
-
-error:
-    ioctl80211_client_record_free(client_entry);
-    return IOCTL_STATUS_ERROR;
 }
 
 ioctl_status_t ioctl80211_clients_list_get(
@@ -1766,51 +1783,26 @@ ioctl_status_t ioctl80211_clients_list_get(
             continue;
         }
 
-        /* Adding plume STA stats as peer client */
-        if (interface->sta)
-        {
-            LOG(TRACE,
-                "Parsing %s interface %s peer list",
-                radio_get_name_from_type(radio_cfg->type),
-                interface->ifname);
+        LOG(TRACE,
+            "Parsing %s interface %s client list",
+            radio_get_name_from_type(radio_cfg->type),
+            interface->ifname);
 
-            status = 
-                ioctl80211_peer_list_fetch (
-                        radio_cfg,
-                        interface->ifname,
-                        interface->essid,
-                        interface->mac,
-                        client_list);
-            if (IOCTL_STATUS_OK != status)
-            {
-                LOG(ERR,
-                    "Parsing %s interface %s peer stats",
-                    radio_get_name_from_type(radio_cfg->type),
-                    interface->ifname);
-                return IOCTL_STATUS_ERROR;
-            }
-        }
-        else
+        status = 
+            ioctl80211_clients_list_fetch (
+                    radio_cfg,
+                    interface->ifname,
+                    interface->essid,
+                    client_list,
+                    interface->mac,
+                    interface->sta);
+        if (IOCTL_STATUS_OK != status)
         {
-            LOG(TRACE,
+            LOG(ERR,
                 "Parsing %s interface %s client list",
                 radio_get_name_from_type(radio_cfg->type),
                 interface->ifname);
-
-            status = 
-                ioctl80211_clients_list_fetch (
-                        radio_cfg,
-                        interface->ifname,
-                        interface->essid,
-                        client_list);
-            if (IOCTL_STATUS_OK != status)
-            {
-                LOG(ERR,
-                    "Parsing %s interface %s client list",
-                    radio_get_name_from_type(radio_cfg->type),
-                    interface->ifname);
-                return IOCTL_STATUS_ERROR;
-            }
+            return IOCTL_STATUS_ERROR;
         }
     }
 

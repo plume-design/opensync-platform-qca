@@ -101,8 +101,8 @@ static unsigned int                 res_len;
             he_ccfs_1 == 143 || \
             he_ccfs_1 == 175 || \
             he_ccfs_1 == 207) ? RADIO_CHAN_WIDTH_160MHZ : \
-                                RADIO_CHAN_WIDTH_80_PLUS_80MHZ ) : \
-                                RADIO_CHAN_WIDTH_20MHZ
+                                RADIO_CHAN_WIDTH_80_PLUS_80MHZ) \
+        : RADIO_CHAN_WIDTH_20MHZ
 
 #define IS_REVSIG_VHT160_CHWIDTH(vht_op_chwidth, \
                                  vht_op_ch_freq_seg1, \
@@ -538,16 +538,25 @@ ioctl_status_t ioctl80211_scan_results_parse(
              util_get_chanwidth(ssid + sr->isr_ssid_len, sr->isr_ie_len);
 
     LOG(TRACE,
-        "Parsed %s neighbor BSSID %s {chan='%u' from freq='%u'"
-        " signal='%d'"
-        " ssid='%s'"
-        " chanwidth='%d'}",
+        "Parsed %s BSSID %s",
         radio_get_name_from_type(radio_type),
-        neighbor_record->bssid,
+        neighbor_record->bssid);
+    LOG(TRACE,
+        "Parsed %s SSID %s",
+        radio_get_name_from_type(radio_type),
+        neighbor_record->ssid);
+    LOG(TRACE,
+        "Parsed %s chan %u from freq %u",
+        radio_get_name_from_type(radio_type),
         neighbor_record->chan,
-        sr->isr_freq,
-        neighbor_record->sig,
-        neighbor_record->ssid,
+        sr->isr_freq);
+    LOG(TRACE,
+        "Parsed %s signal %d",
+        radio_get_name_from_type(radio_type),
+        neighbor_record->sig);
+    LOG(TRACE,
+        "Parsed %s chanwidth %d",
+        radio_get_name_from_type(radio_type),
         neighbor_record->chanwidth);
 
     return IOCTL_STATUS_OK;

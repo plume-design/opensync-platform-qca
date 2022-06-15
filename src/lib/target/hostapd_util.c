@@ -39,7 +39,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define CMD_TIMEOUT "timeout"
 #endif
 
-bool hostapd_client_disconnect(const char *path, const char *interface, const
+bool hostapd_client_disconnect(const char *path, const char *interface,
                                const char *disc_type, const char *mac_str, uint8_t reason)
 {
     char hostapd_cmd[512];
@@ -102,6 +102,24 @@ bool hostapd_rrm_remove_neighbor(const char *path, const char *interface, const 
             "%s 5 hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s "
             "remove_neighbor %s ",
             CMD_TIMEOUT, path, interface, interface, bssid);
+
+    ret = !cmd_log(hostapd_cmd);
+    if (!ret) {
+        LOGE("hostapd_cli execution failed: %s", hostapd_cmd);
+    }
+
+    return ret;
+}
+
+/* To use it first check if tx=0 is supprted for your hostapd version */
+bool hostapd_remove_station(const char *path, const char *interface, const char *mac_str)
+{
+    char hostapd_cmd[512];
+    bool ret = false;
+
+    snprintf(hostapd_cmd, sizeof(hostapd_cmd),
+             "%s 5 hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s deauthenticate %s \"reason=1 tx=0\"",
+             CMD_TIMEOUT, path, interface, interface, mac_str);
 
     ret = !cmd_log(hostapd_cmd);
     if (!ret) {
