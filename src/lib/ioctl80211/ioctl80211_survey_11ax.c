@@ -129,6 +129,7 @@ void parse_channel_survey_stats_cb(struct cfg80211_data *arg)
         }
 
         memset(&g_bss_data, 0, sizeof(g_bss_data));
+        g_bss_data.u.survey_bss.get.freq       = chan_stats->freq;
         g_bss_data.u.survey_bss.get.total      = chan_stats->cycle_cnt;
         g_bss_data.u.survey_bss.get.busy       = chan_stats->clear_cnt;
         g_bss_data.u.survey_bss.get.tx         = chan_stats->tx_frm_cnt;
@@ -159,14 +160,20 @@ void parse_channel_survey_stats_cb(struct cfg80211_data *arg)
                 g_chan_data.u.survey_chan.get.channels[chan_stats_index].rx    = chan_stats->rx_frm_cnt;
 #ifdef IEEE80211_CHAN_NOISE_FLOOR_SUPPORTED
                 g_chan_data.u.survey_chan.get.channels[chan_stats_index].nf    = chan_stats->noise_floor;
+#else
+                if (g_bss_data.u.survey_bss.get.freq == chan_stats->freq)
+                    g_bss_data.u.survey_bss.get.nf = chan_stats->chan_nf;
+                g_chan_data.u.survey_chan.get.channels[chan_stats_index].nf    = chan_stats->chan_nf;
 #endif
+
                 LOGD("freq: %4d, rx_bss: %12"PRIu64", total: %12"PRIu64", tx: %12"PRIu64", "
-                     "rx: %12"PRIu64", busy: %12"PRIu64", busy_ext: %12"PRIu64"",
+                     "rx: %12"PRIu64", busy: %12"PRIu64", busy_ext: %12"PRIu64", noise_floor: %"PRIi16"",
                      chan_stats->freq, chan_stats->bss_rx_cnt, chan_stats->cycle_cnt,
                      chan_stats->tx_frm_cnt, chan_stats->rx_frm_cnt, chan_stats->clear_cnt,
-                     chan_stats->ext_busy_cnt);
 #ifdef IEEE80211_CHAN_NOISE_FLOOR_SUPPORTED
-                LOGD("noise_floor: %"PRIi16"", chan_stats->noise_floor);
+                     chan_stats->ext_busy_cnt, chan_stats->noise_floor);
+#else
+                     chan_stats->ext_busy_cnt, chan_stats->chan_nf);
 #endif
                 chan_index++;
             }

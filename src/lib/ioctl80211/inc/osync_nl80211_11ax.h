@@ -115,6 +115,14 @@ struct ioctl80211_vap_stats
 #define send_nl_command(sk_ctx, ifname, buf, len, cb, cmd) \
             send_command(sk_ctx, ifname, buf, len, cb, cmd, 0);
 
+#if defined(CONFIG_PLATFORM_QCA_QSDK110) && !defined(CONFIG_PLATFORM_QCA_QSDK120)
+#define send_setparam_command(sock_ctx, subcmd, cmd, ifname, buf, len) \
+            wifi_cfg80211_send_setparam_command(sock_ctx, subcmd, cmd, ifname, buf, len);
+#else
+#define send_setparam_command(sock_ctx, subcmd, cmd, ifname, buf, len) \
+            wifi_cfg80211_send_setparam_command(sock_ctx, subcmd, cmd, ifname, buf, len, 0);
+#endif
+
 typedef enum config_mode_type {
     CONFIG_IOCTL    = 0,
     CONFIG_CFG80211 = 1,
@@ -276,10 +284,10 @@ osync_nl80211_bsal_bs_config(int fd, const bsal_ifconfig_t *ifcfg, bool enable)
     buffer.data = (uint8_t *)&fwd_to_app;
     buffer.callback = NULL;
     buffer.parse_data = 0;
-    wifi_cfg80211_send_setparam_command(&(sock_ctx.cfg80211_ctxt),
-                                QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS,
-                                IEEE80211_PARAM_FWD_ACTION_FRAMES_TO_APP,
-                                ifcfg->ifname, (char *)&buffer, sizeof(int));
+    send_setparam_command(&(sock_ctx.cfg80211_ctxt),
+                QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS,
+                IEEE80211_PARAM_FWD_ACTION_FRAMES_TO_APP,
+                ifcfg->ifname, (char *)&buffer, sizeof(int));
     /*
      * set filter for receiving action frame from rtnetlink event
      * IEEE80211_FILTER_TYPE_ACTION = 0x100 for action frame
@@ -291,7 +299,7 @@ osync_nl80211_bsal_bs_config(int fd, const bsal_ifconfig_t *ifcfg, bool enable)
     buffer.data = (uint8_t *)&filter_value;
     buffer.callback = NULL;
     buffer.parse_data = 0;
-    wifi_cfg80211_send_setparam_command(&(sock_ctx.cfg80211_ctxt),
+    send_setparam_command(&(sock_ctx.cfg80211_ctxt),
                 QCA_NL80211_VENDORSUBCMD_SETFILTER, filter_value,
                 ifcfg->ifname,(char *)&buffer, sizeof(uint32_t));
 #else
@@ -324,9 +332,8 @@ osync_nl80211_bsal_acl_mac(int fd, const char *ifname, const uint8_t *mac_addr, 
     buffer.callback = NULL;
     buffer.parse_data = 0;
 
-    wifi_cfg80211_send_setparam_command(&(sock_ctx.cfg80211_ctxt),
-                                        cno, 0,
-                                        ifname, (char *)&buffer, sizeof(int));
+    send_setparam_command(&(sock_ctx.cfg80211_ctxt),
+                cno, 0, ifname, (char *)&buffer, sizeof(int));
 #else
     struct sockaddr         saddr;
     int 					ret;
@@ -1575,7 +1582,7 @@ static void  bss_info_handler(struct cfg80211_data *buffer)
     if ((res_len + buffer->length) >= g_iw_scan_results_capacity)
     {
         LOG(ERR,
-                "No space left in scan results buffer to store the scan data (%u bytes of scan data, %u bytes left in buffer)",
+                "No space left in scan results buffer to store the scan data (%u bytes of scan data, %zu bytes left in buffer)",
                 buffer->length,
                 g_iw_scan_results_capacity - res_len);
         return;

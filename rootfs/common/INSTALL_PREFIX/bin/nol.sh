@@ -34,6 +34,7 @@ restore()
     do
         FILE=$NOL_PATH/nol_$IFACE.bin
         test -f $FILE || continue
+        test -s $FILE || continue
         radartool -i $IFACE setnol $FILE
     done
 }

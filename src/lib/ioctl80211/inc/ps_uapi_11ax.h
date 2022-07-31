@@ -168,6 +168,8 @@ struct ps_uapi_ioctl {
 			struct {
 			} __packed set;
 			struct {
+				/* mhz */
+				u16 freq;
 				/* usec */
 				u64 total;
 				u64 tx;

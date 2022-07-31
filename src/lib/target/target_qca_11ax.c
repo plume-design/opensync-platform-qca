@@ -659,7 +659,7 @@ util_wifi_transform_macaddr(const char *phy, char *mac, int idx)
         LOGI("%s: MBSS IE feature is enabled", phy);
         ic_config = R(F("/proc/%s/ic_config", phy));
         while ((line = strsep(&ic_config, "\r\n")) != NULL)
-            if (strstr(line, "ic_mbss.max_bssid:")) {
+            if (strstr(line, "max_bssid:")) {
                 ic_config = strpbrk(line, ":");
                 ic_config += 1; /* skip the : */
                 max_bssid = 1 << atoi(ic_config);
@@ -3746,6 +3746,9 @@ target_radio_config_set2(const struct schema_Wifi_Radio_Config *rconf,
 
     if (util_qca_set_int(phy, "dl_modoff", RTT_MODULE_ID))
         LOGW("Failed to disable debug logs for module\n");
+
+    if (util_qca_set_int(phy, "samessid_disable", 1))
+        LOGW("Failed to disable repeater samessid feature support\n");
 
     util_thermal_sys_recalc_tx_chainmask();
     util_cb_phy_state_update(phy);

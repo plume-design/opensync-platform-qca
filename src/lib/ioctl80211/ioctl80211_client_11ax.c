@@ -239,8 +239,11 @@ static void dp_peer_rx_rate_stats(uint8_t *peer_mac,
 
     for (i = 0; i < WLANSTATS_CACHE_SIZE; i++)
     {
-        if ((int)(rx_stats->rix) != INVALID_CACHE_IDX)
-        {
+#if defined(CONFIG_PLATFORM_QCA_QSDK110) && !defined(CONFIG_PLATFORM_QCA_QSDK120)
+        if ((int)(rx_stats->rix) != INVALID_CACHE_IDX) {
+#else
+        if ((int)(rx_stats->ratecode) != INVALID_CACHE_IDX) {
+#endif
             g_peer_rx_phyrate[index].sum += rx_stats->rate * rx_stats->num_ppdus;
             g_peer_rx_phyrate[index].cnt += rx_stats->num_ppdus;
             g_peer_rx_phyrate[index].mpdus += rx_stats->num_mpdus;
@@ -276,8 +279,11 @@ static void dp_peer_tx_rate_stats(uint8_t *peer_mac,
 
     for (i = 0; i < WLANSTATS_CACHE_SIZE; i++)
     {
-        if ((int)(tx_stats->rix) != INVALID_CACHE_IDX)
-        {
+#if defined(CONFIG_PLATFORM_QCA_QSDK110) && !defined(CONFIG_PLATFORM_QCA_QSDK120)
+        if ((int)(tx_stats->rix) != INVALID_CACHE_IDX) {
+#else
+        if ((int)(tx_stats->ratecode) != INVALID_CACHE_IDX) {
+#endif
             g_peer_tx_phyrate[index].sum += tx_stats->rate * tx_stats->num_ppdus;
             g_peer_tx_phyrate[index].cnt += tx_stats->num_ppdus;
             g_peer_tx_phyrate[index].success += tx_stats->mpdu_success;
