@@ -96,12 +96,27 @@ typedef enum {
     IEEE80211_INVALID_BAND
 } IEEE80211_STA_BAND;
 
+struct client {
+    uint8_t mac[BSAL_MAC_ADDR_LEN];
+    uint8_t rssi;
+    uint8_t hwm;
+    uint8_t lwm;
+    uint8_t bowm;
+
+    uint8_t ref_cnt;
+    ds_tree_node_t node;
+};
+
+static int mac_cmp(const void *a, const void *b);
+
 /***************************************************************************************/
 
 static bsal_event_cb_t      _bsal_event_cb      = NULL;
 static int                  _bsal_netlink_fd    = -1;
 static int                  _bsal_rt_netlink_fd = -1;
 static int                  _bsal_ioctl_fd      = -1;
+static ds_tree_t            _bsal_clients       = DS_TREE_INIT(mac_cmp,
+                                                               struct client, node);
 
 static struct ev_loop       *_ev_loop           = NULL;
 static struct ev_io         _evio;
@@ -130,6 +145,58 @@ static int qca_bsal_rt_netlink_init(void);
 static void qca_bsal_rt_netlink_cleanup(void);
 
 /***************************************************************************************/
+
+static int mac_cmp(const void *a, const void *b)
+{
+    return memcmp(a, b, BSAL_MAC_ADDR_LEN);
+}
+
+static void process_bs_sta_stats_ind(const char *ifname,
+                                     const struct bs_sta_stats_ind *stats)
+{
+    uint8_t i;
+    struct client *client;
+
+    for(i = 0; i < stats->peer_count; i++) {
+        const struct bs_sta_stats_per_peer* peer_stats = &stats->peer_stats[i];
+        bsal_event_t event;
+        bsal_ev_rssi_xing_t *xing_event = &event.data.rssi_change;
+        bsal_rssi_change_t old_hwm_xing;
+        bsal_rssi_change_t new_hwm_xing;
+        bsal_rssi_change_t old_lwm_xing;
+        bsal_rssi_change_t new_lwm_xing;
+        bsal_rssi_change_t old_bowm_xing;
+        bsal_rssi_change_t new_bowm_xing;
+        uint8_t old_rssi;
+
+        if(!(client = ds_tree_find(&_bsal_clients, peer_stats->client_addr)))
+            continue;
+
+        old_rssi = client->rssi;
+        client->rssi = peer_stats->rssi;
+
+        if(client->rssi >= client->bowm)
+            continue;
+
+        old_hwm_xing = old_rssi < client->hwm ? BSAL_RSSI_LOWER : BSAL_RSSI_HIGHER;
+        old_lwm_xing = old_rssi < client->lwm ? BSAL_RSSI_LOWER : BSAL_RSSI_HIGHER;
+        old_bowm_xing = old_rssi < client->bowm ? BSAL_RSSI_LOWER : BSAL_RSSI_HIGHER;
+        new_hwm_xing = client->rssi < client->hwm ? BSAL_RSSI_LOWER : BSAL_RSSI_HIGHER;
+        new_lwm_xing = client->rssi < client->lwm ? BSAL_RSSI_LOWER : BSAL_RSSI_HIGHER;
+        new_bowm_xing = client->rssi < client->bowm ? BSAL_RSSI_LOWER : BSAL_RSSI_HIGHER;
+
+        memset(&event, 0, sizeof(event));
+        event.type = BSAL_EVENT_RSSI_XING;
+        STRSCPY(event.ifname, ifname);
+        memcpy(xing_event->client_addr, peer_stats->client_addr, sizeof(xing_event->client_addr));
+        xing_event->rssi = client->rssi;
+        xing_event->high_xing = old_hwm_xing == new_hwm_xing ? BSAL_RSSI_UNCHANGED : new_hwm_xing;
+        xing_event->low_xing = old_lwm_xing == new_lwm_xing ? BSAL_RSSI_UNCHANGED : new_lwm_xing;
+        xing_event->busy_override_xing = old_bowm_xing == new_bowm_xing ? BSAL_RSSI_UNCHANGED : new_bowm_xing;
+
+        _bsal_event_cb(&event);
+    }
+}
 
 static void qca_bsal_events_evio_cb(struct ev_loop *loop, struct ev_io *evio, int revents)
 {
@@ -473,6 +540,7 @@ static void qca_bsal_event_process(void)
     ath_netlink_bsteering_event_t   *bsev;
     struct nlmsghdr *               nlmsg;
     bsal_event_t                    *event;
+    struct client                   *client;
     char                            ifname[IF_NAMESIZE];
     uint32_t                        val;
     ssize_t                         rlen;
@@ -612,6 +680,10 @@ static void qca_bsal_event_process(void)
                                                 &bsev->data.bs_disconnect_ind.client_addr,
                                                 sizeof(event->data.disconnect.client_addr));
 
+        if ((client = ds_tree_find(&_bsal_clients, &bsev->data.bs_disconnect_ind.client_addr))) {
+            client->rssi = 0;
+        }
+
         if (!c_get_value_by_key(map_disc_source, bsev->data.bs_disconnect_ind.source, &val)) {
             LOGE("qca_bsal_event_process(ATH_EVENT_BSTEERING_CLIENT_DISCONNECTED): Unknown source %d",
                                                  bsev->data.bs_disconnect_ind.source);
@@ -700,6 +772,9 @@ static void qca_bsal_event_process(void)
         event->data.rssi.rssi = bsev->data.bs_rssi_measurement.rssi;
         break;
 
+    case ATH_EVENT_BSTEERING_STA_STATS:
+        process_bs_sta_stats_ind(ifname, &bsev->data.bs_sta_stats);
+        /* Callee above generates BSAL events, passtrough */
     default:
         /* ignore this event */
         FREE(event);
@@ -794,6 +869,7 @@ static int qca_bsal_bs_config(
     athdbg.data.bsteering_param.low_rssi_crossing_threshold       = ifcfg->def_rssi_low_xing;
     athdbg.data.bsteering_param.high_rate_rssi_crossing_threshold = ifcfg->def_rssi_xing;
     athdbg.data.bsteering_param.low_rate_rssi_crossing_threshold  = ifcfg->def_rssi_xing;
+    athdbg.data.bsteering_param.interference_detection_enable     = 1; /* Prerequisite for ATH_EVENT_BSTEERING_STA_STATS */
 
     // Needed to satisfy parameter validation
     athdbg.data.bsteering_param.high_tx_rate_crossing_threshold  = 1;
@@ -973,12 +1049,30 @@ int qca_bsal_client_add(
         const bsal_client_config_t *conf)
 {
     int             ret;
+    struct client   *client = NULL;
 
     if ((ret = qca_bsal_acl_mac(_bsal_ioctl_fd, ifname, mac_addr, true)) < 0) {
         return ret;
     }
 
-    return qca_bsal_bs_client_config(_bsal_ioctl_fd, ifname, mac_addr, conf);
+    if ((ret = qca_bsal_bs_client_config(_bsal_ioctl_fd, ifname, mac_addr, conf)) < 0) {
+        return ret;
+    }
+
+    if ((client = ds_tree_find(&_bsal_clients, mac_addr))) {
+        client->ref_cnt++;
+    }
+    else {
+        client = CALLOC(1, sizeof(*client));
+        memcpy(client->mac, mac_addr, sizeof(client->mac));
+        client->hwm = conf->rssi_high_xing;
+        client->lwm = conf->rssi_low_xing;
+        client->bowm = conf->rssi_busy_override_xing;
+
+        ds_tree_insert(&_bsal_clients, client, client->mac);
+    }
+
+    return ret;
 }
 
 int qca_bsal_client_update(
@@ -986,6 +1080,14 @@ int qca_bsal_client_update(
         const uint8_t *mac_addr,
         const bsal_client_config_t *conf)
 {
+    struct client *client = NULL;
+
+    if ((client = ds_tree_find(&_bsal_clients, mac_addr))) {
+        client->hwm = conf->rssi_high_xing;
+        client->lwm = conf->rssi_low_xing;
+        client->bowm = conf->rssi_busy_override_xing;
+    }
+
     return qca_bsal_bs_client_config(_bsal_ioctl_fd, ifname, mac_addr, conf);
 }
 
@@ -993,6 +1095,16 @@ int qca_bsal_client_remove(
         const char *ifname,
         const uint8_t *mac_addr)
 {
+    struct client *client = NULL;
+
+    if ((client = ds_tree_find(&_bsal_clients, mac_addr))) {
+        client->ref_cnt--;
+        if (client->ref_cnt == 0) {
+            ds_tree_remove(&_bsal_clients, client);
+            free(client);
+        }
+    }
+
     return qca_bsal_acl_mac(_bsal_ioctl_fd, ifname, mac_addr, false);
 }
 

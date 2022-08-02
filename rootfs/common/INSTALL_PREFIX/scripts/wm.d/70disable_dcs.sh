@@ -24,4 +24,12 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-grep -l $1 /sys/class/net/*/parent 2>/dev/null" " | sed 1q 2>/dev/null" " | xargs -n1 dirname 2>/dev/null" " | xargs -n1 basename 2>/dev/null" " | xargs -n1 sh -c 'wlanconfig $0 list freq'" " | sed 's/Channel/\n/g'" " |tr -s " " | cut -d " " -f2,8,9 > /tmp/chan_width_1.txt
+# While driver re-initializes internal structures with default
+# values (dcs_enable = 1 on DA) when last vap is stopped/destroyed,
+# then this option can be ovveride during onboarding.
+# Because of that we set this here instead of using wifi.sh script.
+if command -v cfg80211tool > /dev/null; then
+    cfg80211tool $(cat /sys/class/net/$1/parent) dcs_enable 0
+else
+    iwpriv $(cat /sys/class/net/$1/parent) dcs_enable 0
+fi

@@ -70,12 +70,14 @@ static size_t                       g_iw_scan_results_size;
 static unsigned int                 res_len;
 #include "osync_nl80211_11ax.h"
 
-#define IEEE80211_GET_MODE_MASK    0x03
+#define IEEE80211_GET_MODE_MASK         0x03
+#define IEEE80211_6G_OP_EL_PRES_MASK    0x02
 #define IEEE80211_ELEMID_HTINFO    61
-#define IEEE80211_ELEMID_VHTCAPA   191
+#define IEEE80211_ELEMID_VHTCAP    191
 #define IEEE80211_ELEMID_VHTOP     192
-#define IEEE80211_ELEMID_HECAPA    255
-#define IEEE80211_EXT_ELEID        35     /* HE Capabilities ext tag number */
+#define IEEE80211_ELEMID_EXTN      255
+#define IEEE80211_ELEMID_EXT_HEOP  36
+
 
 #define get_chanwidth_from_htmode(_offset) \
         (_offset == 0) ? RADIO_CHAN_WIDTH_20MHZ : \
@@ -87,10 +89,20 @@ static unsigned int                 res_len;
         (_opcw == 1) ? RADIO_CHAN_WIDTH_80MHZ : \
         (_opcw == 2) ? RADIO_CHAN_WIDTH_160MHZ : RADIO_CHAN_WIDTH_80_PLUS_80MHZ
 
-#define get_chanwidth_from_hemode(_cwset, _opcw, _offset) \
-        (_cwset == 0) ? get_chanwidth_from_vhtmode(_opcw, _offset) : \
-        (_cwset == 1) ? RADIO_CHAN_WIDTH_160MHZ : \
-        (_cwset == 3) ? RADIO_CHAN_WIDTH_80_PLUS_80MHZ : RADIO_CHAN_WIDTH_20MHZ
+#define get_chanwidth_from_hemode(he_cw_set, he_ccfs_1) \
+        (he_cw_set == 0) ? RADIO_CHAN_WIDTH_20MHZ : \
+        (he_cw_set == 1) ? RADIO_CHAN_WIDTH_40MHZ : \
+        (he_cw_set == 2) ? RADIO_CHAN_WIDTH_80MHZ : \
+        (he_cw_set == 3) ? \
+          ((he_ccfs_1 == 15  || \
+            he_ccfs_1 == 47  || \
+            he_ccfs_1 == 79  || \
+            he_ccfs_1 == 111 || \
+            he_ccfs_1 == 143 || \
+            he_ccfs_1 == 175 || \
+            he_ccfs_1 == 207) ? RADIO_CHAN_WIDTH_160MHZ : \
+                                RADIO_CHAN_WIDTH_80_PLUS_80MHZ) \
+        : RADIO_CHAN_WIDTH_20MHZ
 
 #define IS_REVSIG_VHT160_CHWIDTH(vht_op_chwidth, \
                                  vht_op_ch_freq_seg1, \
@@ -378,8 +390,10 @@ util_get_chanwidth(const uint8_t *vp, int ielen)
     bool       is_ht_found        = false;
     bool       is_vht_found       = false;
     bool       is_he_found        = false;
+    bool       is_6g_op_ie_found  = false;
     uint8_t    ht_ccfs2_1         = 0;
     uint8_t    ht_ccfs2_2         = 0;
+    uint8_t    he_ccfs_1          = 0;
     uint8_t    sec_chan_offset    = 0;
     uint8_t    vht_op_cw          = 0;
     uint8_t    he_cw_set          = 0;
@@ -387,31 +401,41 @@ util_get_chanwidth(const uint8_t *vp, int ielen)
     uint32_t   vhtcap_info        = 0;
     uint8_t    vhtop_ch_freq_seg1 = 0;
     uint8_t    vhtop_ch_freq_seg2 = 0;
+    const uint8_t const *vp_max = vp + ielen - 1;
 
     /* Parsing each element id from the ie data to store necessary data for
        calculating current channel width of neighbor AP */
     while (ielen > 0) {
         switch (vp[0]) {
             case IEEE80211_ELEMID_HTINFO:
+                if (vp + 5 > vp_max) break;
                 is_ht_found = true;
                 sec_chan_offset  = vp[3] & IEEE80211_GET_MODE_MASK;
                 ht_ccfs2_1 = (vp[4] >> 5) & ((1 << 3) - 1);
                 ht_ccfs2_2 = vp[5] & ((1 << 5) - 1);
                 break;
-            case IEEE80211_ELEMID_VHTCAPA:
+            case IEEE80211_ELEMID_VHTCAP:
+                if (vp + 5 > vp_max) break;
                 is_vht_found = true;
                 vhtcap_info = VHTCAP_INFO(vp);
                 break;
             case IEEE80211_ELEMID_VHTOP:
+                if (vp + 4 > vp_max) break;
                 is_vht_found = true;
                 vht_op_cw = vp[2];
                 vhtop_ch_freq_seg1 = vp[3];
                 vhtop_ch_freq_seg2 = vp[4];
                 break;
-            case IEEE80211_ELEMID_HECAPA:
-                if (vp[2] == IEEE80211_EXT_ELEID) {
+            case IEEE80211_ELEMID_EXTN:
+                if (vp + 5 > vp_max) break;
+                if (vp[2] == IEEE80211_ELEMID_EXT_HEOP) {
                     is_he_found = true;
-                    he_cw_set = (vp[9] >> 3) & IEEE80211_GET_MODE_MASK;
+                    if (vp[5] & IEEE80211_6G_OP_EL_PRES_MASK) {
+                        if (vp + 12 > vp_max) break;
+                        is_6g_op_ie_found  = true;
+                        he_cw_set = vp[10] & IEEE80211_GET_MODE_MASK;
+                        he_ccfs_1 = vp[12];
+                    }
                 }
                 break;
             default:
@@ -429,7 +453,9 @@ util_get_chanwidth(const uint8_t *vp, int ielen)
         " VHT Capabilities info - 0x%8X"
         " VHT operational chanwidth - %u"
         " CCS0 - %u CCS1 - %u"
-        " HE chanwidth set - %u}",
+        " HE 6G Operation Information present - %s"
+        " HE 6G Information Channel Width - %u"
+        " HE 6G Information CCFS 1 - %u}",
         GET_MODE(is_he_found, is_vht_found, is_ht_found),
         sec_chan_offset,
         ht_ccfs2_1,
@@ -438,14 +464,14 @@ util_get_chanwidth(const uint8_t *vp, int ielen)
         vht_op_cw,
         vhtop_ch_freq_seg1,
         vhtop_ch_freq_seg2,
-        he_cw_set);
+        is_6g_op_ie_found ? "true" : "false",
+        he_cw_set,
+        he_ccfs_1);
 
     /* If neighbor AP is not running on any of HT/VHT/HE modes then
        the default channel width is 20 MHz */
-    if (is_he_found) {
-        chanwidth = get_chanwidth_from_hemode(he_cw_set,
-                                              vht_op_cw,
-                                              sec_chan_offset);
+    if (is_he_found && is_6g_op_ie_found) {
+        chanwidth = get_chanwidth_from_hemode(he_cw_set, he_ccfs_1);
     } else if (is_vht_found) {
         chanwidth = get_chanwidth_from_vhtmode(vht_op_cw, sec_chan_offset);
     } else if (is_ht_found) {
@@ -512,16 +538,25 @@ ioctl_status_t ioctl80211_scan_results_parse(
              util_get_chanwidth(ssid + sr->isr_ssid_len, sr->isr_ie_len);
 
     LOG(TRACE,
-        "Parsed %s neighbor BSSID %s {chan='%u' from freq='%u'"
-        " signal='%d'"
-        " ssid='%s'"
-        " chanwidth='%d'}",
+        "Parsed %s BSSID %s",
         radio_get_name_from_type(radio_type),
-        neighbor_record->bssid,
+        neighbor_record->bssid);
+    LOG(TRACE,
+        "Parsed %s SSID %s",
+        radio_get_name_from_type(radio_type),
+        neighbor_record->ssid);
+    LOG(TRACE,
+        "Parsed %s chan %u from freq %u",
+        radio_get_name_from_type(radio_type),
         neighbor_record->chan,
-        sr->isr_freq,
-        neighbor_record->sig,
-        neighbor_record->ssid,
+        sr->isr_freq);
+    LOG(TRACE,
+        "Parsed %s signal %d",
+        radio_get_name_from_type(radio_type),
+        neighbor_record->sig);
+    LOG(TRACE,
+        "Parsed %s chanwidth %d",
+        radio_get_name_from_type(radio_type),
         neighbor_record->chanwidth);
 
     return IOCTL_STATUS_OK;

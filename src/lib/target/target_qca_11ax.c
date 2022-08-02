@@ -549,15 +549,6 @@ static void util_kv_radar_set(const char *phy, const unsigned char chan)
  * Networking helpers
  *****************************************************************************/
 
-static bool
-util_net_ifname_exists(const char *ifname, int *v)
-{
-    char path[128];
-    snprintf(path, sizeof(path), "/sys/class/net/%s/wireless", ifname);
-    *v = 0 == access(path, X_OK);
-    return true;
-}
-
 static int
 util_net_get_macaddr_str(const char *ifname, char *buf, int len)
 {
@@ -659,15 +650,15 @@ util_wifi_transform_macaddr(const char *phy, char *mac, int idx)
         return;
 
     if (access(F("/proc/%s/dump_mbss_ie", phy), F_OK) == 0)
-        mbss_cache = R(F("/proc/%s/dump_mbss_ie", phy));
+        mbss_cache = R(F("/proc/%s/dump_mbss_ie", phy)) ?: "";
     else
-        mbss_cache = R(F("/proc/%s/dump_mbss_cache", phy));
+        mbss_cache = R(F("/proc/%s/dump_mbss_cache", phy)) ?: "";
 
     if (!strstr(mbss_cache, "not enabled!")) {
         LOGI("%s: MBSS IE feature is enabled", phy);
         ic_config = R(F("/proc/%s/ic_config", phy));
         while ((line = strsep(&ic_config, "\r\n")) != NULL)
-            if (strstr(line, "ic_mbss.max_bssid:")) {
+            if (strstr(line, "max_bssid:")) {
                 ic_config = strpbrk(line, ":");
                 ic_config += 1; /* skip the : */
                 max_bssid = 1 << atoi(ic_config);
@@ -2263,29 +2254,17 @@ util_csa_is_sec_offset_supported(const char *phy,
                               int channel,
                               const char *offset_str)
 {
-    char *buf;
-    char buffer[4096];
-    char file[4096];
-    char *line, *chan;
-
-    snprintf(buffer, sizeof(buffer), CONFIG_INSTALL_PREFIX"/bin/chan_width.sh %s", phy);
-    system(buffer);
-    snprintf(file, sizeof(file), "/tmp/chan_width_1.txt");
-    buf = strexa("cat", file);
-
-    while ((line = strsep(&buf, "\n"))) {
-        if (!(chan = strsep(&line, " "))) {
-            continue;
-        }
-        if (!(atoi(chan) == channel)) {
-            continue;
-        }
-        if (line && strstr(line, offset_str))
-            return 1;
-        else
-            return 0;
-    }
-    return 0;
+    return 0 == runcmd("grep -l %s /sys/class/net/*/parent 2>/dev/null"
+                       " | sed 1q 2>/dev/null"
+                       " | xargs -n1 dirname 2>/dev/null"
+                       " | xargs -n1 basename 2>/dev/null"
+                       " | xargs -n1 sh -c 'wlanconfig $0 list freq'"
+                       " | sed 's/Channel/\\n/g'"
+                       " | awk '$1 == %d && / %s/'"
+                       " | grep -q .",
+                       phy,
+                       channel,
+                       offset_str);
 }
 
 static int
@@ -2772,6 +2751,7 @@ util_nl_parse(const void *buf, unsigned int len)
     int attrlen;
     int iwelen;
     bool created;
+    bool updated;
     bool deleted;
 
     util_nl_each_msg(buf, hdr, len)
@@ -2811,8 +2791,9 @@ util_nl_parse(const void *buf, unsigned int len)
 
             ifm = NLMSG_DATA(hdr);
             created = (hdr->nlmsg_type == RTM_NEWLINK) && (ifm->ifi_change == ~0U);
+            updated = (hdr->nlmsg_type == RTM_NEWLINK) && (ifm->ifi_change & IFF_UP);
             deleted = (hdr->nlmsg_type == RTM_DELLINK);
-            if ((created || deleted) &&
+            if ((created || updated || deleted) &&
                 (access(F("/sys/class/net/%s/parent", ifname), R_OK) == 0))
                 util_cb_delayed_update(UTIL_CB_VIF, ifname);
             if (deleted && util_wifi_is_ap_vlan(ifname))
@@ -2829,7 +2810,9 @@ util_nl_listen_cb(struct ev_loop *loop,
 {
     char buf[32768];
     int len;
+    int max = 256;
 
+again:
     len = recvfrom(util_nl_fd, buf, sizeof(buf), MSG_DONTWAIT, NULL, 0);
     if (len < 0) {
         if (errno == EAGAIN)
@@ -2850,6 +2833,10 @@ util_nl_listen_cb(struct ev_loop *loop,
 
     LOGT("%s: received %d bytes", __func__, len);
     util_nl_parse(buf, len);
+
+    max--;
+    if (max > 0)
+        goto again;
 }
 
 static int
@@ -2953,13 +2940,13 @@ util_policy_get_disable_coext(const char *vif)
 static bool
 util_policy_get_csa_interop(const char *vif)
 {
-    return strstr(vif, "home-ap-");
+    return strstr(vif, "home-ap-") != NULL || strstr(vif, "fh-") != NULL;
 }
 
 static const char *
 util_policy_get_min_hw_mode(const char *vif)
 {
-    if (!strcmp(vif, "home-ap-24"))
+    if (!strcmp(vif, "home-ap-24") || !strcmp(vif, "fh-24"))
         return "11b";
     else
         return "11g"; /* works for both 2.4GHz and 5GHz */
@@ -3726,6 +3713,9 @@ target_radio_config_set2(const struct schema_Wifi_Radio_Config *rconf,
     if (util_qca_set_int(phy, "dl_modoff", RTT_MODULE_ID))
         LOGW("Failed to disable debug logs for module\n");
 
+    if (util_qca_set_int(phy, "samessid_disable", 1))
+        LOGW("Failed to disable repeater samessid feature support\n");
+
     util_thermal_sys_recalc_tx_chainmask();
     util_cb_phy_state_update(phy);
 report:
@@ -4083,7 +4073,8 @@ target_vif_config_set2(const struct schema_Wifi_VIF_Config *vconf,
     int o;
     int err;
     char buf[128];
-    const char *xml_path = qca_get_xml_path(phy);
+    const char *phy_xml_path = qca_get_xml_path(phy);
+    const char *vif_xml_path = qca_get_xml_path(vif);
 
     if (!rconf ||
         changed->enabled ||
@@ -4118,14 +4109,14 @@ target_vif_config_set2(const struct schema_Wifi_VIF_Config *vconf,
 
         if (!strcmp("ap", vconf->mode)) {
             LOGI("%s: setting channel %d", vif, rconf->channel);
-            if (E("cfg80211tool.1", "-i", vif, "-f", xml_path, "-h", "none", "--START_CMD", "--channel", "--value0", F("%d", rconf->channel), "--value1", F("%d", util_get_radio_band(rconf->freq_band)), "--RESPONSE", "--channel", "--END_CMD"))
+            if (E("cfg80211tool.1", "-i", vif, "-f", vif_xml_path, "-h", "none", "--START_CMD", "--channel", "--value0", F("%d", rconf->channel), "--value1", F("%d", util_get_radio_band(rconf->freq_band)), "--RESPONSE", "--channel", "--END_CMD"))
                 LOGW("%s: failed to set channel %d: %d (%s)",
                      vif, rconf->channel, errno, strerror(errno));
 
             if (strstr(rconf->freq_band, "5G") && util_qca_get_int(vif, "get_dfsdomain", &v) && v == 0) {
                 LOGI("%s: we need to restore dfs domain", phy);
 #ifdef OPENSYNC_NL_SUPPORT
-                WARN_ON(util_exec_simple("cfg80211tool.1", "-i", phy, "-f", xml_path, "-h", "none", "--START_CMD", "--setCountry",
+                WARN_ON(util_exec_simple("cfg80211tool.1", "-i", phy, "-f", phy_xml_path, "-h", "none", "--START_CMD", "--setCountry",
                                         "--RESPONSE", "--setCountry", "--END_CMD"));
 #else
                 WARN_ON(util_exec_simple("iwpriv", phy, "setCountry"));
@@ -4160,12 +4151,10 @@ target_vif_config_set2(const struct schema_Wifi_VIF_Config *vconf,
                                  "get_cwmenable",
                                  "cwmenable",
                                  util_policy_get_cwm_enable(phy));
-        if (util_iwconfig_any_phy_vif_type(phy, "sta", A(32)) == NULL) {
-            util_qca_set_int_lazy(vif,
+        util_qca_set_int_lazy(vif,
                                  "g_disablecoext",
                                  "disablecoext",
                                  util_policy_get_disable_coext(vif));
-        }
 
         /*
          * The `iwpriv' command has been replaced with `wifitool'.
@@ -4304,6 +4293,7 @@ bool target_vif_state_get(char *vif, struct schema_Wifi_VIF_State *vstate)
     char *p;
     int err;
     int v;
+    bool isup;
 
     memset(vstate, 0, sizeof(*vstate));
 
@@ -4315,8 +4305,11 @@ bool target_vif_state_get(char *vif, struct schema_Wifi_VIF_State *vstate)
     STRSCPY(vstate->if_name, vif);
     vstate->if_name_exists = true;
 
-    if ((vstate->enabled_exists = util_net_ifname_exists(vif, &v)))
-        vstate->enabled = !!v;
+    vstate->enabled_exists = true;
+    if (os_nif_is_up(vif, &isup))
+    {
+        SCHEMA_SET_INT(vstate->enabled, isup);
+    }
 
     util_kv_set(F("%s.last_channel", vif), NULL);
 
@@ -4383,8 +4376,7 @@ bool target_vif_state_get(char *vif, struct schema_Wifi_VIF_State *vstate)
 
     if ((p = util_qca_getmac(vif, A(4096)))) {
         for_each_iwpriv_mac2(mac, p) {
-            STRSCPY(vstate->mac_list[vstate->mac_list_len], mac);
-            vstate->mac_list_len++;
+            SCHEMA_VAL_APPEND(vstate->mac_list, mac);
         }
     }
 
@@ -4396,6 +4388,17 @@ bool target_vif_state_get(char *vif, struct schema_Wifi_VIF_State *vstate)
     if (wpas) wpas_bss_get(wpas, vstate);
 
     return true;
+}
+
+bool target_vif_sta_remove(const char *ifname, const uint8_t *mac_addr)
+{
+    char mac_str[C_MACADDR_LEN] = {0};
+    if (!os_nif_macaddr_to_str((os_macaddr_t *)mac_addr, (char *)mac_str, PRI_os_macaddr_lower_t))
+    {
+        LOGE("%s: Failed to convert mac addres to str", __func__);
+        return false;
+    }
+    return hostapd_remove_station(HOSTAPD_CONTROL_PATH_DEFAULT, ifname, mac_str);
 }
 
 /******************************************************************************

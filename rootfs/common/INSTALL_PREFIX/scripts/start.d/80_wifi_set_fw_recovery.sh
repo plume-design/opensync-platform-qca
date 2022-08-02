@@ -25,30 +25,15 @@
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
-NOL_PATH="/tmp"
-IFACES=$(ls /sys/class/net/ | grep ^wifi)
+# Enable fw_recovery; this prevents an immediate reboot after a Wifi firmware
+# crash. The crash will be handled by OpenSync and it will result in a reboot
+# in the end, but this gives us time to collect logs and update the reboot
+# status
 
-restore()
-{
-    for IFACE in $IFACES
-    do
-        FILE=$NOL_PATH/nol_$IFACE.bin
-        test -f $FILE || continue
-        test -s $FILE || continue
-        radartool -i $IFACE setnol $FILE
-    done
-}
+for wifidev in /sys/class/net/wifi?
+do
+    wifi=$(basename $wifidev)
+    iwpriv $wifi 2>&1 | grep -q set_fw_recovery || continue
+    iwpriv $wifi set_fw_recovery 1
+done
 
-save()
-{
-    for IFACE in $IFACES
-    do
-        if grep -q . /sys/class/net/$IFACE/5g_maxchwidth
-        then
-            FILE=$NOL_PATH/nol_$IFACE.bin
-            radartool -i $IFACE getnol $FILE
-        fi
-    done
-}
-
-"$@"

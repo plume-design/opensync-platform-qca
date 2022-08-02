@@ -412,10 +412,10 @@ check_sta_send_csa_message()
     return 0
 }
 
-####################### Qualcomm(QCA) PLATFORM OVERRIDE SECTION - STOP #########################
+####################### Qualcomm (QCA) PLATFORM OVERRIDE SECTION - STOP #########################
 
 
-####################### Qualcomm(QCA) UPGRADE OVERRIDE SECTION - START #########################
+####################### Qualcomm (QCA) UPGRADE OVERRIDE SECTION - START #########################
 
 ###############################################################################
 # DESCRIPTION:
@@ -505,4 +505,4 @@ get_um_code()
     esac
 }
 
-####################### Qualcomm(QCA) UPGRADE OVERRIDE SECTION - STOP ##########################
+####################### Qualcomm (QCA) UPGRADE OVERRIDE SECTION - STOP ##########################

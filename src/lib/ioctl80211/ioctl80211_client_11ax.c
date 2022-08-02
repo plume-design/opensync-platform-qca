@@ -118,18 +118,10 @@ uint8_t bsal_clients[IOCTL80211_CLIENTS_SIZE];
 #endif
 typedef struct iw_statistics    iwstats;
 
-typedef struct
-{
-    struct ieee80211req_sta_info        sta_info;
-    int32_t                             padding[3]; /* Apparently driver adds 12 Bytes!!!*/
-} ieee80211req_sta_info_t;
-
 #define LIST_STATION_CFG_ALLOC_SIZE 3*1024
 #define	QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION 74
 
 extern struct   socket_context sock_ctx;
-uint8_t         ieee80211_clients[IOCTL80211_CLIENTS_SIZE];
-uint16_t        g_cli_len;
 
 #ifndef min
 #define min(x, y) ((x) < (y) ? (x) : (y))
@@ -250,8 +242,11 @@ static void dp_peer_rx_rate_stats(uint8_t *peer_mac,
 
     for (i = 0; i < WLANSTATS_CACHE_SIZE; i++)
     {
-        if ((int)(rx_stats->rix) != INVALID_CACHE_IDX)
-        {
+#if defined(CONFIG_PLATFORM_QCA_QSDK110) && !defined(CONFIG_PLATFORM_QCA_QSDK120)
+        if ((int)(rx_stats->rix) != INVALID_CACHE_IDX) {
+#else
+        if ((int)(rx_stats->ratecode) != INVALID_CACHE_IDX) {
+#endif
             g_peer_rx_phyrate[index].sum += rx_stats->rate * rx_stats->num_ppdus;
             g_peer_rx_phyrate[index].cnt += rx_stats->num_ppdus;
             g_peer_rx_phyrate[index].mpdus += rx_stats->num_mpdus;
@@ -287,8 +282,11 @@ static void dp_peer_tx_rate_stats(uint8_t *peer_mac,
 
     for (i = 0; i < WLANSTATS_CACHE_SIZE; i++)
     {
-        if ((int)(tx_stats->rix) != INVALID_CACHE_IDX)
-        {
+#if defined(CONFIG_PLATFORM_QCA_QSDK110) && !defined(CONFIG_PLATFORM_QCA_QSDK120)
+        if ((int)(tx_stats->rix) != INVALID_CACHE_IDX) {
+#else
+        if ((int)(tx_stats->ratecode) != INVALID_CACHE_IDX) {
+#endif
             g_peer_tx_phyrate[index].sum += tx_stats->rate * tx_stats->num_ppdus;
             g_peer_tx_phyrate[index].cnt += tx_stats->num_ppdus;
             g_peer_tx_phyrate[index].success += tx_stats->mpdu_success;
@@ -519,15 +517,14 @@ ioctl_status_t ioctl80211_clients_stats_rx_fetch(
         char                           *phyName,
         ioctl80211_client_record_t     *client_entry)
 {
-    int index;
 
 #ifdef OPENSYNC_NL_SUPPORT
-    index = get_cli_mac_index(client_entry->info.mac, PEER_RX_STATS);
-    if (!g_peer_rx_phyrate[index].flags)
-        return IOCTL_STATUS_ERROR;
-    client_entry->stats_cookie = g_peer_rx_phyrate[index].cookie;
-#else
+    int index;
 
+    index = get_cli_mac_index(client_entry->info.mac, PEER_RX_STATS);
+    if (g_peer_rx_phyrate[index].flags)
+        client_entry->stats_cookie = g_peer_rx_phyrate[index].cookie;
+#else
     int32_t                             rc;
     struct iwreq                        request;
     struct ps_uapi_ioctl               *ioctl_stats = &client_entry->stats_rx;
@@ -591,7 +588,9 @@ ioctl80211_client_stats_avg_tx_calc(
 {
 #ifdef DP_PEER_AVG_RATE_STATS_SUPPORTED
     struct avg_phyrate             *avg;
+#if 0
     int32_t                         snr;
+#endif
     double                          mbps;
     double                          num;
     int                             index;
@@ -634,6 +633,10 @@ ioctl80211_client_stats_avg_tx_calc(
                 MAC_ADDRESS_PRINT(data_new->info.mac));
         }
 
+/* Sometimes SU rssi value is invalid,
+ * disable it until find solution in the driver.
+ */
+#if 0
         /* Apparently the SU ack rssi is the most reliable
          * one. Others are all over the place.
          */
@@ -649,6 +652,7 @@ ioctl80211_client_stats_avg_tx_calc(
 
             client_record->stats.rssi = snr;
         }
+#endif
 
         memset(avg->stats.tx, 0, sizeof(avg->stats.tx));
     }
@@ -1160,222 +1164,44 @@ ioctl_status_t ioctl80211_clients_stats_fetch(
     return IOCTL_STATUS_OK;
 }
 
-void stainfo_cb(struct cfg80211_data *buffer)
-{
-    uint32_t    len = buffer->length;
+struct stainfo_ctx {
+    struct cfg80211_data data;
+    void *buf;
+    size_t size;
+};
 
-    if (len < sizeof(struct ieee80211req_sta_info)) {
+static void stainfo_cb(struct cfg80211_data *data)
+{
+    struct stainfo_ctx *ctx = container_of(data, struct stainfo_ctx, data);
+    const void *src = data->data;
+    const size_t src_size = data->length;
+    const size_t dst_offset = ctx->size;
+
+    LOGT("%s: Clients buffer dst_offset = %zu src_size = %zu",
+         __func__, dst_offset, src_size);
+
+    if (src_size == 0)
+       return;
+
+    if (WARN_ON(src_size < sizeof(struct ieee80211req_sta_info)))
         return;
-    }
 
-    memcpy((ieee80211_clients + g_cli_len), buffer->data, len);
-    g_cli_len += len;
-}
+    if (WARN_ON(src == NULL))
+        return;
 
-static
-ioctl_status_t ioctl80211_clients_list_fetch(
-        radio_entry_t              *radio_cfg,
-        char                       *ifName,
-        radio_essid_t               essid,
-        ds_dlist_t                 *client_list)
-{
-    ioctl_status_t                  status;
-    int32_t                         rc;
-    uint32_t                        length = 0;
-    ioctl80211_client_record_t     *client_entry = NULL;
-    radio_type_t                    radio_type;
+    /* Expected buffer allocated in the driver */
+    if (WARN_ON(src_size > LIST_STATION_CFG_ALLOC_SIZE))
+        return;
 
-    ssize_t                         ieee80211_client_offset = 0;
-    struct ieee80211req_sta_info   *ieee80211_client = NULL;
+    LOGT("%s: ctx addr: %p ctx buf addr: %p", __func__, ctx, ctx->buf);
 
-    radio_type = radio_cfg->type;
-    if (NULL == client_list)
-    {
-        return IOCTL_STATUS_ERROR;
-    }
-    memset (ieee80211_clients, 0, sizeof(ieee80211_clients));
-    g_cli_len = 0;
-
-#if OPENSYNC_NL_SUPPORT
-    struct cfg80211_data            buffer;
-    uint8_t                        *buf;
-
-    buf = MALLOC(LIST_STATION_CFG_ALLOC_SIZE);
-
-    buffer.data         = buf;
-    buffer.length       = LIST_STATION_CFG_ALLOC_SIZE;
-    buffer.callback     = &stainfo_cb;
-    buffer.parse_data   = 0;
-    rc = wifi_cfg80211_send_generic_command(&(sock_ctx.cfg80211_ctxt),
-            QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION,
-            QCA_NL80211_VENDOR_SUBCMD_LIST_STA, ifName,
-            (char *)&buffer, buffer.length);
-    if (0 > rc) {
-        FREE(buf);
-        LOG(ERR,
-            "Parsing %s %s client stats (Failed to get info '%s')",
-            radio_get_name_from_type(radio_type),
-            ifName,
-            strerror(errno));
-        return IOCTL_STATUS_ERROR;
-    }
-
-    length = buffer.length;
-    LOGD("%s: length - %u\n", __func__, length);
-    FREE(buf);
-#else
-    struct iwreq                    request;
-
-    memset (&request, 0, sizeof(request));
-    request.u.data.pointer = ieee80211_clients;
-    request.u.data.length = sizeof(ieee80211_clients);
-    rc = 
-        ioctl80211_request_send(
-                ioctl80211_fd_get(),
-                ifName,
-                IEEE80211_IOCTL_STA_INFO,
-                &request);
-    if (0 > rc)
-    {
-        LOG(ERR,
-            "Parsing %s %s client stats (Failed to get info '%s')",
-            radio_get_name_from_type(radio_type),
-            ifName,
-            strerror(errno));
-        return IOCTL_STATUS_ERROR;
-    }
-
-    length = request.u.data.length;
-    LOGD("%s: length - %u\n", __func__, length);
-#endif
-
-    for (   ieee80211_client_offset = 0;
-            (ssize_t)length - ieee80211_client_offset >= (int)sizeof(*ieee80211_client);)
-    {
-        ieee80211_client =
-            (struct ieee80211req_sta_info *)
-            (ieee80211_clients + ieee80211_client_offset);
-
-        client_entry = 
-             ioctl80211_client_record_alloc();
-        if (NULL == client_entry)
-        {
-            LOG(ERR,
-                "Parsing %s interface client stats "
-                "(Failed to allocate memory)",
-                radio_get_name_from_type(radio_type));
-            return IOCTL_STATUS_ERROR;
-        }
-
-        client_entry->is_client = true;
-
-        client_entry->info.type = radio_type;
-
-        memcpy (client_entry->info.mac,
-                ieee80211_client->isi_macaddr,
-                sizeof(client_entry->info.mac));
-        LOG(TRACE,
-            "Parsed %s client MAC "MAC_ADDRESS_FORMAT,
-            radio_get_name_from_type(radio_type),
-            MAC_ADDRESS_PRINT(client_entry->info.mac));
-
-        /* Driver might return -1 */
-        client_entry->stats.client.rssi = 0;
-        if (ieee80211_client->isi_rssi > 0)
-        {
-            client_entry->stats.client.rssi = ieee80211_client->isi_rssi;
-        }
-
-        LOG(TRACE,
-            "Parsed %s client RSSI %d",
-            radio_get_name_from_type(radio_type),
-            client_entry->stats.client.rssi);
-
-        STRSCPY(client_entry->info.ifname,
-                ifName);
-        LOG(TRACE,
-            "Parsed %s client IFNAME %s",
-            radio_get_name_from_type(radio_type),
-            client_entry->info.ifname);
-
-        memcpy (client_entry->info.essid,
-                essid,
-                sizeof(client_entry->info.essid));
-        LOG(TRACE,
-            "Parsed %s client ESSID %s",
-            radio_get_name_from_type(radio_type),
-            client_entry->info.essid);
-
-        client_entry->stats.client.rate_tx = 
-            ieee80211_client->isi_txratekbps;
-        LOG(TRACE,
-            "Parsed %s client txrate %u",
-            radio_get_name_from_type(radio_type),
-            client_entry->stats.client.rate_tx);
-
-        client_entry->stats.client.rate_rx =
-            ieee80211_client->isi_rxratekbps;
-        LOG(TRACE,
-            "Parsed %s client rxrate %u",
-            radio_get_name_from_type(radio_type),
-            client_entry->stats.client.rate_rx);
-
-        client_entry->uapsd =
-            ieee80211_client->isi_uapsd;
-        LOG(TRACE,
-            "Parsed %s client uapsd %u",
-            radio_get_name_from_type(radio_type),
-            client_entry->uapsd);
-
-        status = 
-            ioctl80211_clients_stats_fetch (
-                    radio_type,
-                    ifName,
-                    client_entry);
-        if (IOCTL_STATUS_OK != status)
-        {
-            goto error;
-        }
-
-        status = 
-            ioctl80211_clients_stats_rx_fetch (
-                    radio_type,
-                    radio_cfg->phy_name,
-                    client_entry);
-        if (IOCTL_STATUS_OK != status)
-        {
-            goto error;
-        }
-
-        status = 
-            ioctl80211_clients_stats_tx_fetch (
-                    radio_type,
-                    radio_cfg->phy_name,
-                    client_entry);
-        if (IOCTL_STATUS_OK != status)
-        {
-            goto error;
-        }
-
-        ds_dlist_insert_tail(client_list, client_entry);
-
-        /* Move to the next client */
-        ieee80211_client_offset += ieee80211_client->isi_len;
-        if (!ieee80211_client->isi_len)
-        {
-            return IOCTL_STATUS_OK;
-        }
-        continue;
-
-error:
-        ioctl80211_client_record_free(client_entry);
-
-        /* Move to the next client */
-        ieee80211_client_offset += ieee80211_client->isi_len;
-        return IOCTL_STATUS_ERROR;
-    }
-
-    return IOCTL_STATUS_OK;
+    ctx->size += src_size;
+    ctx->buf = REALLOC(ctx->buf, ctx->size);
+    memcpy(ctx->buf + dst_offset, src, src_size);
+    /* Data is managed by NL helper,
+     * needs to set length 0 to force always use new buffer
+     */
+    data->length = 0;
 }
 
 static
@@ -1395,7 +1221,6 @@ ioctl_status_t ioctl80211_peer_stats_fetch(
     /* On one radio there could be multiple wireless interfaces - VAP's.
        The VAP stats seems to hold the values that we are interested in
        therefore sum all active VAP interfaces and get RADIO stats
-
        /proc/net/dev are network stats - essid stats?
      */
     memset (&vap_stats, 0, sizeof(vap_stats));
@@ -1479,9 +1304,7 @@ ioctl_status_t ioctl80211_peer_stats_fetch(
         stats_entry->errors_tx);
 
     /* TODO: Needs verification.
-
        Retry counter was taken from assumption from the following calculation:
-
        all queued packets were packets actually sent and not ok - retried!!
        packet_queued = tx_data_packets + ns_is_tx_not_ok
      */
@@ -1501,6 +1324,7 @@ ioctl_status_t ioctl80211_peer_stats_fetch(
 
     return IOCTL_STATUS_OK;
 }
+
 static
 ioctl_status_t ioctl80211_peer_list_fetch(
         radio_entry_t              *radio_cfg,
@@ -1548,56 +1372,57 @@ ioctl_status_t ioctl80211_peer_list_fetch(
     int       t;
 
     f = fopen(PROC_NET_WIRELESS, "r");
-    if(f==NULL)
+    if (f==NULL)
         return -1;
 
     stats = (iwstats*)MALLOC(sizeof(iwstats));
-    while(fgets(buf,255,f))
+    while (fgets(buf, 255, f))
     {
-            bp=buf;
-            while(*bp&&isspace(*bp))
-                    bp++;
-            if(strncmp(bp,radio_cfg->if_name,strlen(radio_cfg->if_name))==0 && bp[strlen(radio_cfg->if_name)]==':')
-            {
-                    bp=strchr(bp,':');
-                    bp++;
+        bp=buf;
+        while (*bp&&isspace(*bp))
+            bp++;
+        if (strncmp(bp, radio_cfg->if_name, strlen(radio_cfg->if_name))==0 && bp[strlen(radio_cfg->if_name)]==':')
+        {
+            bp=strchr(bp, ':');
+            bp++;
 
-                    bp = strtok(bp, " ");
-                    sscanf(bp, "%X", &t);
-                    stats->status = (unsigned short) t;
-                    bp = strtok(NULL, " ");
-                    if(strchr(bp,'.') != NULL)
-                            stats->qual.updated |= 1;
-                    sscanf(bp, "%d", &t);
-                    stats->qual.qual = (unsigned char) t;
-                    bp = strtok(NULL, " ");
-                    if(strchr(bp,'.') != NULL)
-                            stats->qual.updated |= 2;
-                    sscanf(bp, "%d", &t);
-                    stats->qual.level = (unsigned char) t;
+            bp = strtok(bp, " ");
+            sscanf(bp, "%X", &t);
+            stats->status = (unsigned short) t;
+            bp = strtok(NULL, " ");
+            if (strchr(bp, '.') != NULL)
+                stats->qual.updated |= 1;
+            sscanf(bp, "%d", &t);
+            stats->qual.qual = (unsigned char) t;
+            bp = strtok(NULL, " ");
+            if (strchr(bp, '.') != NULL)
+                stats->qual.updated |= 2;
+            sscanf(bp, "%d", &t);
+            stats->qual.level = (unsigned char) t;
 
-                    bp = strtok(NULL, " ");
-                    if(strchr(bp,'.') != NULL)
-                            stats->qual.updated += 4;
-                    sscanf(bp, "%d", &t);
-                    stats->qual.noise = (unsigned char) t;
+            bp = strtok(NULL, " ");
+            if (strchr(bp, '.') != NULL)
+                stats->qual.updated += 4;
+            sscanf(bp, "%d", &t);
+            stats->qual.noise = (unsigned char) t;
 
-                    bp = strtok(NULL, " ");
-                    sscanf(bp, "%d", &stats->discard.nwid);
-                    bp = strtok(NULL, " ");
-                    sscanf(bp, "%d", &stats->discard.code);
-                    bp = strtok(NULL, " ");
-                    sscanf(bp, "%d", &stats->discard.misc);
-            }
+            bp = strtok(NULL, " ");
+            sscanf(bp, "%d", &stats->discard.nwid);
+            bp = strtok(NULL, " ");
+            sscanf(bp, "%d", &stats->discard.code);
+            bp = strtok(NULL, " ");
+            sscanf(bp, "%d", &stats->discard.misc);
+        }
     }
     fclose(f);
     sig8  = stats->qual.level;
     sig8 -= stats->qual.noise;
+    free((void*)stats);
 #else
     struct  iw_statistics       request_stats;
     struct iwreq                request;
     int32_t                     rc;
-    memset (&request_stats, 0, sizeof(request_stats));
+    memset(&request_stats, 0, sizeof(request_stats));
     request.u.data.pointer = (caddr_t) &request_stats;
     request.u.data.length = sizeof(request_stats);
     request.u.data.flags = 1;     /* Clear updated flag */
@@ -1684,6 +1509,246 @@ error:
     return IOCTL_STATUS_ERROR;
 }
 
+static
+void util_clients_buf_free(void *buf)
+{
+#if OPENSYNC_NL_SUPPORT
+    FREE(buf);
+#endif
+}
+
+static
+ioctl_status_t ioctl80211_clients_list_fetch(
+        radio_entry_t              *radio_cfg,
+        char                       *ifName,
+        radio_essid_t               essid,
+        ds_dlist_t                 *client_list,
+        mac_address_t               mac,
+        bool                        is_sta)
+{
+    ioctl_status_t                  status;
+    int32_t                         rc;
+    uint32_t                        length = 0;
+    ioctl80211_client_record_t     *client_entry = NULL;
+    radio_type_t                    radio_type;
+
+    void                            *ieee80211_clients_buf;
+    ssize_t                         ieee80211_client_offset = 0;
+    struct ieee80211req_sta_info   *ieee80211_client = NULL;
+    int                            client_cnt = 0;
+
+    radio_type = radio_cfg->type;
+    if (NULL == client_list)
+    {
+        return IOCTL_STATUS_ERROR;
+    }
+
+#if OPENSYNC_NL_SUPPORT
+    struct stainfo_ctx ctx = {0};
+
+    /* Use default NL data buffer */
+    ctx.buf              = NULL;
+    ctx.data.length      = 0;
+    ctx.data.callback    = &stainfo_cb;
+    ctx.data.parse_data  = 0;
+
+    rc = wifi_cfg80211_send_generic_command(&(sock_ctx.cfg80211_ctxt),
+            QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION,
+            QCA_NL80211_VENDOR_SUBCMD_LIST_STA, ifName,
+            (void *)&ctx.data, ctx.data.length);
+
+    if (0 > rc) {
+        FREE(ctx.buf);
+        if (is_sta && (-EPERM == rc)) {
+            // if we're STA *and* we got EPERM error, fall back to
+            // previous implementation, as the qca-wifi patch is
+            // probably not applied.
+            LOG(NOTICE, "Stats for %s might be unreliable", ifName);
+            return ioctl80211_peer_list_fetch(
+                radio_cfg,
+                ifName,
+                essid,
+                mac,
+                client_list);
+        } else {
+            LOG(ERR,
+                "Parsing %s %s client stats (Failed to get info '%s')",
+                radio_get_name_from_type(radio_type),
+                ifName,
+                strerror(errno));
+            return IOCTL_STATUS_ERROR;
+        }
+    }
+
+    length = ctx.size;
+    ieee80211_clients_buf = ctx.buf;
+#else
+    struct iwreq                    request;
+    uint8_t                         ieee80211_clients[IOCTL80211_CLIENTS_SIZE];
+
+    memset (ieee80211_clients, 0, sizeof(ieee80211_clients));
+    memset (&request, 0, sizeof(request));
+    request.u.data.pointer = ieee80211_clients;
+    request.u.data.length = sizeof(ieee80211_clients);
+    rc = 
+        ioctl80211_request_send(
+                ioctl80211_fd_get(),
+                ifName,
+                IEEE80211_IOCTL_STA_INFO,
+                &request);
+    if (0 > rc)
+    {
+        LOG(ERR,
+            "Parsing %s %s client stats (Failed to get info '%s')",
+            radio_get_name_from_type(radio_type),
+            ifName,
+            strerror(errno));
+        return IOCTL_STATUS_ERROR;
+    }
+
+    length = request.u.data.length;
+    ieee80211_clients_buf = ieee80211_clients;
+#endif
+    LOGD("%s: length - %d\n", __func__, length);
+
+    for (   ieee80211_client_offset = 0;
+            (ssize_t)length - ieee80211_client_offset >= (int)sizeof(*ieee80211_client);)
+    {
+        ieee80211_client =
+            (struct ieee80211req_sta_info *)
+            (ieee80211_clients_buf + ieee80211_client_offset);
+
+        client_entry = 
+             ioctl80211_client_record_alloc();
+        if (NULL == client_entry)
+        {
+            util_clients_buf_free(ieee80211_clients_buf);
+            LOG(ERR,
+                "Parsing %s interface client stats "
+                "(Failed to allocate memory)",
+                radio_get_name_from_type(radio_type));
+            return IOCTL_STATUS_ERROR;
+        }
+
+        client_cnt++;
+        client_entry->is_client = true;
+
+        client_entry->info.type = radio_type;
+
+        memcpy (client_entry->info.mac,
+                ieee80211_client->isi_macaddr,
+                sizeof(client_entry->info.mac));
+        LOG(TRACE,
+            "Parsed %s client MAC "MAC_ADDRESS_FORMAT,
+            radio_get_name_from_type(radio_type),
+            MAC_ADDRESS_PRINT(client_entry->info.mac));
+
+        /* Driver might return -1 */
+        client_entry->stats.client.rssi = 0;
+        if (ieee80211_client->isi_rssi > 0)
+        {
+            client_entry->stats.client.rssi = ieee80211_client->isi_rssi;
+        }
+
+        LOG(TRACE,
+            "Parsed %s client RSSI %d",
+            radio_get_name_from_type(radio_type),
+            client_entry->stats.client.rssi);
+
+        STRSCPY(client_entry->info.ifname,
+                ifName);
+        LOG(TRACE,
+            "Parsed %s client IFNAME %s",
+            radio_get_name_from_type(radio_type),
+            client_entry->info.ifname);
+
+        memcpy (client_entry->info.essid,
+                essid,
+                sizeof(client_entry->info.essid));
+        LOG(TRACE,
+            "Parsed %s client ESSID %s",
+            radio_get_name_from_type(radio_type),
+            client_entry->info.essid);
+
+        client_entry->stats.client.rate_tx = 
+            ieee80211_client->isi_txratekbps;
+        LOG(TRACE,
+            "Parsed %s client txrate %u",
+            radio_get_name_from_type(radio_type),
+            client_entry->stats.client.rate_tx);
+
+        client_entry->stats.client.rate_rx =
+            ieee80211_client->isi_rxratekbps;
+        LOG(TRACE,
+            "Parsed %s client rxrate %u",
+            radio_get_name_from_type(radio_type),
+            client_entry->stats.client.rate_rx);
+
+        client_entry->uapsd =
+            ieee80211_client->isi_uapsd;
+        LOG(TRACE,
+            "Parsed %s client uapsd %u",
+            radio_get_name_from_type(radio_type),
+            client_entry->uapsd);
+
+        status = 
+            ioctl80211_clients_stats_fetch (
+                    radio_type,
+                    ifName,
+                    client_entry);
+        if (IOCTL_STATUS_OK != status)
+        {
+            goto error;
+        }
+
+#ifdef OPENSYNC_NL_SUPPORT
+        client_entry->stats_cookie = ieee80211_client->isi_assoc_time;
+#else
+        status = 
+            ioctl80211_clients_stats_rx_fetch (
+                    radio_type,
+                    radio_cfg->phy_name,
+                    client_entry);
+        if (IOCTL_STATUS_OK != status)
+        {
+            goto error;
+        }
+#endif
+
+        status = 
+            ioctl80211_clients_stats_tx_fetch (
+                    radio_type,
+                    radio_cfg->phy_name,
+                    client_entry);
+        if (IOCTL_STATUS_OK != status)
+        {
+            goto error;
+        }
+
+        ds_dlist_insert_tail(client_list, client_entry);
+
+        /* Move to the next client */
+        ieee80211_client_offset += ieee80211_client->isi_len;
+        if (!ieee80211_client->isi_len)
+        {
+            util_clients_buf_free(ieee80211_clients_buf);
+            return IOCTL_STATUS_OK;
+        }
+        continue;
+
+error:
+        util_clients_buf_free(ieee80211_clients_buf);
+        ioctl80211_client_record_free(client_entry);
+
+        /* Move to the next client */
+        ieee80211_client_offset += ieee80211_client->isi_len;
+        return IOCTL_STATUS_ERROR;
+    }
+    util_clients_buf_free(ieee80211_clients_buf);
+    LOGT("%s: clients number: %d", ifName , client_cnt);
+    return IOCTL_STATUS_OK;
+}
+
 ioctl_status_t ioctl80211_clients_list_get(
         radio_entry_t              *radio_cfg,
         radio_essid_t              *essid,
@@ -1727,51 +1792,26 @@ ioctl_status_t ioctl80211_clients_list_get(
             continue;
         }
 
-        /* Adding plume STA stats as peer client */
-        if (interface->sta)
-        {
-            LOG(TRACE,
-                "Parsing %s interface %s peer list",
-                radio_get_name_from_type(radio_cfg->type),
-                interface->ifname);
+        LOG(TRACE,
+            "Parsing %s interface %s client list",
+            radio_get_name_from_type(radio_cfg->type),
+            interface->ifname);
 
-            status = 
-                ioctl80211_peer_list_fetch (
-                        radio_cfg,
-                        interface->ifname,
-                        interface->essid,
-                        interface->mac,
-                        client_list);
-            if (IOCTL_STATUS_OK != status)
-            {
-                LOG(ERR,
-                    "Parsing %s interface %s peer stats",
-                    radio_get_name_from_type(radio_cfg->type),
-                    interface->ifname);
-                return IOCTL_STATUS_ERROR;
-            }
-        }
-        else
+        status = 
+            ioctl80211_clients_list_fetch (
+                    radio_cfg,
+                    interface->ifname,
+                    interface->essid,
+                    client_list,
+                    interface->mac,
+                    interface->sta);
+        if (IOCTL_STATUS_OK != status)
         {
-            LOG(TRACE,
+            LOG(ERR,
                 "Parsing %s interface %s client list",
                 radio_get_name_from_type(radio_cfg->type),
                 interface->ifname);
-
-            status = 
-                ioctl80211_clients_list_fetch (
-                        radio_cfg,
-                        interface->ifname,
-                        interface->essid,
-                        client_list);
-            if (IOCTL_STATUS_OK != status)
-            {
-                LOG(ERR,
-                    "Parsing %s interface %s client list",
-                    radio_get_name_from_type(radio_cfg->type),
-                    interface->ifname);
-                return IOCTL_STATUS_ERROR;
-            }
+            return IOCTL_STATUS_ERROR;
         }
     }
 

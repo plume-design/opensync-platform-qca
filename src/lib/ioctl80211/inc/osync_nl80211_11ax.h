@@ -115,6 +115,14 @@ struct ioctl80211_vap_stats
 #define send_nl_command(sk_ctx, ifname, buf, len, cb, cmd) \
             send_command(sk_ctx, ifname, buf, len, cb, cmd, 0);
 
+#if defined(CONFIG_PLATFORM_QCA_QSDK110) && !defined(CONFIG_PLATFORM_QCA_QSDK120)
+#define send_setparam_command(sock_ctx, subcmd, cmd, ifname, buf, len) \
+            wifi_cfg80211_send_setparam_command(sock_ctx, subcmd, cmd, ifname, buf, len);
+#else
+#define send_setparam_command(sock_ctx, subcmd, cmd, ifname, buf, len) \
+            wifi_cfg80211_send_setparam_command(sock_ctx, subcmd, cmd, ifname, buf, len, 0);
+#endif
+
 typedef enum config_mode_type {
     CONFIG_IOCTL    = 0,
     CONFIG_CFG80211 = 1,
@@ -211,6 +219,7 @@ osync_nl80211_bsal_bs_config(int fd, const bsal_ifconfig_t *ifcfg, bool enable)
     struct ieee80211req_athdbg      athdbg;
     int                             index;
     struct                          cfg80211_data buffer;
+    int                             fwd_to_app;
     uint32_t                         filter_value;
 
     // Have to disable before config parameters can be set
@@ -269,15 +278,30 @@ osync_nl80211_bsal_bs_config(int fd, const bsal_ifconfig_t *ifcfg, bool enable)
 #ifdef OPENSYNC_NL_SUPPORT
     send_nl_command(&sock_ctx, ifcfg->ifname, &athdbg, sizeof(athdbg), NULL, QCA_NL80211_VENDOR_SUBCMD_DBGREQ);
     /*
-     * set filter for receiving management frames - 256 is for Control frames
+     * forward action frames to app
+     */
+    fwd_to_app = 1;
+    memset(&buffer, 0, sizeof(buffer));
+    buffer.length = sizeof(int);
+    buffer.data = (uint8_t *)&fwd_to_app;
+    buffer.callback = NULL;
+    buffer.parse_data = 0;
+    send_setparam_command(&(sock_ctx.cfg80211_ctxt),
+                QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS,
+                IEEE80211_PARAM_FWD_ACTION_FRAMES_TO_APP,
+                ifcfg->ifname, (char *)&buffer, sizeof(int));
+    /*
+     * set filter for receiving action frame from rtnetlink event
+     * IEEE80211_FILTER_TYPE_ACTION = 0x100 for action frame
      * This is required for receiving BSAL_EVENT_ACTION_FRAME
      */
     filter_value = 256;
+    memset(&buffer, 0, sizeof(buffer));
     buffer.length = sizeof(uint32_t);
     buffer.data = (uint8_t *)&filter_value;
     buffer.callback = NULL;
     buffer.parse_data = 0;
-    wifi_cfg80211_send_setparam_command(&(sock_ctx.cfg80211_ctxt),
+    send_setparam_command(&(sock_ctx.cfg80211_ctxt),
                 QCA_NL80211_VENDORSUBCMD_SETFILTER, filter_value,
                 ifcfg->ifname,(char *)&buffer, sizeof(uint32_t));
 #else
@@ -310,9 +334,8 @@ osync_nl80211_bsal_acl_mac(int fd, const char *ifname, const uint8_t *mac_addr, 
     buffer.callback = NULL;
     buffer.parse_data = 0;
 
-    wifi_cfg80211_send_setparam_command(&(sock_ctx.cfg80211_ctxt),
-                                        cno, 0,
-                                        ifname, (char *)&buffer, sizeof(int));
+    send_setparam_command(&(sock_ctx.cfg80211_ctxt),
+                cno, 0, ifname, (char *)&buffer, sizeof(int));
 #else
     struct sockaddr         saddr;
     int 					ret;
@@ -605,6 +628,20 @@ osync_nl80211_bsal_client_measure(const char *ifname, const uint8_t *mac_addr, i
 #include <string.h>
 #include "util.h"
 
+#ifdef OPENSYNC_NL_SUPPORT
+static ev_io g_nl_io;
+
+static void
+nl_io_read_cb(EV_P_ ev_io *io, int events)
+{
+    LOGT("nl_io_read_cb io->fd = %d", io->fd);
+    if (nl_recvmsgs_default(sock_ctx.cfg80211_ctxt.event_sock) < 0) {
+        LOGE("Failed to receive nl message, errno = %d (%s)",
+             errno, strerror(errno));
+    }
+}
+#endif
+
 static inline int
 osync_nl80211_init(struct ev_loop *loop, bool init_callback)
 {
@@ -616,15 +653,21 @@ osync_nl80211_init(struct ev_loop *loop, bool init_callback)
         sock_ctx.cfg80211_ctxt.event_callback = osync_peer_stats_event_callback;
     }
 
-    if (init_socket_context(&sock_ctx, WIFI_NL80211_CMD_SOCK_ID, WIFI_NL80211_EVENT_SOCK_ID)) {
+    if (WARN_ON(init_socket_context(&sock_ctx, WIFI_NL80211_CMD_SOCK_ID, WIFI_NL80211_EVENT_SOCK_ID))) {
         return -EIO;
     }
 
     if (init_callback) {
-        if (wifi_nl80211_start_event_thread(&sock_ctx.cfg80211_ctxt)) {
-            wifi_destroy_nl80211(&sock_ctx.cfg80211_ctxt);
-            return -EIO;
+        int fd = nl_socket_get_fd(sock_ctx.cfg80211_ctxt.event_sock);
+        if (fd < 0) {
+           LOG(ERR,"Getting file description failed (fd: %d)", fd);
+           wifi_destroy_nl80211(&sock_ctx.cfg80211_ctxt);
+           return -EIO;
         }
+
+        nl_socket_set_nonblocking(sock_ctx.cfg80211_ctxt.event_sock);
+        ev_io_init(&g_nl_io, nl_io_read_cb, fd, EV_READ);
+        ev_io_start(loop, &g_nl_io);
     }
 
     return IOCTL_STATUS_OK;
@@ -644,6 +687,7 @@ static inline int
 osync_nl80211_close(struct ev_loop *loop)
 {
 #ifdef OPENSYNC_NL_SUPPORT
+    ev_io_stop(loop, &g_nl_io);
     destroy_socket_context(&sock_ctx);
 #else
     close(g_ioctl80211_sock_fd);
@@ -1485,7 +1529,7 @@ nl80211_device_txchainmask_get(radio_entry_t              *radio_cfg,
     if (0 > rc)
     {
         LOG(ERR,
-                "Parsing device stats (Failed to retreive %s txchainmask %s '%s')",
+                "Parsing device stats (Failed to retrieve %s txchainmask %s '%s')",
                 radio_get_name_from_type(radio_cfg->type),
                 radio_cfg->phy_name,
                 strerror(errno));
@@ -1514,7 +1558,7 @@ static void  bss_info_handler(struct cfg80211_data *buffer)
     if ((res_len + buffer->length) >= g_iw_scan_results_capacity)
     {
         LOG(ERR,
-                "No space left in scan results buffer to store the scan data (%u bytes of scan data, %u bytes left in buffer)",
+                "No space left in scan results buffer to store the scan data (%u bytes of scan data, %zu bytes left in buffer)",
                 buffer->length,
                 g_iw_scan_results_capacity - res_len);
         return;

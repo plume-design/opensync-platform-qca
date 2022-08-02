@@ -99,7 +99,7 @@ static inline char *qca_getmac(const char *vif, char *buf, int len)
     memset(buf, 0, len);
 
     /* FIXME: this avoids clash with BM which uses same driver ACL */
-    if (strstr(vif, "home-ap-"))
+    if (strstr(vif, "home-ap-") != NULL || strstr(vif, "fh-") != NULL)
             return buf;
 
 #ifdef OPENSYNC_NL_SUPPORT
@@ -281,7 +281,7 @@ wlanconfig_nl80211_create_intreface(const char *dvif,
 
         if(E("iw","phy", p, "interface", "add", dvif, "type", "managed")) {
             LOGI("%s: failed to create vif: %d (%s)", dvif, errno, strerror(errno));
-            return false;
+            return;
         }
     }
     else {
@@ -294,7 +294,7 @@ wlanconfig_nl80211_create_intreface(const char *dvif,
         }
         if(E("iw","phy", p, "interface", "add", dvif, "type", "__ap")) {
             LOGI("%s: failed to create vif: %d (%s)", dvif, errno, strerror(errno));
-            return false;
+            return;
         }
     }
 #else
@@ -303,7 +303,7 @@ wlanconfig_nl80211_create_intreface(const char *dvif,
         macaddr[0], macaddr[1], macaddr[2], macaddr[3], macaddr[4], macaddr[5]),
         "vapid", F("%d", vconf->vif_radio_idx))) {
         LOGW("%s: failed to create vif: %d (%s)", dvif, errno, strerror(errno));
-        return false;
+        return;
     }
 #endif
 }

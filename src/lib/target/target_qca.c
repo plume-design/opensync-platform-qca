@@ -1603,7 +1603,7 @@ util_iwpriv_getmac(const char *vif, char *buf, int len)
     memset(buf, 0, len);
 
     /* FIXME: this avoids clash with BM which uses same driver ACL */
-    if (strstr(vif, "home-ap-"))
+    if ((strstr(vif, "home-ap-") != NULL || strstr(vif, "fh-") != NULL))
         return buf;
 
     if ((err = util_exec_read(NULL, buf, len, "iwpriv", vif, "getmac"))) {
@@ -2952,13 +2952,13 @@ util_policy_get_disable_coext(const char *vif)
 static bool
 util_policy_get_csa_interop(const char *vif)
 {
-    return strstr(vif, "home-ap-");
+    return strstr(vif, "home-ap-") != NULL || strstr(vif, "fh-") != NULL;
 }
 
 static const char *
 util_policy_get_min_hw_mode(const char *vif)
 {
-    if (!strcmp(vif, "home-ap-24"))
+    if (!strcmp(vif, "home-ap-24") || !strcmp(vif, "fh-24"))
         return "11b";
     else
         return "11g"; /* works for both 2.4GHz and 5GHz */

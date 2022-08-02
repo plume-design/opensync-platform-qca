@@ -85,6 +85,10 @@ typedef int16_t  s16;
 #define QCA_LTEU_SUPPORT    1   // Required to include scan dwell DBGREQ
 #endif /* QCA_10_4 */
 
+#ifndef qdf_packed
+#define qdf_packed __attribute__((packed))
+#endif
+
 #include "ieee80211_external.h"
 #ifndef NETLINK_BAND_STEERING_EVENT
 #include <ieee80211_band_steering_api.h>

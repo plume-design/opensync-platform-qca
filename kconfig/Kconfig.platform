@@ -20,29 +20,34 @@ config QCA_RATE_HISTO_TO_EXPECTED_TPUT
 
         If unsure, say 'y'
 
-choice
-    prompt "QSDK Version"
-    config PLATFORM_QCA_QSDK52
-        bool "QSDK 5.2"
-        select QSDK
+menuconfig QSDK_VERSION
+    bool "QSDK Version"
+    help "Select QSDK Version"
 
-    config PLATFORM_QCA_QSDK53
-        bool "QSDK 5.3"
+config PLATFORM_QCA_QSDK52
+    bool "QSDK 5.2"
+    select QSDK
 
-    config PLATFORM_QCA_QSDK110
-        bool "QSDK 11.0"
+config PLATFORM_QCA_QSDK53
+    bool "QSDK 5.3"
 
-    if PLATFORM_QCA_QSDK110
-        config PLATFORM_QCA_QSDK11_SUB_VER4
-            bool "QSDK 11.4"
-    endif
-endchoice
+config PLATFORM_QCA_QSDK110
+    bool "QSDK 11.0"
+
+if PLATFORM_QCA_QSDK110
+    config PLATFORM_QCA_QSDK11_SUB_VER4
+        bool "QSDK 11.4"
+endif
+
+config PLATFORM_QCA_QSDK120
+    bool "QSDK 12.0"
 
 config QSDK_VERSION
     hex
     default 0x0502 if PLATFORM_QCA_QSDK52
     default 0x0503 if PLATFORM_QCA_QSDK53
     default 0x1100 if PLATFORM_QCA_QSDK110
+    default 0x1200 if PLATFORM_QCA_QSDK120
     default 0
 
 config QCA_USE_SYSUPGRADE
