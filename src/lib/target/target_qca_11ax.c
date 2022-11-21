@@ -2940,13 +2940,13 @@ util_policy_get_disable_coext(const char *vif)
 static bool
 util_policy_get_csa_interop(const char *vif)
 {
-    return strstr(vif, "home-ap-");
+    return strstr(vif, "home-ap-") != NULL || strstr(vif, "fh-") != NULL;
 }
 
 static const char *
 util_policy_get_min_hw_mode(const char *vif)
 {
-    if (!strcmp(vif, "home-ap-24"))
+    if (!strcmp(vif, "home-ap-24") || !strcmp(vif, "fh-24"))
         return "11b";
     else
         return "11g"; /* works for both 2.4GHz and 5GHz */

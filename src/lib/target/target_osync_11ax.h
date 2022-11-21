@@ -99,7 +99,7 @@ static inline char *qca_getmac(const char *vif, char *buf, int len)
     memset(buf, 0, len);
 
     /* FIXME: this avoids clash with BM which uses same driver ACL */
-    if (strstr(vif, "home-ap-"))
+    if (strstr(vif, "home-ap-") != NULL || strstr(vif, "fh-") != NULL)
             return buf;
 
 #ifdef OPENSYNC_NL_SUPPORT
