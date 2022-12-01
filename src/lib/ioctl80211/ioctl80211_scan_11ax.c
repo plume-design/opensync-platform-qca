@@ -401,7 +401,7 @@ util_get_chanwidth(const uint8_t *vp, int ielen)
     uint32_t   vhtcap_info        = 0;
     uint8_t    vhtop_ch_freq_seg1 = 0;
     uint8_t    vhtop_ch_freq_seg2 = 0;
-    const uint8_t const *vp_max = vp + ielen - 1;
+    const uint8_t *vp_max = vp + ielen - 1;
 
     /* Parsing each element id from the ie data to store necessary data for
        calculating current channel width of neighbor AP */

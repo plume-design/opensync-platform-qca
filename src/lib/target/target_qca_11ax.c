@@ -105,24 +105,13 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  * Driver-dependant feature compatibility
  *****************************************************************************/
 enum {
-    IEEE80211_EV_DUMMY_CSA_RX = 0xffff,
     IEEE80211_EV_DUMMY_CHANNEL_LIST_UPDATED = 0xfffe,
-    IEEE80211_EV_DUMMY_RADAR_DETECT = 0xfffd,
 };
 
-#ifndef IEEE80211_EV_CSA_RX_SUPPORTED
-#warning csa rx patch is missing
-#define IEEE80211_EV_CSA_RX IEEE80211_EV_DUMMY_CSA_RX
-#endif
-
+/* Note: QSDK 11.x does not support IEEE80211_EV_CHANNEL_LIST_UPDATED, we currently use a dummy value */
 #ifndef IEEE80211_EV_CHANNEL_LIST_UPDATED_SUPPORTED
 #warning dfs chanlist update patch is missing
 #define IEEE80211_EV_CHANNEL_LIST_UPDATED IEEE80211_EV_DUMMY_CHANNEL_LIST_UPDATED
-#endif
-
-#ifndef IEEE80211_EV_RADAR_DETECT_SUPPORTED
-#warning dfs radar detect patch is missing
-#define IEEE80211_EV_RADAR_DETECT IEEE80211_EV_DUMMY_RADAR_DETECT
 #endif
 
 /******************************************************************************
@@ -1452,6 +1441,35 @@ qca_wpas_ctrl_closed(struct ctrl *ctrl)
 /* target -> target */
 
 static void
+qca_ctrl_fill_freqlist(struct wpas *wpas)
+{
+    const char *chans = strexa("wlanconfig", wpas->ctrl.bss, "list", "chan");
+    const char *p = chans;
+    size_t i = 0;
+    int freq;
+
+    if (WARN_ON(!chans)) return;
+
+    /* Example payload to be parsed:
+     * Channel   1 : 2412    Mhz 11ng C CU                                        Channel   7 : 2442    Mhz 11ng C CU CL
+     * Channel   2 : 2417    Mhz 11ng C CU                                        Channel   8 : 2447    Mhz 11ng C CL
+     * Channel   3 : 2422    Mhz 11ng C CU                                        Channel   9 : 2452    Mhz 11ng C CL
+     * Channel   4 : 2427    Mhz 11ng C CU                                        Channel  10 : 2457    Mhz 11ng C CL
+     * Channel   5 : 2432    Mhz 11ng C CU CL                                     Channel  11 : 2462    Mhz 11ng C CL
+     * Channel   6 : 2437    Mhz 11ng C CU CL
+     */
+
+    while ((p = strstr(p, " : "))) {
+        p += 2;
+        freq = atoi(p);
+        if (WARN_ON(freq < 2000)) continue;
+        if (WARN_ON(freq > 7000)) continue;
+        if (WARN_ON(i >= ARRAY_SIZE(wpas->freqlist))) continue;
+        wpas->freqlist[i++] = freq;
+    }
+}
+
+static void
 qca_ctrl_discover(const char *bss)
 {
     struct hapd *hapd = hapd_lookup(bss);
@@ -1513,6 +1531,7 @@ qca_ctrl_discover(const char *bss)
         wpas->connected = qca_wpas_connected;
         wpas->disconnected = qca_wpas_disconnected;
         wpas->respect_multi_ap = 1;
+        qca_ctrl_fill_freqlist(wpas);
         ctrl_enable(&wpas->ctrl);
         wpas = NULL;
     }
@@ -2463,14 +2482,25 @@ util_csa_start(const char *phy,
     int err;
 
     if (util_cac_in_progress(phy)) {
+        /* The down+up workaround was originally introduced for
+         * older qcawifi driver. It was unable to respect the
+         * channel change because it was trying a regular CSA
+         * control flow which was not possible because CAC means
+         * no beacons are sent yet. The newer driver still
+         * can't process channel change through exttool but
+         * it does respect channel/mode changes without
+         * downing interface(s).
+         */
+        const bool need_downup = !kconfig_enabled(CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4);
+
         LOGI("%s: cac in progress, switching channel through down/up", phy);
         memset(mode, 0, sizeof(mode));
         err = 0;
-        err |= WARN_ON(!strexa("ifconfig", vif, "down"));
+        if (need_downup) err |= WARN_ON(!strexa("ifconfig", vif, "down"));
         err |= WARN_ON(util_qca_get_mode(hw_mode, ht_mode, freq_band, mode, sizeof(mode)) < 0);
         err |= WARN_ON(util_qca_set_str_lazy(vif, "get_mode", "mode", mode) < 0);
         err |= WARN_ON(!strexa("iwconfig", vif, "channel", strfmta("%d", channel)));
-        err |= WARN_ON(!strexa("ifconfig", vif, "up"));
+        if (need_downup) err |= WARN_ON(!strexa("ifconfig", vif, "up"));
         return err ? -1 : 0;
     }
 
@@ -3009,6 +3039,8 @@ util_radio_channel_state(const char *line)
         return "{\"state\": \"nop_finished\"}";
     if (strstr(line, " DFS_NOL"))
         return "{\"state\": \"nop_started\"}";
+    if (strstr(line, " DFS_INVALID"))
+        return "{\"state\": \"dfs_invalid\"}";
 #else
     if (!strstr(line, " DFS"))
         return"{\"state\":\"allowed\"}";
@@ -3319,6 +3351,174 @@ util_radio_ht_mode_get(char *phy, char *htmode, int htmode_len)
 
     strscpy(htmode, mode->htmode, htmode_len);
     return true;
+}
+
+static int
+util_radio_match_first_freq(const int *preferred_freqs,
+                            const size_t n_preferred_freqs,
+                            const int *available_freqs,
+                            const size_t n_available_freqs)
+{
+    size_t i;
+    for (i = 0; i < n_preferred_freqs; i++) {
+        const int pfreq = preferred_freqs[i];
+        size_t j;
+
+        LOGD("scanning for preferred in available frequency list: %d", pfreq);
+        for (j = 0; j < n_available_freqs; j++) {
+            const int afreq = available_freqs[j];
+            if (pfreq == afreq)
+                return pfreq;
+        }
+    }
+
+    return 0;
+}
+
+static void
+util_radio_get_non_dfs_freqs(const char *phy,
+                             int **freqs,
+                             size_t *n_freqs)
+{
+    char *buf;
+    if (WARN_ON(!(buf = strexa("exttool", "--list_chan_state", "--interface", phy)))) return;
+
+    /*
+     * Expected output format:
+     * ...
+     * chan 44 (5220)
+     * dfs state: NON_DFS
+     * chan 48 (5240)
+     * dfs state: NON_DFS
+     * chan 52 (5260)
+     * dfs state: DFS_CAC_REQUIRED
+     * chan 56 (5280)
+     * dfs state: DFS_CAC_REQUIRED
+     * ...
+     */
+
+    for (;;) {
+        const char *chan = strsep(&buf, "\n"); if (buf == NULL) break;
+        const char *dfs = strsep(&buf, "\n"); if (buf == NULL) break;
+        if (chan == NULL) break;
+        if (dfs == NULL) break;
+
+        const bool is_non_dfs = (strstr(dfs, "NON_DFS") != NULL);
+        const bool not_usable = !is_non_dfs;
+        if (not_usable) continue;
+
+        int c;
+        int freq;
+        const int n = sscanf(chan, "chan %d (%d)", &c, &freq);
+        if (n != 2) continue;
+
+        LOGD("%s: considering as possible radar escape frequency: %d", phy, freq);
+
+        (*n_freqs)++;
+        const size_t size = (*n_freqs) * sizeof(*freqs);
+        (*freqs) = REALLOC((*freqs), size);
+        (*freqs)[(*n_freqs) - 1] = freq;
+    }
+}
+
+static int
+util_radio_compute_radar_escape_freq_mhz(const char *phy)
+{
+    /* This is order of preference. ch44 is universally
+     * available, ch157 is not available in EU. Both of
+     * these are commonly targeted opensync channels.
+     * Anything other is a fallback.
+     */
+    static const int preferred_freqs[] = {
+        5220, /* ch44 */
+        5785, /* ch157 */
+        5180, /* ch36 */
+        5200, /* ch40 */
+        5240, /* ch48 */
+        5745, /* ch149 */
+        5765, /* ch153 */
+        5805, /* ch161 */
+        5825, /* ch165 */
+    };
+
+    int *freqs = NULL;
+    size_t n_freqs = 0;
+    util_radio_get_non_dfs_freqs(phy, &freqs, &n_freqs);
+
+    const int escape_freq = util_radio_match_first_freq(preferred_freqs,
+                                                        ARRAY_SIZE(preferred_freqs),
+                                                        freqs,
+                                                        n_freqs);
+    FREE(freqs);
+    freqs = NULL;
+
+    return escape_freq;
+}
+
+static const char *
+util_radio_radar_escape_freq_cmd_xml_path(void)
+{
+    /* This vendor specific command is not defined in stock
+     * QCA xml files but is otherwise reachable through
+     * nl80211.
+     */
+    return CONFIG_INSTALL_PREFIX "/etc/cfg80211/vendor/qca/nxt_rdr_freq.xml";
+}
+
+static int
+util_radio_get_radar_escape_freq_mhz(const char *phy)
+{
+    const char *xml = util_radio_radar_escape_freq_cmd_xml_path();
+    const char *output = strexa("cfg80211tool.1", "-i", phy, "-f", xml, "-h", "none", "--START_CMD", "--g_nxt_rdr_freq", "--RESPONSE", "--g_nxt_rdr_freq", "--END_CMD");
+    /*
+     * Expected output format:
+     * wifi0  g_nxt_rdr_freq:5220
+     */
+    const char *match_str = "g_nxt_rdr_freq:";
+    const char *freq_start = strstr(output ?: match_str, match_str) + strlen(match_str);
+    /* If the output does not match freq_start will point to "" */
+    const int freq = atoi(freq_start);
+    return freq;
+}
+
+static bool
+util_radio_set_radar_escape_freq_mhz(const char *phy, const int freq)
+{
+    LOGI("%s: setting radar escape frequency to: %d", phy, freq);
+    char freq_str[32];
+    snprintf(freq_str, sizeof(freq_str), "%d", freq);
+
+    const char *xml = util_radio_radar_escape_freq_cmd_xml_path();
+    const char *output = strexa("cfg80211tool.1", "-i", phy, "-f", xml, "-h", "none", "--START_CMD", "--nxt_rdr_freq", "--value0", freq_str, "--END_CMD");
+    const bool failed = (output == NULL) || (strlen(output) > 0);
+    const bool ok = !failed;
+
+    /* If this happens the chances are the xml definition
+     * has become incorrect and needs fixing.
+     */
+    WARN_ON(failed);
+
+    return ok;
+}
+
+static void
+util_radio_update_radar_escape_freq_mhz(const char *phy)
+{
+    const int freq = util_radio_compute_radar_escape_freq_mhz(phy);
+    if (freq <= 0) return;
+
+    const int cur_freq = util_radio_get_radar_escape_freq_mhz(phy);
+    LOGD("%s: radar escape frequency: %d -> %d", phy, cur_freq, freq);
+    if (cur_freq == freq) return; /* nothing to do if it's already set */
+
+    const bool ok = util_radio_set_radar_escape_freq_mhz(phy, freq);
+    if (ok == false) return;
+
+    /* If this happens the chances are the xml definition
+     * has become incorrect and needs fixing.
+     */
+    const int freq_after_set = util_radio_get_radar_escape_freq_mhz(phy);
+    WARN_ON(freq_after_set != freq);
 }
 
 static bool
@@ -3668,6 +3868,14 @@ target_radio_config_set2(const struct schema_Wifi_Radio_Config *rconf,
 
     if (changed->enabled)
         WARN_ON(!os_nif_up((char *)phy, rconf->enabled));
+
+    /* Whenever radio is intended to be configured, make sure this is
+     * set/refreshed. This isn't controlled through Config/State table
+     * comparisons explicitly.
+     */
+    if (rconf->enabled) {
+        util_radio_update_radar_escape_freq_mhz(phy);
+    }
 
     if ((changed->channel || changed->ht_mode)) {
         if (rconf->channel_exists && rconf->channel > 0 && rconf->ht_mode_exists) {

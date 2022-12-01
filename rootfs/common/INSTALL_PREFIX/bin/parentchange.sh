@@ -106,6 +106,11 @@ recreate_sta_vap() {
 	wpa=$(ovsh s -Ur Wifi_VIF_Config wpa -w mode==sta | sed 1q | rtrim | grep .) || die "Failed to get wpa"
 	wpa_key_mgmt=$(ovsh s -Ur Wifi_VIF_Config wpa_key_mgmt -w mode==sta | sed 1q | rtrim | grep .) || die "Failed to get wpa_key_mgmt"
 	wpa_psks=$(ovsh s -Ur Wifi_VIF_Config wpa_psks -w mode==sta | sed 1q | rtrim | grep .) || die "Failed to get wpa_psks"
+	wpa_pairwise_tkip=$(ovsh s -Ur Wifi_VIF_Config wpa_pairwise_tkip -w mode==sta | sed 1q | rtrim | grep .) || die "Failed to get wpa_pairwise_tkip"
+	wpa_pairwise_ccmp=$(ovsh s -Ur Wifi_VIF_Config wpa_pairwise_ccmp -w mode==sta | sed 1q | rtrim | grep .) || die "Failed to get wpa_pairwise_ccmp"
+	rsn_pairwise_tkip=$(ovsh s -Ur Wifi_VIF_Config rsn_pairwise_tkip -w mode==sta | sed 1q | rtrim | grep .) || die "Failed to get rsn_pairwise_tkip"
+	rsn_pairwise_ccmp=$(ovsh s -Ur Wifi_VIF_Config rsn_pairwise_ccmp -w mode==sta | sed 1q | rtrim | grep .) || die "Failed to get rsn_pairwise_ccmp"
+	pmf=$(ovsh s -Ur Wifi_VIF_Config pmf -w mode==sta | sed 1q | rtrim | grep .) || die "Failed to get pmf"
 
 	for i in $(ovsh s -Ur Wifi_Radio_Config if_name)
 	do
@@ -127,6 +132,11 @@ recreate_sta_vap() {
 		"wpa:=$wpa" \
 		"wpa_key_mgmt:=$wpa_key_mgmt" \
 		"wpa_psks::$wpa_psks" \
+		"wpa_pairwise_tkip:=$wpa_pairwise_tkip" \
+		"wpa_pairwise_ccmp:=$wpa_pairwise_ccmp" \
+		"rsn_pairwise_tkip:=$rsn_pairwise_tkip" \
+		"rsn_pairwise_ccmp:=$rsn_pairwise_ccmp" \
+		"pmf:=$pmf" \
 		vif_radio_idx:=0)
 
 	ovsh u Wifi_Radio_Config -w if_name==$radio vif_configs::"$(

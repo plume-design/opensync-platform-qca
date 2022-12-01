@@ -93,4 +93,10 @@ config QCA_HW_ACC_NSS
     help
         Enable NSS acceleration support
 
+config QCA_DISABLE_RDK_STATS
+    bool "Disable RDK stats"
+    default n
+    help
+        Disable config "enable_rdk_stats" in global.ini file
+
 endif
