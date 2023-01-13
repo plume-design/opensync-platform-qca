@@ -104,24 +104,13 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  * Driver-dependant feature compatibility
  *****************************************************************************/
 enum {
-    IEEE80211_EV_DUMMY_CSA_RX = 0xffff,
     IEEE80211_EV_DUMMY_CHANNEL_LIST_UPDATED = 0xfffe,
-    IEEE80211_EV_DUMMY_RADAR_DETECT = 0xfffd,
 };
 
-#ifndef IEEE80211_EV_CSA_RX_SUPPORTED
-#warning csa rx patch is missing
-#define IEEE80211_EV_CSA_RX IEEE80211_EV_DUMMY_CSA_RX
-#endif
-
+/* Note: QSDK 11.x does not support IEEE80211_EV_CHANNEL_LIST_UPDATED, we currently use a dummy value */
 #ifndef IEEE80211_EV_CHANNEL_LIST_UPDATED_SUPPORTED
 #warning dfs chanlist update patch is missing
 #define IEEE80211_EV_CHANNEL_LIST_UPDATED IEEE80211_EV_DUMMY_CHANNEL_LIST_UPDATED
-#endif
-
-#ifndef IEEE80211_EV_RADAR_DETECT_SUPPORTED
-#warning dfs radar detect patch is missing
-#define IEEE80211_EV_RADAR_DETECT IEEE80211_EV_DUMMY_RADAR_DETECT
 #endif
 
 /******************************************************************************
@@ -1418,6 +1407,35 @@ qca_wpas_ctrl_closed(struct ctrl *ctrl)
 /* target -> target */
 
 static void
+qca_ctrl_fill_freqlist(struct wpas *wpas)
+{
+    const char *chans = strexa("wlanconfig", wpas->ctrl.bss, "list", "chan");
+    const char *p = chans;
+    size_t i = 0;
+    int freq;
+
+    if (WARN_ON(!chans)) return;
+
+    /* Example payload to be parsed:
+     * Channel   1 : 2412    Mhz 11ng C CU                                        Channel   7 : 2442    Mhz 11ng C CU CL
+     * Channel   2 : 2417    Mhz 11ng C CU                                        Channel   8 : 2447    Mhz 11ng C CL
+     * Channel   3 : 2422    Mhz 11ng C CU                                        Channel   9 : 2452    Mhz 11ng C CL
+     * Channel   4 : 2427    Mhz 11ng C CU                                        Channel  10 : 2457    Mhz 11ng C CL
+     * Channel   5 : 2432    Mhz 11ng C CU CL                                     Channel  11 : 2462    Mhz 11ng C CL
+     * Channel   6 : 2437    Mhz 11ng C CU CL
+     */
+
+    while ((p = strstr(p, " : "))) {
+        p += 2;
+        freq = atoi(p);
+        if (WARN_ON(freq < 2000)) continue;
+        if (WARN_ON(freq > 7000)) continue;
+        if (WARN_ON(i >= ARRAY_SIZE(wpas->freqlist))) continue;
+        wpas->freqlist[i++] = freq;
+    }
+}
+
+static void
 qca_ctrl_discover(const char *bss)
 {
     struct hapd *hapd = hapd_lookup(bss);
@@ -1479,6 +1497,7 @@ qca_ctrl_discover(const char *bss)
         wpas->connected = qca_wpas_connected;
         wpas->disconnected = qca_wpas_disconnected;
         wpas->respect_multi_ap = 1;
+        qca_ctrl_fill_freqlist(wpas);
         ctrl_enable(&wpas->ctrl);
         wpas = NULL;
     }
