@@ -42,6 +42,11 @@ endif
 config PLATFORM_QCA_QSDK120
     bool "QSDK 12.0"
 
+if PLATFORM_QCA_QSDK120
+    config PLATFORM_QCA_QSDK12_SUB_VER1
+        bool "QSDK 12.1"
+endif
+
 config QSDK_VERSION
     hex
     default 0x0502 if PLATFORM_QCA_QSDK52

@@ -162,11 +162,17 @@ static inline int
 osync_nl80211_bsal_bs_enable(int fd, const char *ifname, bool enable)
 {
     struct ieee80211req_athdbg      athdbg;
-
+#ifdef CONFIG_PLATFORM_QCA_QSDK12_SUB_VER1
+    struct mesh_dbg_req_t         mesh_dbg_req;
     // set band steering
+    memset(&mesh_dbg_req, 0, sizeof(mesh_dbg_req));
+    mesh_dbg_req.mesh_data.value = enable;
+    mesh_dbg_req.mesh_cmd = MESH_BSTEERING_ENABLE;
+#else
     memset(&athdbg, 0, sizeof(athdbg));
     athdbg.data.mesh_dbg_req.mesh_data.value = enable;
     athdbg.data.mesh_dbg_req.mesh_cmd = MESH_BSTEERING_ENABLE;
+#endif
     athdbg.cmd = IEEE80211_DBGREQ_MESH_SET_GET_CONFIG;
 
 #ifdef OPENSYNC_NL_SUPPORT
@@ -187,9 +193,15 @@ osync_nl80211_bsal_bs_enable(int fd, const char *ifname, bool enable)
     }
 #endif
     // set band steering events
+#ifdef CONFIG_PLATFORM_QCA_QSDK12_SUB_VER1
+    memset(&mesh_dbg_req, 0, sizeof(mesh_dbg_req));
+    mesh_dbg_req.mesh_data.value = enable;
+    mesh_dbg_req.mesh_cmd = MESH_BSTEERING_ENABLE_EVENTS;
+#else
     memset(&athdbg, 0, sizeof(athdbg));
     athdbg.data.mesh_dbg_req.mesh_data.value = enable;
     athdbg.data.mesh_dbg_req.mesh_cmd = MESH_BSTEERING_ENABLE_EVENTS;
+#endif
     athdbg.cmd = IEEE80211_DBGREQ_MESH_SET_GET_CONFIG;
 
 #ifdef OPENSYNC_NL_SUPPORT
@@ -208,6 +220,23 @@ osync_nl80211_bsal_bs_enable(int fd, const char *ifname, bool enable)
     }
 
 #endif
+#ifdef OPENSYNC_NL_SUPPORT
+#ifdef CONFIG_PLATFORM_QCA_QSDK120
+    uint8_t data = 1;
+    struct cfg80211_data buffer;
+
+    buffer.data = (uint8_t *)&data;
+    buffer.length = sizeof(uint8_t);
+    buffer.callback = NULL;
+    buffer.parse_data = 0;
+
+    send_setparam_command(&(sock_ctx.cfg80211_ctxt),
+                QCA_NL80211_VENDOR_SUBCMD_MESH_CONFIGURATION,
+                MESH_MAP_VAP_BEACONING,
+                ifname, (char *)&buffer, sizeof(uint32_t));
+#endif
+#endif
+
     return 0;
 }
 
@@ -215,6 +244,9 @@ static inline int
 osync_nl80211_bsal_bs_config(int fd, const bsal_ifconfig_t *ifcfg, bool enable)
 {
     struct ieee80211req_athdbg      athdbg;
+#ifdef CONFIG_PLATFORM_QCA_QSDK12_SUB_VER1
+    struct mesh_dbg_req_t         mesh_dbg_req;
+#endif
     int                             index;
     struct                          cfg80211_data buffer;
     int                             fwd_to_app;
@@ -231,22 +263,44 @@ osync_nl80211_bsal_bs_config(int fd, const bsal_ifconfig_t *ifcfg, bool enable)
 
     // Band steering parameters
     memset(&athdbg, 0, sizeof(athdbg));
+#ifdef CONFIG_PLATFORM_QCA_QSDK12_SUB_VER1
+    memset(&mesh_dbg_req, 0, sizeof(mesh_dbg_req));
+    mesh_dbg_req.mesh_cmd = MESH_BSTEERING_SET_PARAMS;
+#else
     athdbg.data.mesh_dbg_req.mesh_cmd = MESH_BSTEERING_SET_PARAMS;
+#endif
     athdbg.cmd = IEEE80211_DBGREQ_MESH_SET_GET_CONFIG;
+#ifdef CONFIG_PLATFORM_QCA_QSDK12_SUB_VER1
+    mesh_dbg_req.mesh_data.bsteering_param.utilization_sample_period         = ifcfg->chan_util_check_sec;
+    mesh_dbg_req.mesh_data.bsteering_param.utilization_average_num_samples   = ifcfg->chan_util_avg_count;
+    mesh_dbg_req.mesh_data.bsteering_param.inactivity_check_period           = ifcfg->inact_check_sec;
+    mesh_dbg_req.mesh_data.bsteering_param.inactivity_timeout_overload       = ifcfg->inact_tmout_sec_overload;
+    mesh_dbg_req.mesh_data.bsteering_param.low_rssi_crossing_threshold       = ifcfg->def_rssi_low_xing;
+    mesh_dbg_req.mesh_data.bsteering_param.low_rate_rssi_crossing_threshold  = ifcfg->def_rssi_xing;
+#else
     athdbg.data.mesh_dbg_req.mesh_data.bsteering_param.utilization_sample_period         = ifcfg->chan_util_check_sec;
     athdbg.data.mesh_dbg_req.mesh_data.bsteering_param.utilization_average_num_samples   = ifcfg->chan_util_avg_count;
     athdbg.data.mesh_dbg_req.mesh_data.bsteering_param.inactivity_check_period           = ifcfg->inact_check_sec;
     athdbg.data.mesh_dbg_req.mesh_data.bsteering_param.inactivity_timeout_overload       = ifcfg->inact_tmout_sec_overload;
     athdbg.data.mesh_dbg_req.mesh_data.bsteering_param.low_rssi_crossing_threshold       = ifcfg->def_rssi_low_xing;
     athdbg.data.mesh_dbg_req.mesh_data.bsteering_param.low_rate_rssi_crossing_threshold  = ifcfg->def_rssi_xing;
+#endif
 
     for (index = 0; index < BSTEERING_MAX_CLIENT_CLASS_GROUP; index++) {
+#ifdef CONFIG_PLATFORM_QCA_QSDK12_SUB_VER1
+        mesh_dbg_req.mesh_data.bsteering_param.inactivity_timeout_normal[index]         = ifcfg->inact_tmout_sec_normal;
+        mesh_dbg_req.mesh_data.bsteering_param.inactive_rssi_xing_low_threshold[index]  = ifcfg->def_rssi_inact_xing;
+        mesh_dbg_req.mesh_data.bsteering_param.inactive_rssi_xing_high_threshold[index] = ifcfg->def_rssi_inact_xing;
+        mesh_dbg_req.mesh_data.bsteering_param.high_rate_rssi_crossing_threshold[index] = ifcfg->def_rssi_xing;
+        mesh_dbg_req.mesh_data.bsteering_param.high_tx_rate_crossing_threshold[index]  = 1;
+#else
         athdbg.data.mesh_dbg_req.mesh_data.bsteering_param.inactivity_timeout_normal[index]         = ifcfg->inact_tmout_sec_normal;
         athdbg.data.mesh_dbg_req.mesh_data.bsteering_param.inactive_rssi_xing_low_threshold[index]  = ifcfg->def_rssi_inact_xing;
         athdbg.data.mesh_dbg_req.mesh_data.bsteering_param.inactive_rssi_xing_high_threshold[index] = ifcfg->def_rssi_inact_xing;
         athdbg.data.mesh_dbg_req.mesh_data.bsteering_param.high_rate_rssi_crossing_threshold[index] = ifcfg->def_rssi_xing;
         // Needed to satisfy parameter validation
         athdbg.data.mesh_dbg_req.mesh_data.bsteering_param.high_tx_rate_crossing_threshold[index]  = 1;
+#endif
     }
 #ifdef OPENSYNC_NL_SUPPORT
     send_nl_command(&sock_ctx, ifcfg->ifname, &athdbg, sizeof(athdbg), NULL, QCA_NL80211_VENDOR_SUBCMD_DBGREQ);
@@ -268,10 +322,20 @@ osync_nl80211_bsal_bs_config(int fd, const bsal_ifconfig_t *ifcfg, bool enable)
 
     // Band steering debug parameters
     memset(&athdbg, 0, sizeof(athdbg));
+#ifdef CONFIG_PLATFORM_QCA_QSDK12_SUB_VER1
+    memset(&mesh_dbg_req, 0, sizeof(mesh_dbg_req));
+    mesh_dbg_req.mesh_cmd = MESH_BSTEERING_SET_DBG_PARAMS;
+#else
     athdbg.data.mesh_dbg_req.mesh_cmd = MESH_BSTEERING_SET_DBG_PARAMS;
+#endif
     athdbg.cmd = IEEE80211_DBGREQ_MESH_SET_GET_CONFIG;
+#ifdef CONFIG_PLATFORM_QCA_QSDK12_SUB_VER1
+    mesh_dbg_req.mesh_data.bsteering_dbg_param.raw_chan_util_log_enable    = ifcfg->debug.raw_chan_util;
+    mesh_dbg_req.mesh_data.bsteering_dbg_param.raw_rssi_log_enable         = ifcfg->debug.raw_rssi;
+#else
     athdbg.data.mesh_dbg_req.mesh_data.bsteering_dbg_param.raw_chan_util_log_enable    = ifcfg->debug.raw_chan_util;
     athdbg.data.mesh_dbg_req.mesh_data.bsteering_dbg_param.raw_rssi_log_enable         = ifcfg->debug.raw_rssi;
+#endif
 
 #ifdef OPENSYNC_NL_SUPPORT
     send_nl_command(&sock_ctx, ifcfg->ifname, &athdbg, sizeof(athdbg), NULL, QCA_NL80211_VENDOR_SUBCMD_DBGREQ);
@@ -360,14 +424,28 @@ static inline int
 osync_nl80211_bsal_bs_client_config(int fd, const char *ifname, const uint8_t *mac_addr, const bsal_client_config_t *conf)
 {
     struct ieee80211req_athdbg      athdbg;
+#ifdef CONFIG_PLATFORM_QCA_QSDK12_SUB_VER1
+    struct mesh_dbg_req_t         mesh_dbg_req;
+#endif
     int                             ret = 0;
 
 #ifdef OPENSYNC_NL_SUPPORT
     memset(&athdbg, 0, sizeof(athdbg));
+#ifdef CONFIG_PLATFORM_QCA_QSDK12_SUB_VER1
+    memset(&mesh_dbg_req, 0, sizeof(mesh_dbg_req));
+#endif
     memcpy(&athdbg.dstmac, mac_addr, sizeof(athdbg.dstmac));
+#ifdef CONFIG_PLATFORM_QCA_QSDK12_SUB_VER1
+    mesh_dbg_req.mesh_cmd = MESH_BSTEERING_SET_PROBE_RESP_WH;
+#else
     athdbg.data.mesh_dbg_req.mesh_cmd = MESH_BSTEERING_SET_PROBE_RESP_WH;
+#endif
     athdbg.cmd = IEEE80211_DBGREQ_MESH_SET_GET_CONFIG;
+#ifdef CONFIG_PLATFORM_QCA_QSDK12_SUB_VER1
+    mesh_dbg_req.mesh_data.value = (conf->rssi_probe_hwm || conf->rssi_probe_lwm) ? 1 : 0;
+#else
     athdbg.data.mesh_dbg_req.mesh_data.value = (conf->rssi_probe_hwm || conf->rssi_probe_lwm) ? 1 : 0;
+#endif
     send_nl_command(&sock_ctx, ifname, &athdbg, sizeof(athdbg), NULL, QCA_NL80211_VENDOR_SUBCMD_DBGREQ);
 #endif
 
@@ -620,12 +698,23 @@ static inline int
 osync_nl80211_bsal_client_measure(const char *ifname, const uint8_t *mac_addr, int num_samples)
 {
     struct ieee80211req_athdbg      athdbg;
-
+#ifdef CONFIG_PLATFORM_QCA_QSDK12_SUB_VER1
+    struct mesh_dbg_req_t         mesh_dbg_req;
+#endif
     memset(&athdbg, 0, sizeof(athdbg));
+#ifdef CONFIG_PLATFORM_QCA_QSDK12_SUB_VER1
+    memset(&mesh_dbg_req, 0, sizeof(mesh_dbg_req));
+    mesh_dbg_req.mesh_cmd = MESH_BSTEERING_GET_RSSI;
+#else
     athdbg.data.mesh_dbg_req.mesh_cmd = MESH_BSTEERING_GET_RSSI;
+#endif
     athdbg.cmd = IEEE80211_DBGREQ_MESH_SET_GET_CONFIG;
     memcpy(&athdbg.dstmac, mac_addr, sizeof(athdbg.dstmac));
+#ifdef CONFIG_PLATFORM_QCA_QSDK12_SUB_VER1
+    mesh_dbg_req.mesh_data.value = num_samples;
+#else
     athdbg.data.mesh_dbg_req.mesh_data.value = num_samples;
+#endif
 
 #ifdef OPENSYNC_NL_SUPPORT
     return send_nl_command(&sock_ctx, ifname, &athdbg, sizeof(athdbg), NULL, QCA_NL80211_VENDOR_SUBCMD_DBGREQ);

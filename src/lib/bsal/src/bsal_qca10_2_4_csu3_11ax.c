@@ -742,10 +742,18 @@ int qca_bsal_client_get_datarate_info(
         bsal_datarate_info_t *datarate)
 {
     struct ieee80211req_athdbg      athdbg;
+#ifdef CONFIG_PLATFORM_QCA_QSDK12_SUB_VER1
+    struct mesh_dbg_req_t         mesh_dbg_req;
+#endif
     int                             result = 0;
 
     memset(&athdbg, 0, sizeof(athdbg));
+#ifdef CONFIG_PLATFORM_QCA_QSDK12_SUB_VER1
+    memset(&mesh_dbg_req, 0, sizeof(mesh_dbg_req));
+    mesh_dbg_req.mesh_cmd = MESH_BSTEERING_GET_DATARATE_INFO;
+#else
     athdbg.data.mesh_dbg_req.mesh_cmd = MESH_BSTEERING_GET_DATARATE_INFO;
+#endif
     athdbg.cmd = IEEE80211_DBGREQ_MESH_SET_GET_CONFIG;
     athdbg.needs_reply = DBGREQ_REPLY_IS_REQUIRED;
     memcpy(&athdbg.dstmac, mac_addr, sizeof(athdbg.dstmac));
@@ -765,6 +773,15 @@ int qca_bsal_client_get_datarate_info(
         return result;
     }
 #endif
+#ifdef CONFIG_PLATFORM_QCA_QSDK12_SUB_VER1
+    datarate->max_chwidth = mesh_dbg_req.mesh_data.bsteering_datarate_info.max_chwidth;
+    datarate->max_streams = mesh_dbg_req.mesh_data.bsteering_datarate_info.num_streams;
+    datarate->phy_mode = mesh_dbg_req.mesh_data.bsteering_datarate_info.phymode;
+    datarate->max_MCS = mesh_dbg_req.mesh_data.bsteering_datarate_info.max_MCS;
+    datarate->max_txpower = mesh_dbg_req.mesh_data.bsteering_datarate_info.max_txpower;
+    datarate->is_static_smps = mesh_dbg_req.mesh_data.bsteering_datarate_info.is_static_smps;
+    datarate->is_mu_mimo_supported = mesh_dbg_req.mesh_data.bsteering_datarate_info.is_mu_mimo_supported;
+#else
     datarate->max_chwidth = athdbg.data.mesh_dbg_req.mesh_data.bsteering_datarate_info.max_chwidth;
     datarate->max_streams = athdbg.data.mesh_dbg_req.mesh_data.bsteering_datarate_info.num_streams;
     datarate->phy_mode = athdbg.data.mesh_dbg_req.mesh_data.bsteering_datarate_info.phymode;
@@ -772,6 +789,7 @@ int qca_bsal_client_get_datarate_info(
     datarate->max_txpower = athdbg.data.mesh_dbg_req.mesh_data.bsteering_datarate_info.max_txpower;
     datarate->is_static_smps = athdbg.data.mesh_dbg_req.mesh_data.bsteering_datarate_info.is_static_smps;
     datarate->is_mu_mimo_supported = athdbg.data.mesh_dbg_req.mesh_data.bsteering_datarate_info.is_mu_mimo_supported;
+#endif
 
     return result;
 }
