@@ -64,6 +64,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <ieee80211_external.h>
 #include <ieee80211_band_steering_api.h>
 #include <ieee80211_rrm.h>
+#include <ieee80211_ioctl.h>
 
 #include "log.h"
 #include "const.h"
@@ -76,6 +77,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "target.h"
 #include "qca_bsal.h"
 #include "hostapd_util.h"
+#include "bsal_qca_assoc_req_ies.h"
 
 /***************************************************************************************/
 
@@ -276,6 +278,10 @@ static void util_nl_parse_iwevcustom(
 
     memset(&event, 0, sizeof(event));
     custom = data;
+
+    const char *assoc_req_prefix = "Manage.assoc_req ";
+    const size_t assoc_req_prefix_len = strlen(assoc_req_prefix);
+
     if (strncmp(custom, "Manage.action ", 14) == 0) {
         length = atoi(custom + 14);
         custom += MGMT_FRAM_TAG_SIZE;
@@ -307,6 +313,17 @@ static void util_nl_parse_iwevcustom(
 
         _bsal_event_cb(&event);
     }
+    else if (strncmp(custom, assoc_req_prefix, assoc_req_prefix_len) == 0) {
+        const uint8_t *frame = (const uint8_t*) custom + MGMT_FRAM_TAG_SIZE;
+        const size_t frame_len = atoi(custom + assoc_req_prefix_len);
+
+        const uint8_t *sta_addr = NULL;
+        const uint8_t *assoc_req_ies = NULL;
+        size_t assoc_req_ies_len = 0;
+        const bool frame_parsed = bsal_qca_assoc_req_parse_frame(frame, frame_len, &sta_addr, &assoc_req_ies, &assoc_req_ies_len);
+        if (frame_parsed == true)
+            bsal_qca_assoc_req_ies_cache_set(sta_addr, ifname, assoc_req_ies, assoc_req_ies_len);
+    }
 }
 
 static void util_nl_parse(const void *buf, unsigned int len)
@@ -335,7 +352,7 @@ static void util_nl_parse(const void *buf, unsigned int len)
     }
 }
 
-static void qca_bsal_events_rt_evio_cb(struct ev_loop *loop, struct ev_io *evio, int revents)
+static bool qca_bsal_process_rt_netlink_events_once(void)
 {
     char buf[4096];
     int len;
@@ -343,23 +360,61 @@ static void qca_bsal_events_rt_evio_cb(struct ev_loop *loop, struct ev_io *evio,
     len = recvfrom(_bsal_rt_netlink_fd, buf, sizeof(buf), MSG_DONTWAIT, NULL, 0);
     if (len < 0) {
         if (errno == EAGAIN) {
-            return;
+            return false;
         }
-
         if (errno == ENOBUFS) {
             LOGW("rt netlink overrun");
-            return;
+            return false;
         }
 
         LOGW("failed to recvfrom(): %d (%s), restarting listening for rt netlink",
              errno, strerror(errno));
         qca_bsal_rt_netlink_cleanup();
         qca_bsal_rt_netlink_init();
-        return;
+        return false;
     }
 
     LOGT("%s: received %d bytes", __func__, len);
     util_nl_parse(buf, len);
+
+    return true;
+}
+
+static void qca_bsal_process_rt_netlink_events(void)
+{
+    /*
+     * First of all - I'm aware this is fishy but other solutions required too broad changes in BSAL.
+     * This function it not reentrant and it may drain the stack due to recursive calls:
+     *
+     *   qca_bsal_client_info() ->
+     *     qca_bsal_process_rt_netlink_events() ->
+     *       qca_bsal_client_info() ->
+     *         etc.
+     *
+     * These two static counters work as guard making sure that "while" loop below will end.
+     * The loop limit (events_limit_cnt) is set only on topmost entrance to this function,
+     * subsequent calls only decrease it.
+     */
+    static unsigned int reentrnce_cnt = 0;
+    static unsigned int events_limit_cnt = 0;
+
+    if (reentrnce_cnt == 0)
+        events_limit_cnt = 128;
+
+    reentrnce_cnt++;
+    while (events_limit_cnt > 0) {
+        const bool more_events = qca_bsal_process_rt_netlink_events_once();
+        events_limit_cnt--;
+
+        if (more_events == false)
+            break;
+    }
+    reentrnce_cnt--;
+}
+
+static void qca_bsal_events_rt_evio_cb(struct ev_loop *loop, struct ev_io *evio, int revents)
+{
+    qca_bsal_process_rt_netlink_events();
 }
 
 static int qca_bsal_ioctl_init(void)
@@ -432,6 +487,27 @@ static void qca_bsal_netlink_cleanup(void)
     _bsal_netlink_fd = -1;
 }
 
+static void qca_bsal_rt_netlink_set_rx_buf_size(int fd)
+{
+    /* In some cases it may take dozen of seconds for the
+     * main loop to reach netlink listening callback. By the
+     * time there may have been a lot of messages queued.
+     *
+     * Without a big enough buffer to absorb bursts, e.g.
+     * during interface (re)configuration, it was possible
+     * to drop some netlink events. While it should always
+     * be considered possible it's good to reduce the
+     * likeliness of that.
+     */
+    LOGI("bsal: resizing netlink buffer size");
+    const int v = 2 * 1024 * 1024;
+    const int err = setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &v, sizeof(v));
+    if (err) {
+        LOGW("%s: failed to set so_rcvbuf = %d: %d (%s), continuing",
+             __func__, v, errno, strerror(errno));
+    }
+}
+
 static int qca_bsal_rt_netlink_init(void)
 {
     struct sockaddr_nl  addr;
@@ -467,6 +543,7 @@ static int qca_bsal_rt_netlink_init(void)
         return -1;
     }
 
+    qca_bsal_rt_netlink_set_rx_buf_size(fd);
     _bsal_rt_netlink_fd = fd;
 
     ev_io_init(&_rt_evio, qca_bsal_events_rt_evio_cb, fd, EV_READ);
@@ -701,6 +778,8 @@ static void qca_bsal_event_process(void)
         event->data.disconnect.type = val;
 
         event->data.disconnect.reason = bsev->data.bs_disconnect_ind.reason;
+
+        bsal_qca_assoc_req_ies_cache_set(bsev->data.bs_disconnect_ind.client_addr, ifname, NULL, 0);
         break;
 
     case ATH_EVENT_BSTEERING_CLIENT_ACTIVITY_CHANGE:
@@ -1209,8 +1288,6 @@ int qca_bsal_client_info(
     struct iwreq                    iwreq;
     uint32_t                        len;
     uint8_t                         *buf, *p;
-    uint8_t                         *assoc_ies;
-    uint16_t                        assoc_ies_len;
     bool                            found = false;
     int                             ret;
 
@@ -1274,21 +1351,26 @@ int qca_bsal_client_info(
         qca_bsal_fill_sta_info(info, sta);
         qca_bsal_client_get_datarate_info(ifname, mac_addr, &info->datarate_info);
         info->connected = true;
-
-        assoc_ies_len = sta->isi_len - sizeof(*sta);
-        assoc_ies = (uint8_t *) (sta+1);
-        if (assoc_ies_len <= sizeof(info->assoc_ies)) {
-            memcpy(info->assoc_ies, assoc_ies, assoc_ies_len);
-            info->assoc_ies_len = assoc_ies_len;
-        } else {
-            LOGW("%s ies_len (%u) higher than ies table (%u)", ifname, assoc_ies_len, sizeof(info->assoc_ies));
-        }
     }
 
     FREE(buf);
 
-    if (info->connected)
+    if (info->connected == true) {
         qca_bsal_client_stats(ifname, mac_addr, info);
+
+        qca_bsal_process_rt_netlink_events();
+
+        const uint8_t *assoc_req_ies = NULL;
+        size_t assoc_req_ies_len = 0;
+        const bool assoc_ireq_ies_found = bsal_qca_assoc_req_ies_cache_lookup(mac_addr, ifname, &assoc_req_ies, &assoc_req_ies_len);
+        if (assoc_ireq_ies_found == true) {
+            memcpy(info->assoc_ies, assoc_req_ies, assoc_req_ies_len);
+            info->assoc_ies_len = assoc_req_ies_len;
+        }
+    }
+    else {
+        bsal_qca_assoc_req_ies_cache_set(mac_addr, ifname, NULL, 0);
+    }
 
     return 0;
 }
@@ -1488,6 +1570,72 @@ int qca_bsal_rrm_set_neighbor(
     return 0;
 }
 
+int qca_bsal_rrm_get_neighbors(
+        const char *ifname,
+        bsal_neigh_info_t *nrs,
+        unsigned int *nr_cnt,
+        const unsigned int max_nr_cnt)
+{
+    char buf[8192];
+    const size_t buf_len = sizeof(buf);
+    bsal_neigh_info_t *nr = nrs;
+    *nr_cnt = 0;
+    char *nr_str;
+    int parsed_cnt = -1;
+    uint8_t bssid_info_bytes[4] = { 0 };
+
+    const int ok = hostapd_rrm_get_neighbors(HOSTAPD_CONTROL_PATH_DEFAULT,
+                                             ifname,
+                                             buf,
+                                             buf_len);
+    if (ok == false) return -1;
+
+    for (nr_str = strtok(buf, "\n");
+         nr_str != NULL;
+         nr_str = strtok(NULL, "\n")){
+
+        memset(nr, 0, sizeof(*nr));
+        parsed_cnt = sscanf(nr_str,
+                            "%*s ssid=%*s "
+                            "nr=%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx"
+                            "%02hhx%02hhx%02hhx%02hhx"
+                            "%02hhx%02hhx%02hhx",
+                            &nr->bssid[0],
+                            &nr->bssid[1],
+                            &nr->bssid[2],
+                            &nr->bssid[3],
+                            &nr->bssid[4],
+                            &nr->bssid[5],
+                            &bssid_info_bytes[0],
+                            &bssid_info_bytes[1],
+                            &bssid_info_bytes[2],
+                            &bssid_info_bytes[3],
+                            &nr->op_class,
+                            &nr->channel,
+                            &nr->phy_type);
+        nr->bssid_info = ((bssid_info_bytes[0]) |
+                          (bssid_info_bytes[1] << 8 ) |
+                          (bssid_info_bytes[2] << 16 ) |
+                          (bssid_info_bytes[3] << 24 ));
+
+        if (parsed_cnt != 13) {
+            LOGD("%s get neighbors parsing failed, hostapd output: %s", ifname, nr_str);
+            continue;
+        }
+
+        nr++;
+        (*nr_cnt)++;
+        if (*nr_cnt == max_nr_cnt) {
+            LOGW("%s get neighbors allocated neighbors array full - %u elements",
+                 ifname,
+                 *nr_cnt);
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 int qca_bsal_rrm_remove_neighbor(
         const char *ifname,
         const bsal_neigh_info_t *neigh)
@@ -1510,21 +1658,42 @@ int qca_bsal_send_action(
         const uint8_t *data,
         unsigned int data_len)
 {
+    struct ieee80211_p2p_send_action act_header;
+    const size_t buffer_size = data_len + sizeof(act_header);
+    os_macaddr_t bssid;
+    uint8_t *buffer = NULL;
     struct iwreq iwr;
+    bool bssid_found = false;
     int ret;
 
     if (_bsal_ioctl_fd == -1) {
         return -1;
     }
 
+    bssid_found = os_nif_macaddr_get(strdupa(ifname), &bssid);
+    if (bssid_found == false) {
+        LOGW("%s send action frame failed, unable to lookuop vif bssid", ifname);
+        return -1;
+    }
+
+    memset(&act_header, 0, sizeof(act_header));
+    act_header.freq = 0; /* Transmit on current channel */
+    memcpy(&act_header.dst_addr, mac_addr, sizeof(act_header.dst_addr));
+    memcpy(&act_header.src_addr, &bssid, sizeof(act_header.src_addr));
+    memcpy(&act_header.bssid, &bssid, sizeof(act_header.bssid));
+
+    buffer = CALLOC(1, buffer_size);
+    memcpy(buffer, &act_header, sizeof(act_header));
+    memcpy(buffer + sizeof(act_header), data, data_len);
+
     memset(&iwr, 0, sizeof(iwr));
     STRSCPY(iwr.ifr_name, ifname);
-
-    iwr.u.data.pointer = (void *) data;
-    iwr.u.data.length = data_len;
+    iwr.u.data.pointer = (void *) buffer;
+    iwr.u.data.length = buffer_size;
     iwr.u.data.flags = IEEE80211_IOC_P2P_SEND_ACTION;
 
     ret = ioctl(_bsal_ioctl_fd, IEEE80211_IOCTL_P2P_BIG_PARAM, &iwr);
+    FREE(buffer);
     if (ret < 0) {
         LOGW("%s send action frame failed %d", ifname, ret);
         return -1;

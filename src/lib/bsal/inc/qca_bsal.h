@@ -47,6 +47,8 @@ int     qca_bsal_rrm_beacon_report_request(const char *ifname, const uint8_t *ma
 
 int     qca_bsal_rrm_set_neighbor(const char *ifname, const bsal_neigh_info_t *nr);
 int     qca_bsal_rrm_remove_neighbor(const char *ifname, const bsal_neigh_info_t *nr);
+int     qca_bsal_rrm_get_neighbors(const char *ifname, bsal_neigh_info_t *nrs,
+                                   unsigned int *nr_cnt, const unsigned int max_nr_cnt);
 int     qca_bsal_send_action(const char *ifname, const uint8_t *mac_addr, const uint8_t *data, unsigned int data_len);
 
 #ifdef CONFIG_PLATFORM_QCA_QSDK110

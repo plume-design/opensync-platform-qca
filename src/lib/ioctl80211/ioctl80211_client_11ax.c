@@ -115,7 +115,6 @@ static struct avg_phyrate g_peer_avg_phyrate[PEER_CLI_MAX];
 #endif
 typedef struct iw_statistics    iwstats;
 
-#define LIST_STATION_CFG_ALLOC_SIZE 3*1024
 #define	QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION 74
 
 extern struct   socket_context sock_ctx;

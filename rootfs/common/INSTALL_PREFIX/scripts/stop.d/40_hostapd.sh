@@ -23,9 +23,22 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+# {# jinja-parse #}
+
+{%- if CONFIG_OVSDB_BOOTSTRAP_WIFI_STA_LIST is not none %}
+    {%- set phy_sta_list =  CONFIG_OVSDB_BOOTSTRAP_WIFI_STA_LIST.split(' ') %}
+    {%- set sta_list = [] %}
+    {%- for phy_sta in phy_sta_list %}
+        {%- set sta_list = sta_list.append(phy_sta.split(':')[1]) %}
+    {%- endfor %}
+sta_list="{{sta_list|join(' ')}}"
+{%- else %}
+sta_list="bhaul-sta-24 bhaul-sta-50 bhaul-sta-l50 bhaul-sta-u50 bhaul-sta-60"
+{%- endif %}
+
 # Kindly ask wpa_s/hostap to terminate. Driver gets angry if
 # you're too bold.
-for i in bhaul-sta-24 bhaul-sta-50 bhaul-sta-l50 bhaul-sta-u50
+for i in ${sta_list}
 do
     sockpath=/var/run/wpa_supplicant-$(cat /sys/class/net/$i/parent)
     test -e $sockpath/$i || continue

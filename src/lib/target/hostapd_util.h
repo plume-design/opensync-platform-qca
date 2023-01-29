@@ -37,6 +37,7 @@ bool hostapd_client_disconnect(const char *path, const char *interface, const ch
 bool hostapd_btm_request(const char *path, const char *interface, const char *btm_req_cmd);
 bool hostapd_rrm_set_neighbor(const char *path, const char *interface, const char *bssid, const char *nr);
 bool hostapd_rrm_remove_neighbor(const char *path, const char *interface, const char *bssid);
+bool hostapd_rrm_get_neighbors(const char *path, const char *interface, char *buf, const size_t buf_len);
 bool hostapd_remove_station(const char *path, const char *interface, const char *mac_str);
 
 bool hostapd_dpp_stop(const char *path, const char *interface, const char *command, const char *conf_num, int timeout_seconds);
