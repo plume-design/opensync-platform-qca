@@ -407,6 +407,9 @@ util_exec_scripts(const char *vif)
 static void
 util_ovsdb_wpa_clear(const char* if_name)
 {
+    if (getenv("TARGET_DISABLE_OVSDB_POKING"))
+        return;
+
     ovsdb_table_t table_Wifi_VIF_Config;
     struct schema_Wifi_VIF_Config new_vconf;
     int ret;
@@ -463,6 +466,15 @@ util_kv_set(const char *key, const char *val)
     STRSCPY(i->key, key);
     STRSCPY(i->val, val);
     LOGT("%s: '%s'='%s'", __func__, key, val);
+}
+
+static bool
+fallback_parents_is_enabled(void)
+{
+    if (getenv("TARGET_DISABLE_FALLBACK_PARENTS"))
+        return false;
+
+    return true;
 }
 
 static int
@@ -1257,6 +1269,7 @@ qca_wpas_report(struct wpas *wpas)
      * scan results in congested rf env
      */
     memset(&vstate, 0, sizeof(vstate));
+    SCHEMA_SET_STR(vstate.if_name, wpas->ctrl.bss);
     wpas_bss_get(wpas, &vstate);
     util_iwpriv_set_scanfilter(wpas->ctrl.bss, vstate.ssid);
 }
@@ -1634,11 +1647,15 @@ util_iwpriv_getmac(const char *vif, char *buf, int len)
     static const char *prefix = "getmac:";
     char *p;
     int err;
+    const bool is_home = (strstr(vif, "home-ap-") != NULL);
+    const bool is_fh = (strstr(vif, "fh-") != NULL);
+    const bool masking_enabled = (atoi(getenv("TARGET_DISABLE_ACL_MASKING") ?: "0") == 0);
+    const bool masking_needed = is_home || is_fh;
 
     memset(buf, 0, len);
 
     /* FIXME: this avoids clash with BM which uses same driver ACL */
-    if ((strstr(vif, "home-ap-") != NULL || strstr(vif, "fh-") != NULL))
+    if (masking_enabled && masking_needed)
         return buf;
 
     if ((err = util_exec_read(NULL, buf, len, "iwpriv", vif, "getmac"))) {
@@ -2268,6 +2285,12 @@ int target_bsal_rrm_remove_neighbor(const char *ifname, const bsal_neigh_info_t 
     return qca_bsal_rrm_remove_neighbor(ifname, nr);
 }
 
+int target_bsal_rrm_get_neighbors(const char *ifname, bsal_neigh_info_t *nrs,
+                                  unsigned int *nr_cnt, const unsigned int max_nr_cnt)
+{
+    return qca_bsal_rrm_get_neighbors(ifname, nrs, nr_cnt, max_nr_cnt);
+}
+
 int target_bsal_send_action(const char *ifname, const uint8_t *mac_addr,
                          const uint8_t *data, unsigned int data_len)
 {
@@ -2534,6 +2557,9 @@ util_csa_start(const char *phy,
 static void
 util_csa_war_update_rconf_channel(const char *phy, int chan)
 {
+    if (getenv("TARGET_DISABLE_OVSDB_POKING"))
+        return;
+
     const char *get = F("%s/../tools/ovsh -r s Wifi_Radio_Config -w channel!=%d -w if_name==%s | grep .",
                         target_bin_dir(), chan, phy);
     const char *cmd = F("%s/../tools/ovsh u Wifi_Radio_Config channel:=%d -w if_name==%s | grep 1",
@@ -2646,8 +2672,24 @@ util_nl_parse_iwevcustom_csa_rx(const char *ifname,
          ev->chan, ev->width_mhz, ev->secondary,
          ev->cfreq2_mhz, ev->valid, supported);
 
+    if (rops.op_csa_rx != NULL) {
+        /* FIXME: This supports 2.4G and 5G only. 6G would
+         * need to figure out the band somehow as well.
+         * Given this is intended mostly for 5GL/5GU splits
+         * this is probably fine as-is.
+        */
+        const int base_mhz = ev->chan < 20 ? 2407 : 5000;
+        const int freq_mhz = base_mhz + (ev->chan * 5);
+        rops.op_csa_rx(ifname, vif, freq_mhz, ev->width_mhz);
+    }
+
     if (supported && ev->valid) {
         util_csa_war_update_rconf_channel(ifname, ev->chan);
+        return;
+    }
+
+    if (rops.op_csa_rx != NULL) {
+        LOGI("%s: implicit csa is disabled, relying on core to handle csa rx", ifname);
         return;
     }
 
@@ -2727,6 +2769,11 @@ util_nl_parse_iwevcustom_radar_detected(const char *phy,
 
     if (!util_wifi_phy_has_sta(phy)) {
         LOGD("%s: no sta vif found, skipping parent change", phy);
+        return;
+    }
+
+    if (fallback_parents_is_enabled() == false) {
+        LOGD("fallback parents disabled, relying on core to handle radar");
         return;
     }
 
@@ -3207,6 +3254,11 @@ util_radio_fallback_parents_get(const char *phy, struct schema_Wifi_Radio_State 
     struct fallback_parent parents[8];
     int parents_num;
     int i;
+
+    if (fallback_parents_is_enabled() == false) {
+        LOGD("fallback parents disabled, relying on core to handle state report");
+        return;
+    }
 
     parents_num = util_kv_get_fallback_parents(phy, &parents[0], ARRAY_SIZE(parents));
 
@@ -3925,6 +3977,9 @@ util_vif_acl_enforce(const char *phy,
     bool allowed;
     bool on_match;
     int i;
+
+    if (atoi(getenv("TARGET_DISABLE_ACL_ENFORCE") ?: "0") != 0)
+        return;
 
     /* The driver doesn't always guarantee to kick
      * clients that were connected but are no

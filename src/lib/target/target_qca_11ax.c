@@ -399,6 +399,9 @@ util_exec_scripts(const char *vif)
 static void
 util_ovsdb_wpa_clear(const char* if_name)
 {
+    if (getenv("TARGET_DISABLE_OVSDB_POKING"))
+        return;
+
     ovsdb_table_t table_Wifi_VIF_Config;
     struct schema_Wifi_VIF_Config new_vconf;
     int ret;
@@ -455,6 +458,15 @@ util_kv_set(const char *key, const char *val)
     STRSCPY(i->key, key);
     STRSCPY(i->val, val);
     LOGT("%s: '%s'='%s'", __func__, key, val);
+}
+
+static bool
+fallback_parents_is_enabled(void)
+{
+    if (getenv("TARGET_DISABLE_FALLBACK_PARENTS"))
+        return false;
+
+    return true;
 }
 
 static int
@@ -1317,6 +1329,7 @@ qca_wpas_report(struct wpas *wpas)
      * scan results in congested rf env
      */
     memset(&vstate, 0, sizeof(vstate));
+    SCHEMA_SET_STR(vstate.if_name, wpas->ctrl.bss);
     wpas_bss_get(wpas, &vstate);
 #if 0
     /*
@@ -1463,7 +1476,7 @@ qca_ctrl_fill_freqlist(struct wpas *wpas)
         p += 2;
         freq = atoi(p);
         if (WARN_ON(freq < 2000)) continue;
-        if (WARN_ON(freq > 7000)) continue;
+        if (WARN_ON(freq > 7115)) continue;
         if (WARN_ON(i >= ARRAY_SIZE(wpas->freqlist))) continue;
         wpas->freqlist[i++] = freq;
     }
@@ -2527,6 +2540,9 @@ util_csa_start(const char *phy,
 static void
 util_csa_war_update_rconf_channel(const char *phy, int chan)
 {
+    if (getenv("TARGET_DISABLE_OVSDB_POKING"))
+        return;
+
     const char *get = F("%s/../tools/ovsh -r s Wifi_Radio_Config -w channel!=%d -w if_name==%s | grep .",
                         target_bin_dir(), chan, phy);
     const char *cmd = F("%s/../tools/ovsh u Wifi_Radio_Config channel:=%d -w if_name==%s | grep 1",
@@ -2639,8 +2655,24 @@ util_nl_parse_iwevcustom_csa_rx(const char *ifname,
          ev->chan, ev->width_mhz, ev->secondary,
          ev->cfreq2_mhz, ev->valid, supported);
 
+    if (rops.op_csa_rx != NULL) {
+        /* FIXME: This supports 2.4G and 5G only. 6G would
+         * need to figure out the band somehow as well.
+         * Given this is intended mostly for 5GL/5GU splits
+         * this is probably fine as-is.
+        */
+        const int base_mhz = ev->chan < 20 ? 2407 : 5000;
+        const int freq_mhz = base_mhz + (ev->chan * 5);
+        rops.op_csa_rx(ifname, vif, freq_mhz, ev->width_mhz);
+    }
+
     if (supported && ev->valid) {
         util_csa_war_update_rconf_channel(ifname, ev->chan);
+        return;
+    }
+
+    if (rops.op_csa_rx != NULL) {
+        LOGI("%s: implicit csa is disabled, relying on core to handle csa rx", ifname);
         return;
     }
 
@@ -2732,6 +2764,11 @@ util_nl_parse_iwevcustom_radar_detected(const char *phy,
 
     if (!util_wifi_phy_has_sta(phy)) {
         LOGD("%s: no sta vif found, skipping parent change", phy);
+        return;
+    }
+
+    if (fallback_parents_is_enabled() == false) {
+        LOGD("fallback parents disabled, relying on core to handle radar");
         return;
     }
 
@@ -3247,6 +3284,11 @@ util_radio_fallback_parents_get(const char *phy, struct schema_Wifi_Radio_State 
     struct fallback_parent parents[8];
     int parents_num;
     int i;
+
+    if (fallback_parents_is_enabled() == false) {
+        LOGD("fallback parents disabled, relying on core to handle state report");
+        return;
+    }
 
     parents_num = util_kv_get_fallback_parents(phy, &parents[0], ARRAY_SIZE(parents));
 
@@ -4249,6 +4291,9 @@ util_vif_acl_enforce(const char *phy,
     bool on_match;
     int i;
 
+    if (atoi(getenv("TARGET_DISABLE_ACL_ENFORCE") ?: "0") != 0)
+        return;
+
     /* The driver doesn't always guarantee to kick
      * clients that were connected but are no
      * longer part of the ACL.
@@ -4741,6 +4786,20 @@ free:
 }
 
 static void
+target_radio_init_discover_phy(void)
+{
+    struct dirent *p;
+    DIR *d;
+
+    for (d = opendir("/sys/class/net"); d && (p = readdir(d)); )
+        if (strstr(p->d_name, "wifi") == p->d_name)
+            util_cb_delayed_update(UTIL_CB_PHY, p->d_name);
+
+    if (!WARN_ON(!d))
+        closedir(d);
+}
+
+static void
 target_radio_init_discover(EV_P_ ev_async *async, int events)
 {
     char *ifnames = strexa("iwconfig");
@@ -4758,6 +4817,7 @@ target_radio_init_discover(EV_P_ ev_async *async, int events)
                     util_cb_delayed_update(UTIL_CB_VIF, ifname);
             }
 
+    target_radio_init_discover_phy();
     ev_async_stop(EV_DEFAULT, async);
 }
 

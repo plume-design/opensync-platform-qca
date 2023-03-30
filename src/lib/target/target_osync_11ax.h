@@ -95,12 +95,16 @@ static inline char *qca_getmac(const char *vif, char *buf, int len)
     static const char *prefix = "getmac:";
     char *p;
     int err;
+    const bool is_home = (strstr(vif, "home-ap-") != NULL);
+    const bool is_fh = (strstr(vif, "fh-") != NULL);
+    const bool masking_enabled = (atoi(getenv("TARGET_DISABLE_ACL_MASKING") ?: "0") == 0);
+    const bool masking_needed = is_home || is_fh;
 
     memset(buf, 0, len);
 
     /* FIXME: this avoids clash with BM which uses same driver ACL */
-    if (strstr(vif, "home-ap-") != NULL || strstr(vif, "fh-") != NULL)
-            return buf;
+    if (masking_enabled && masking_needed)
+        return buf;
 
 #ifdef OPENSYNC_NL_SUPPORT
     const char *xml_path = qca_get_xml_path(vif);

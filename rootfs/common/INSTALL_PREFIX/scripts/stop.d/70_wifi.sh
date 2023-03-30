@@ -23,11 +23,31 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-# Destroy all Wi-Fi interfaces
-for WIFI in $(iwconfig 2>&1 | grep ESSID | cut -d ' ' -f 1); do
-    echo "destroying $WIFI"
-    iwpriv $WIFI dbgLVL 0xf5ffffff
-    ifconfig $WIFI down
-    wlanconfig $WIFI destroy
-done
+vaps() {
+    iwconfig 2>/dev/null | awk '/^[^ \t]/{print $1}'
+}
 
+destroy_all() {
+    for WIFI in $(vaps)
+    do
+        echo "destroying $WIFI"
+        iwpriv $WIFI dbgLVL 0xf5ffffff
+        ifconfig $WIFI down
+        wlanconfig $WIFI destroy
+    done
+}
+
+down_all() {
+    for WIFI in $(vaps)
+    do
+        echo "downing $WIFI"
+        ifconfig $WIFI down
+    done
+}
+
+if test -e /tmp/do_not_destroy_vaps
+then
+    keep_all
+else
+    destroy_all
+fi

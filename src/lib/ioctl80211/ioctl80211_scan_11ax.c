@@ -68,6 +68,7 @@ static const size_t                 g_iw_scan_results_capacity = IOCTL80211_SCAN
 static char                         g_iw_scan_results[IOCTL80211_SCAN_MAX_RESULTS];
 static size_t                       g_iw_scan_results_size;
 static unsigned int                 res_len;
+static bool                         consume_data = false;
 #include "osync_nl80211_11ax.h"
 
 #define IEEE80211_GET_MODE_MASK         0x03
@@ -583,10 +584,11 @@ void ioctl80211_scan_results_fetch(EV_P_ ev_timer *w, int revents)
        We poll in steps of 250ms, max waiting time is 5s.
      */
 
-    /* Reset global storage for every scan! */
-    memset (&g_iw_scan_results, 0, sizeof(g_iw_scan_results));
-    g_iw_scan_results_size = 0;
-    res_len = 0;
+    if (!consume_data) {
+        memset (&g_iw_scan_results, 0, sizeof(g_iw_scan_results));
+        g_iw_scan_results_size = 0;
+        res_len = 0;
+    }
 
     /* Try to read the results */
     rc = osync_nl80211_scan_results_fetch(radio_cfg_ctx);
@@ -631,10 +633,15 @@ void ioctl80211_scan_results_fetch(EV_P_ ev_timer *w, int revents)
         goto exit;
     }
 
+    if (!consume_data && --g_scan_result_timeout > 0) {
+        goto restart_timer;
+    }
+
     /* Mark results scan_status */
     scan_status = true;
 
 exit:
+    consume_data = false;
     ioctl80211_scan_result_timer_set(w, false);
     g_scan_result_timeout = IOCTL80211_SCAN_RESULT_POLL_TIMEOUT;
 

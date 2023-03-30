@@ -1,2 +1,1 @@
 @include "base_qca_spf_11.x"
-CONFIG_QCA_DISABLE_RDK_STATS=y

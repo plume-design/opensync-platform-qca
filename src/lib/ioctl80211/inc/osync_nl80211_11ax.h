@@ -110,6 +110,7 @@ struct ioctl80211_vap_stats
 #define FILE_NAME_LENGTH 64
 #define MAX_WIPHY 3
 #define MAC_STRING_LENGTH 17
+#define LIST_STATION_CFG_ALLOC_SIZE 3*1024
 
 #define streq(a,b) ((strlen(a) == strlen(b)) && (strncasecmp(a,b,sizeof(b)-1) == 0))
 #define send_nl_command(sk_ctx, ifname, buf, len, cb, cmd) \
@@ -551,7 +552,7 @@ static void bsal_stainfo_cb(struct cfg80211_data *data)
     const size_t src_size = data->length;
     const size_t dst_offset = ctx->size;
 
-    LOGT("%s: Clients buffer dst_offset = %d src_size = %d",
+    LOGT("%s: Clients buffer dst_offset = %zu src_size = %zu",
          __func__, dst_offset, src_size);
 
     if (src_size == 0)
@@ -584,8 +585,6 @@ osync_nl80211_sta_info(const char *ifname, const uint8_t *mac_addr, bsal_client_
     struct ieee80211req_sta_info    *sta;
     uint32_t                        len;
     uint8_t                         *buf, *p;
-    uint8_t                         *assoc_ies;
-    uint16_t                        assoc_ies_len;
     bool                            found = false;
     int                             ret;
 
@@ -678,15 +677,6 @@ osync_nl80211_sta_info(const char *ifname, const uint8_t *mac_addr, bsal_client_
         qca_bsal_fill_sta_info(info, sta);
         qca_bsal_client_get_datarate_info(ifname, mac_addr, &info->datarate_info);
         info->connected = true;
-
-        assoc_ies_len = sta->isi_len - sizeof(*sta);
-        assoc_ies = (uint8_t *) (sta+1);
-        if (assoc_ies_len <= sizeof(info->assoc_ies)) {
-            memcpy(info->assoc_ies, assoc_ies, assoc_ies_len);
-            info->assoc_ies_len = assoc_ies_len;
-        } else {
-            LOGW("%s ies_len (%u) higher than ies table (%zu)", ifname, assoc_ies_len, sizeof(info->assoc_ies));
-        }
     }
     FREE(buf);
     if (info->connected)
@@ -1666,8 +1656,25 @@ nl80211_device_txchainmask_get(radio_entry_t              *radio_cfg,
 extern struct socket_context sock_ctx;
 
 #ifdef OPENSYNC_NL_SUPPORT
-static void  bss_info_handler(struct cfg80211_data *buffer)
+
+static void bss_info_handler(struct cfg80211_data *buffer)
 {
+    const void *src = buffer->data;
+    const size_t src_size = buffer->length;
+
+    if (src_size == 0) {
+        LOG(ERR, "%s:  src_size is %d", __func__, src_size);
+        return;
+    }
+
+    if (WARN_ON(src_size < sizeof(struct ieee80211req_scan_result))) {
+        return;
+    }
+
+    if (WARN_ON(src == NULL)) {
+        return;
+    }
+
     if ((res_len + buffer->length) >= g_iw_scan_results_capacity)
     {
         LOG(ERR,
@@ -1677,34 +1684,40 @@ static void  bss_info_handler(struct cfg80211_data *buffer)
         return;
     }
 
-    memcpy(g_iw_scan_results + res_len, buffer->data,buffer->length);
-    res_len += buffer->length;
-    g_iw_scan_results_size += buffer->length;
+    memcpy(g_iw_scan_results + res_len, src, src_size);
+    res_len += src_size;
+    g_iw_scan_results_size += src_size;
+
+    /* Data is managed by NL helper,
+     * needs to set length 0 to force always use new buffer
+     */
+    buffer->length = 0;
+    consume_data = 1;
 }
 #endif
+
 static inline int
 osync_nl80211_scan_results_fetch(radio_entry_t *radio_cfg_ctx)
 {
 #ifdef OPENSYNC_NL_SUPPORT
     int msg;
-    int list_alloc_size;
-    list_alloc_size = 3*1024;
-    struct cfg80211_data buffer;
-    char buf[list_alloc_size];
+    struct cfg80211_data buffer = {0};
 
-    buffer.data = buf;
-    buffer.length = list_alloc_size;
-    buffer.callback = bss_info_handler;
+    /* Use default NL data buffer */
+    buffer.data = NULL;
+    buffer.length = 0;
+    buffer.callback = &bss_info_handler;
     buffer.parse_data = 0;
     msg = wifi_cfg80211_send_generic_command(&(sock_ctx.cfg80211_ctxt),
             QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION,
-            QCA_NL80211_VENDOR_SUBCMD_LIST_SCAN, radio_cfg_ctx->if_name, (char *)&buffer, list_alloc_size);
+            QCA_NL80211_VENDOR_SUBCMD_LIST_SCAN, radio_cfg_ctx->if_name,
+            (void *)&buffer.data, buffer.length);
     if (msg < 0) {
-        LOG(ERR,"Failed to send NL scan command");
+	LOG(ERR,"Failed to send NL scan command");
         return -1;
     }
 
-    return buffer.length;
+    return 0;
 #else
     int rc;
     struct iwreq                    request;

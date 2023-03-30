@@ -53,6 +53,23 @@ start_qca_hostapd()
 
 ###############################################################################
 # DESCRIPTION:
+#   Function checks if device supports WPA3
+# INPUT PARAMETER(S):
+#   None.
+# RETURNS:
+#   1   Always.
+# USAGE EXAMPLE(S):
+#   check_wpa3_compatibility
+###############################################################################
+check_wpa3_compatibility()
+{
+    check_kconfig_option "CONFIG_PLATFORM_QCA_QSDK110" "y" &&
+        log -deb "qca_platform_override:check_wpa3_compatibility - WPA3 compatible"
+        log -err "qca_platform_override:check_wpa3_compatibility - WPA3 incompatible"
+}
+
+###############################################################################
+# DESCRIPTION:
 #   Function starts qca-wpa-supplicant.
 #   Uses qca-wpa-supplicant tool.
 # INPUT PARAMETER(S):
@@ -120,9 +137,9 @@ get_tx_power_from_os()
     local NARGS=1
     [ $# -ne ${NARGS} ] &&
         raise "qca_platform_override:get_tx_power_from_os requires ${NARGS} input argument(s), $# given" -arg
-    wm2_vif_if_name=$1
+    vif_if_name=$1
 
-    iwconfig $wm2_vif_if_name | grep "Tx-Power" | awk '{print $4}' | awk -F '=' '{print $2}'
+    iwconfig $vif_if_name | grep "Tx-Power" | awk '{print $4}' | awk -F '=' '{print $2}'
 }
 
 ###############################################################################
@@ -141,19 +158,19 @@ check_tx_chainmask_at_os_level()
     local NARGS=2
     [ $# -ne ${NARGS} ] &&
         raise "qca_platform_override:check_tx_chainmask_at_os_level requires ${NARGS} input argument(s), $# given" -arg
-    wm2_tx_chainmask=$1
-    wm2_if_name=$2
+    tx_chainmask=$1
+    if_name=$2
 
-    log "qca_platform_override:check_tx_chainmask_at_os_level - Checking Radio TX Chainmask for interface '$wm2_if_name' at OS - LEVEL2"
-    wait_for_function_response 0 "iwpriv $wm2_if_name get_txchainsoft | grep -F get_txchainsoft:$wm2_tx_chainmask"
+    log "qca_platform_override:check_tx_chainmask_at_os_level - Checking Radio TX Chainmask for interface '$if_name' at OS - LEVEL2"
+    wait_for_function_response 0 "iwpriv $if_name get_txchainsoft | grep -F get_txchainsoft:$tx_chainmask"
     if [ $? = 0 ]; then
-        log -deb "qca_platform_override:check_tx_chainmask_at_os_level - Tx Chainmask '$wm2_tx_chainmask' is set at OS - LEVEL2 - Success"
+        log -deb "qca_platform_override:check_tx_chainmask_at_os_level - Tx Chainmask '$tx_chainmask' is set at OS - LEVEL2 - Success"
     else
-        wait_for_function_response 0 "iwpriv $wm2_if_name get_txchainmask | grep -F get_txchainmask:$wm2_tx_chainmask"
+        wait_for_function_response 0 "iwpriv $if_name get_txchainmask | grep -F get_txchainmask:$tx_chainmask"
         if [ $? = 0 ]; then
-            log -deb "qca_platform_override:check_tx_chainmask_at_os_level - Tx Chainmask '$wm2_tx_chainmask' is set at OS - LEVEL2 - Success"
+            log -deb "qca_platform_override:check_tx_chainmask_at_os_level - Tx Chainmask '$tx_chainmask' is set at OS - LEVEL2 - Success"
         else
-            raise "FAIL: Tx Chainmask '$wm2_tx_chainmask' is not set at OS - LEVEL2" -l "qca_platform_override:check_tx_chainmask_at_os_level" -tc
+            raise "FAIL: Tx Chainmask '$tx_chainmask' is not set at OS - LEVEL2" -l "qca_platform_override:check_tx_chainmask_at_os_level" -tc
         fi
     fi
 
@@ -177,13 +194,13 @@ check_beacon_interval_at_os_level()
     local NARGS=2
     [ $# -ne ${NARGS} ] &&
         raise "qca_platform_override:check_beacon_interval_at_os_level requires ${NARGS} input argument(s), $# given" -arg
-    wm2_bcn_int=$1
-    wm2_vif_if_name=$2
+    bcn_int=$1
+    vif_if_name=$2
 
     log "qca_platform_override:check_beacon_interval_at_os_level - Checking Beacon interval at OS - LEVEL2"
-    wait_for_function_response 0 "iwpriv $wm2_vif_if_name get_bintval | grep -F get_bintval:$wm2_bcn_int" &&
-        log -deb "qca_platform_override:check_beacon_interval_at_os_level - Beacon interval '$wm2_bcn_int' for '$wm2_vif_if_name' is set at OS - LEVEL2 - Success" ||
-        raise "FAIL: Beacon interval '$wm2_bcn_int' for '$wm2_vif_if_name' is not set at OS - LEVEL2" -l "qca_platform_override:check_beacon_interval_at_os_level" -tc
+    wait_for_function_response 0 "iwpriv $vif_if_name get_bintval | grep -F get_bintval:$bcn_int" &&
+        log -deb "qca_platform_override:check_beacon_interval_at_os_level - Beacon interval '$bcn_int' for '$vif_if_name' is set at OS - LEVEL2 - Success" ||
+        raise "FAIL: Beacon interval '$bcn_int' for '$vif_if_name' is not set at OS - LEVEL2" -l "qca_platform_override:check_beacon_interval_at_os_level" -tc
 
     return 0
 }
@@ -203,9 +220,9 @@ get_channel_from_os()
     local NARGS=1
     [ $# -ne ${NARGS} ] &&
         raise "qca_platform_override:get_channel_from_os requires ${NARGS} input argument(s), $# given" -arg
-    wm2_vif_if_name=$1
+    vif_if_name=$1
 
-    iwlist $wm2_vif_if_name channel | grep -F "Current" | grep -F "Channel" | sed 's/)//g' | awk '{ print $5 }'
+    iwlist $vif_if_name channel | grep -F "Current" | grep -F "Channel" | sed 's/)//g' | awk '{ print $5 }'
 }
 
 ###############################################################################
@@ -224,10 +241,10 @@ get_ht_mode_from_os()
     local NARGS=2
     [ $# -ne ${NARGS} ] &&
         raise "qca_platform_override:get_ht_mode_from_os requires ${NARGS} input argument(s), $# given" -arg
-    wm2_vif_if_name=$1
-    wm2_channel=$2
+    vif_if_name=$1
+    channel=$2
 
-    iwpriv $wm2_vif_if_name get_mode | sed 's/HT/ HT/g' | sed 's/PLUS$//' | sed 's/MINUS$//' | awk '{ print $3 }'
+    iwpriv $vif_if_name get_mode | sed 's/HT/ HT/g' | sed 's/PLUS$//' | sed 's/MINUS$//' | awk '{ print $3 }'
 }
 
 ###############################################################################

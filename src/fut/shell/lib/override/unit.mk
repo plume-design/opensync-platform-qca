@@ -31,4 +31,7 @@ UNIT_TYPE := FUT
 # Output directory
 UNIT_DIR := shell/lib/override/
 
-UNIT_FILE := qca_platform_override.sh
+UNIT_FILE := pp203x_lib_override.sh
+UNIT_FILE += pp603x_lib_override.sh
+UNIT_FILE += qca_platform_override.sh
+UNIT_FILE += ipq807x_ap_hk09_lib_override.sh

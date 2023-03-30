@@ -22,32 +22,6 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-##############################################################################
-#
-# Band Steering Abstraction Library
-#
-##############################################################################
-
-UNIT_NAME := qca_bsal
-UNIT_TYPE := LIB
-
-ifeq ($(CONFIG_PLATFORM_QCA_QSDK110),y)
-UNIT_SRC += src/bsal_qca10_2_4_csu3_11ax.c
-else
-UNIT_SRC += src/bsal_qca10_2_4_csu3.c
+ifeq ($(CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4),y)
+UNIT_SRC_TOP += $(OVERRIDE_DIR)/src/osw_plat_qsdk11_4.c
 endif
-
-UNIT_SRC += src/bsal_qca_assoc_req_ies.c
-
-UNIT_CFLAGS := -I$(UNIT_PATH)/inc
-ifeq ($(CONFIG_PLATFORM_QCA_QSDK110),y)
-UNIT_CFLAGS += -I$(STAGING_DIR)/usr/include/libnl3/
-endif
-UNIT_EXPORT_CFLAGS := $(UNIT_CFLAGS)
-
-UNIT_DEPS_CFLAGS := src/lib/target
-
-UNIT_DEPS += src/lib/common
-UNIT_DEPS += src/lib/ds
-UNIT_DEPS += src/lib/const
-UNIT_DEPS += $(PLATFORM_DIR)/src/lib/ioctl80211

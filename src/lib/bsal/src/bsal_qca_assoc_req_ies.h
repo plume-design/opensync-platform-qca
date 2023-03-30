@@ -24,53 +24,25 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-/*
- * ECM SFE utilities
- */
+#ifndef BSAL_QCA_ASSOC_REQ_IES_H
+#define BSAL_QCA_ASSOC_REQ_IES_H
 
-#define _GNU_SOURCE
-#include <stdio.h>
-#include <stdbool.h>
-#include <stdint.h>
+bool
+bsal_qca_assoc_req_parse_frame(const uint8_t *assoc_req_frame,
+                               size_t assoc_req_frame_len,
+                               const uint8_t **sta_addr,
+                               const uint8_t **assoc_req_ies,
+                               size_t *assoc_req_ies_len);
+void
+bsal_qca_assoc_req_ies_cache_set(const uint8_t *sta_addr,
+                                 const char *ifname,
+                                 const uint8_t *assoc_req_ies,
+                                 size_t assoc_req_ies_len);
 
-#include "hw_acc.h"
-#include "os.h"
-#include "log.h"
-#include "kconfig.h"
+bool
+bsal_qca_assoc_req_ies_cache_lookup(const uint8_t *sta_addr,
+                                    const char *ifname,
+                                    const uint8_t **assoc_req_ies,
+                                    size_t *assoc_req_ies_len);
 
-#define MODULE_ID LOG_MODULE_ID_TARGET
-
-bool hw_acc_flush(struct hw_acc_flush_flow_t *flow)
-{
-    return true;
-}
-
-bool hw_acc_flush_flow_per_device(int devid)
-{
-    return true;
-}
-
-bool hw_acc_flush_flow_per_mac(const char *mac)
-{
-    if (file_put(CONFIG_QCA_HW_ACC_FILE_PATH, mac) == -1)
-    {
-        return false;
-    }
-    LOGD("hw_acc: flushed mac '%s'", mac);
-    return true;
-}
-
-bool hw_acc_flush_all_flows(void)
-{
-    return true;
-}
-
-void hw_acc_enable()
-{
-    return;
-}
-
-void hw_acc_disable()
-{
-    return;
-}
+#endif /* BSAL_QCA_ASSOC_REQ_IES_H */

@@ -111,6 +111,24 @@ bool hostapd_rrm_remove_neighbor(const char *path, const char *interface, const 
     return ret;
 }
 
+bool hostapd_rrm_get_neighbors(const char *path, const char *interface, char *buf, const size_t buf_len)
+{
+    char    hostapd_cmd[1024];
+    bool    ret = false;
+
+    snprintf(hostapd_cmd, sizeof(hostapd_cmd),
+            "%s 5 hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s "
+            "show_neighbor",
+            CMD_TIMEOUT, path, interface, interface);
+
+    ret = !cmd_buf(hostapd_cmd, buf, buf_len);
+    if (!ret) {
+        LOGE("hostapd_cli execution failed: %s", hostapd_cmd);
+    }
+
+    return ret;
+}
+
 /* To use it first check if tx=0 is supprted for your hostapd version */
 bool hostapd_remove_station(const char *path, const char *interface, const char *mac_str)
 {

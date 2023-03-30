@@ -87,7 +87,7 @@ config QCA_NF_NAT_HELPERS
 
 config QCA_HW_ACC_FILE_PATH
     string "Hardware acceleration file path"
-    default "/sys/kernel/debug/sfe_drv/flush_mac"
+    default "/sys/kernel/debug/ecm/ecm_db/defunct_mac"
     help
         This is the file where MAC addresses of Openflow rules
         are stored for flushing.
@@ -97,11 +97,5 @@ config QCA_HW_ACC_NSS
     default n
     help
         Enable NSS acceleration support
-
-config QCA_DISABLE_RDK_STATS
-    bool "Disable RDK stats"
-    default n
-    help
-        Disable config "enable_rdk_stats" in global.ini file
 
 endif
