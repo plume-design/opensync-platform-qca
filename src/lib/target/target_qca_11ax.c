@@ -1521,6 +1521,9 @@ qca_ctrl_discover(const char *bss)
         hapd->ieee80211n = 1;
         hapd->ieee80211ac = 1;
         hapd->ieee80211ax = 1;
+#if defined(CONFIG_PLATFORM_QCA_QSDK120)
+        hapd->ieee80211be = 1;
+#endif
         ctrl_enable(&hapd->ctrl);
         caps = strchomp(R(F("/sys/class/net/%s/cfg80211_htcaps", bss)), "\r\n ");
         if (caps != NULL) STRSCPY_WARN(hapd->htcaps, caps);
@@ -1647,6 +1650,13 @@ static const struct util_iwpriv_mode {
     { "11ax", "HT80", { "5G", "5GU", "5GL", "6G" }, { "11AHE80" } },
     { "11ax", "HT160", { "5G", "5GU", "5GL", "6G" }, { "11AHE160" } },
     { "11ax", "HT80+80", { "5G", "5GU", "5GL", "6G" }, { "11AHE80_80" } },
+    { "11be", "HT20", { "2.4G" }, { "11GEHT20" } },
+    { "11be", "HT40", { "2.4G" }, { "11GEHT40", "11GEHT40PLUS", "11GEHT40MINUS" } },
+    { "11be", "HT20", { "5G", "5GU", "5GL", "6G" }, { "11AEHT20" } },
+    { "11be", "HT40", { "5G", "5GU", "5GL", "6G" }, { "11AEHT40", "11AEHT40PLUS", "11AEHT40MINUS" } },
+    { "11be", "HT80", { "5G", "5GU", "5GL", "6G" }, { "11AEHT80" } },
+    { "11be", "HT160", { "5G", "5GU", "5GL", "6G" }, { "11AEHT160" } },
+    { "11be", "HT320", { "5G", "5GU", "5GL", "6G" }, { "11AEHT320" } },
     { NULL, NULL, {}, {} }, /* array guard, keep last */
 };
 
@@ -1751,10 +1761,9 @@ static bool
 util_qca_get_bcn_int(const char *phy, int *v)
 {
     char *vif;
-    int err;
 
-    err = util_wifi_any_phy_vif(phy, vif = A(32));
-    if (err)
+    vif = util_iwconfig_any_phy_vif_type(phy, "ap", A(32));
+    if (!vif)
         return false;
 
     return util_qca_get_int(vif, "get_bintval", v);
@@ -2252,6 +2261,7 @@ int target_bsal_send_action(const char *ifname, const uint8_t *mac_addr,
 #define EXTTOOL_CW_40 1
 #define EXTTOOL_CW_80 2
 #define EXTTOOL_CW_160 3
+#define EXTTOOL_CW_320 5
 #define EXTTOOL_CW_DEFAULT EXTTOOL_CW_20
 
 #define EXTTOOL_HT40_PLUS_STR "CU"
@@ -2292,6 +2302,8 @@ util_csa_get_chwidth(const char *phy, const char *mode)
         return EXTTOOL_CW_80;
     if (!strcmp(mode, "HT160"))
         return EXTTOOL_CW_160;
+    if (!strcmp(mode, "HT320"))
+        return EXTTOOL_CW_320;
 
     LOGW("%s: failed to get channel width, defaulting to: %d",
          phy, EXTTOOL_CW_DEFAULT);
@@ -2469,7 +2481,7 @@ util_cac_in_progress(const char *phy)
     const char *line;
     char *buf;
 
-#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+#ifdef CONFIG_QCA_TARGET_EXTTOOL_LIST_CHAN_STATE
     if (WARN_ON(!(buf = strexa("exttool", "--list_chan_state", "--interface", phy))))
 #else
     if (WARN_ON(!(buf = strexa("exttool", "--interface", phy, "--list"))))
@@ -2489,10 +2501,17 @@ util_csa_start(const char *phy,
                const char *hw_mode,
                const char *freq_band,
                const char *ht_mode,
-               int channel)
+               int channel,
+               int ccfs0)
 {
     char mode[32];
     int err;
+    char cfreq2[32] = "";
+
+    if (!strcmp(hw_mode, "11be")) {
+        if (ccfs0 != 0)
+            snprintf(cfreq2, sizeof(cfreq2), "--cfreq2 %d", ccfs0);
+    }
 
     if (util_cac_in_progress(phy)) {
         /* The down+up workaround was originally introduced for
@@ -2517,13 +2536,14 @@ util_csa_start(const char *phy,
         return err ? -1 : 0;
     }
 
-    err = runcmd("exttool --chanswitch --interface %s --chan %d --band %d --numcsa %d --chwidth %d --secoffset %d",
+    err = runcmd("exttool --chanswitch --interface %s --chan %d --band %d --numcsa %d --chwidth %d --secoffset %d %s",
                  phy,
                  channel,
                  util_get_radio_band(freq_band),
                  CSA_COUNT,
                  util_csa_get_chwidth(phy, ht_mode),
-                 util_csa_get_secoffset(phy, channel));
+                 util_csa_get_secoffset(phy, channel),
+                 cfreq2);
     if (err) {
         LOGW("%s: failed to run exttool; is csa already running? invalid channel? nop active?",
              phy);
@@ -3069,7 +3089,7 @@ util_radio_channel_state(const char *line)
     *     "cac_completed" - dfs/pass CAC beaconing
     */
 
-#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+#ifdef CONFIG_QCA_TARGET_EXTTOOL_LIST_CHAN_STATE
     if (strstr(line, " NON_DFS"))
         return"{\"state\":\"allowed\"}";
     if (strstr(line, " DFS_CAC_REQUIRED"))
@@ -3117,7 +3137,7 @@ util_radio_bgcac_active(const char *phy, int chan, const char *ht_mode)
         return false;
 
     /* Check if any of current channels have CAC started */
-#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+#ifdef CONFIG_QCA_TARGET_EXTTOOL_LIST_CHAN_STATE
     if (WARN_ON(!(buf = strexa("exttool", "--list_chan_state", "--interface", phy))))
 #else
     if (WARN_ON(!(buf = strexa("exttool", "--interface", phy, "--list"))))
@@ -3153,6 +3173,7 @@ util_radio_bgcac_recalc(const char *phy, const struct schema_Wifi_Radio_State *r
      * 80MHz DFS channels here.
      */
     const int cw_80[] = {60, 108, 124};
+    char cfreq2[32] = "";
     unsigned int i;
     const char *state;
     int channel;
@@ -3221,13 +3242,19 @@ util_radio_bgcac_recalc(const char *phy, const struct schema_Wifi_Radio_State *r
     LOGI("%s background CAC restart vdev(s) chan %d @ %s %d",
          phy, rstate->channel, rstate->ht_mode, restart);
 
-    runcmd("exttool --chanswitch --interface %s --chan %d --band %d --numcsa %d --chwidth %d --secoffset %d --force",
+    if (!strcmp(rstate->hw_mode, "11be") &&
+        rstate->center_freq0_chan_exists) {
+            snprintf(cfreq2, sizeof(cfreq2), "--cfreq2 %d", rstate->center_freq0_chan);
+    }
+
+    runcmd("exttool --chanswitch --interface %s --chan %d --band %d --numcsa %d --chwidth %d --secoffset %d %s --force",
             phy,
             rstate->channel,
             util_get_radio_band(rstate->freq_band),
             CSA_COUNT,
             util_csa_get_chwidth(phy, rstate->ht_mode),
-            util_csa_get_secoffset(phy, rstate->channel));
+            util_csa_get_secoffset(phy, rstate->channel),
+            cfreq2);
 }
 
 static void
@@ -3241,7 +3268,7 @@ util_radio_channel_list_get(const char *phy, struct schema_Wifi_Radio_State *rst
 
     buf = buffer;
 
-#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+#ifdef CONFIG_QCA_TARGET_EXTTOOL_LIST_CHAN_STATE
     err = readcmd(buffer, sizeof(buffer), 0, "exttool --list_chan_state --interface %s", phy);
 #else
     err = readcmd(buffer, sizeof(buffer), 0, "exttool --interface %s --list", phy);
@@ -3252,12 +3279,12 @@ util_radio_channel_list_get(const char *phy, struct schema_Wifi_Radio_State *rst
     }
 
     while ((line = strsep(&buf, "\n")) != NULL) {
-#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+#ifdef CONFIG_QCA_TARGET_EXTTOOL_LIST_CHAN_STATE
         if ((!strstr(line, "chan")) && (!strstr(line, "dfs")))
             break;
 #endif
         LOGD("%s line: |%s|", phy, line);
-#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+#ifdef CONFIG_QCA_TARGET_EXTTOOL_LIST_CHAN_STATE
         if (sscanf(line, "chan %d", &channel) != 1) {
 #else
         if (sscanf(line, "chan %d", &channel) == 1) {
@@ -3393,6 +3420,36 @@ util_radio_ht_mode_get(char *phy, char *htmode, int htmode_len)
 
     strscpy(htmode, mode->htmode, htmode_len);
     return true;
+}
+
+static bool
+util_qca_get_center_freq0_chan(const char *phy,
+                               int *chan)
+{
+#ifdef CONFIG_PLATFORM_QCA_QSDK120
+    int cfreq2;
+    char *vif;
+
+    *chan = 0;
+
+    vif = util_iwconfig_any_phy_vif_type(phy, "ap", A(32));
+    if (!vif)
+        return false;
+
+    if (!util_qca_get_int(vif, "get_cfreq2", &cfreq2)) {
+        LOGW("Failed to get cfreq2");
+        return false;
+    }
+
+    *chan = util_iwconfig_freq_to_chan(cfreq2);
+
+    LOGD("%s [%s]: creq2 = %d chan = %d", phy, vif, cfreq2, *chan);
+
+    return *chan > 0 ? true : false;
+
+#else
+    return false;
+#endif
 }
 
 static int
@@ -3675,6 +3732,9 @@ bool target_radio_state_get(char *phy, struct schema_Wifi_Radio_State *rstate)
     if ((rstate->country_exists = util_radio_country_get(phy, country, sizeof(country))))
         STRSCPY(rstate->country, country);
 
+    if ((rstate->center_freq0_chan_exists = util_qca_get_center_freq0_chan(phy, &v)))
+        rstate->center_freq0_chan = v;
+
     STRSCPY(rstate->if_name, phy);
     STRSCPY(rstate->hw_type, hw_type);
     STRSCPY(rstate->hw_mode, hw_mode);
@@ -3919,7 +3979,7 @@ target_radio_config_set2(const struct schema_Wifi_Radio_Config *rconf,
         util_radio_update_radar_escape_freq_mhz(phy);
     }
 
-    if ((changed->channel || changed->ht_mode)) {
+    if ((changed->channel || changed->ht_mode || changed->center_freq0_chan)) {
         if (rconf->channel_exists && rconf->channel > 0 && rconf->ht_mode_exists) {
             if ((vif = util_iwconfig_any_phy_vif_type(phy, "ap", A(32)))) {
                 if (util_radio_bgcac_active(phy, rconf->channel, rconf->ht_mode)) {
@@ -3932,7 +3992,8 @@ target_radio_config_set2(const struct schema_Wifi_Radio_Config *rconf,
                      * This can be removed if the issue is fixed in default SPF
                      */
                     util_mode_reconfig(vif, rconf->hw_mode, rconf->freq_band, rconf->ht_mode);
-                    if (util_csa_start(phy, vif, rconf->hw_mode, rconf->freq_band, rconf->ht_mode, rconf->channel))
+                    if (util_csa_start(phy, vif, rconf->hw_mode, rconf->freq_band, rconf->ht_mode, rconf->channel,
+                                       rconf->center_freq0_chan_exists ? rconf->center_freq0_chan : 0))
                         LOGW("%s: failed to start csa: %d (%s)", phy, errno, strerror(errno));
                     else if (util_radio_config_only_channel_changed(changed))
                         goto report;
@@ -3944,7 +4005,7 @@ target_radio_config_set2(const struct schema_Wifi_Radio_Config *rconf,
         }
     }
 
-    if ((vif = util_iwconfig_any_phy_vif_type(phy, NULL, A(32)))) {
+    if ((vif = util_iwconfig_any_phy_vif_type(phy, "ap", A(32)))) {
 #if 0
         /*
          * If the issue is seen this should be taken care by the OEMs

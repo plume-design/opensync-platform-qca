@@ -37,6 +37,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <netlink/msg.h>
 #include <netlink/genl/genl.h>
 #include <linux/nl80211.h>
+#include <linux/wireless.h>
 
 /* opensync */
 #include <ds_tree.h>
@@ -58,6 +59,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <osw_drv_nl80211.h>
 #include <osw_hostap.h>
 #include <osw_drv_common.h>
+#include <osw_time.h>
 #include <osw_timer.h>
 
 /* qsdk */
@@ -94,6 +96,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <if_athioctl.h>
 #include <ieee80211_ioctl.h>
 #include <dp_rate_stats_pub.h>
+#include <ieee80211_ev.h>
 
 /* Can't include this because headers are partially private.. god knows why */
 #define QCA_VENDOR_OUI 0x001374
@@ -162,6 +165,7 @@ osw_plat_qsdk11_4_put_qca_vendor_cmd(struct nl_80211 *nl,
                                      uint32_t ifindex,
                                      uint32_t vendor_cmd, /* eg. QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION, */
                                      uint32_t generic_cmd, /* eg. QCA_NL80211_VENDOR_SUBCMD_EXTENDEDSTATS, */
+                                     uint32_t value,
                                      uint32_t flags,
                                      const void *data,
                                      size_t len)
@@ -172,11 +176,13 @@ osw_plat_qsdk11_4_put_qca_vendor_cmd(struct nl_80211 *nl,
     nla_put_u32(msg, NL80211_ATTR_VENDOR_ID, QCA_VENDOR_OUI);
     nla_put_u32(msg, NL80211_ATTR_VENDOR_SUBCMD, vendor_cmd);
     struct nlattr *vdata = nla_nest_start(msg, NL80211_ATTR_VENDOR_DATA);
-    nla_put_u32(msg, QCA_WLAN_VENDOR_ATTR_CONFIG_GENERIC_LENGTH, len);
     nla_put_u32(msg, QCA_WLAN_VENDOR_ATTR_CONFIG_GENERIC_COMMAND, generic_cmd);
     nla_put_u32(msg, QCA_WLAN_VENDOR_ATTR_CONFIG_GENERIC_FLAGS, flags);
-    //nla_put_u32(msg, QCA_WLAN_VENDOR_ATTR_CONFIG_GENERIC_PARAM, );
-    nla_put(msg, QCA_WLAN_VENDOR_ATTR_CONFIG_GENERIC_DATA, len, data);
+    nla_put_u32(msg, QCA_WLAN_VENDOR_ATTR_CONFIG_GENERIC_VALUE, value);
+    if (data != NULL) {
+        nla_put_u32(msg, QCA_WLAN_VENDOR_ATTR_CONFIG_GENERIC_LENGTH, len);
+        nla_put(msg, QCA_WLAN_VENDOR_ATTR_CONFIG_GENERIC_DATA, len, data);
+    }
     nla_nest_end(msg, vdata);
 }
 
@@ -185,22 +191,12 @@ osw_plat_qsdk11_4_put_qca_vendor_setparam(struct nl_80211 *nl,
                                           struct nl_msg *msg,
                                           uint32_t ifindex,
                                           uint32_t vendor_cmd, /* eg. QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION, */
-                                          uint32_t cmd_id, /* eg. QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS, */
+                                          uint32_t generic_cmd, /* eg. QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS, */
                                           uint32_t param_id,
                                           const void *data,
                                           size_t len)
 {
-    /* FIXME: check nla_put() results */
-    nl_80211_put_cmd(nl, msg, 0, NL80211_CMD_VENDOR);
-    nla_put_u32(msg, NL80211_ATTR_IFINDEX, ifindex);
-    nla_put_u32(msg, NL80211_ATTR_VENDOR_ID, QCA_VENDOR_OUI);
-    nla_put_u32(msg, NL80211_ATTR_VENDOR_SUBCMD, vendor_cmd);
-    struct nlattr *vdata = nla_nest_start(msg, NL80211_ATTR_VENDOR_DATA);
-    nla_put_u32(msg, QCA_WLAN_VENDOR_ATTR_CONFIG_GENERIC_LENGTH, len);
-    nla_put_u32(msg, QCA_WLAN_VENDOR_ATTR_CONFIG_GENERIC_COMMAND, cmd_id);
-    nla_put_u32(msg, QCA_WLAN_VENDOR_ATTR_CONFIG_GENERIC_VALUE, param_id);
-    nla_put(msg, QCA_WLAN_VENDOR_ATTR_CONFIG_GENERIC_DATA, len, data);
-    nla_nest_end(msg, vdata);
+    return osw_plat_qsdk11_4_put_qca_vendor_cmd(nl, msg, ifindex, vendor_cmd, generic_cmd, param_id, 0, data, len);
 }
 
 static void
@@ -208,18 +204,10 @@ osw_plat_qsdk11_4_put_qca_vendor_getparam(struct nl_80211 *nl,
                                           struct nl_msg *msg,
                                           uint32_t ifindex,
                                           uint32_t vendor_cmd, /* eg. QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION, */
-                                          uint32_t cmd_id, /* eg. QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS, */
-                                          uint32_t param_id)
+                                          uint32_t generic_cmd, /* eg. QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS, */
+                                          uint32_t param_id /* eg. IEEE80211_PARAM_ME */)
 {
-    /* FIXME: check nla_put() results */
-    nl_80211_put_cmd(nl, msg, 0, NL80211_CMD_VENDOR);
-    nla_put_u32(msg, NL80211_ATTR_IFINDEX, ifindex);
-    nla_put_u32(msg, NL80211_ATTR_VENDOR_ID, QCA_VENDOR_OUI);
-    nla_put_u32(msg, NL80211_ATTR_VENDOR_SUBCMD, vendor_cmd);
-    struct nlattr *vdata = nla_nest_start(msg, NL80211_ATTR_VENDOR_DATA);
-    nla_put_u32(msg, QCA_WLAN_VENDOR_ATTR_CONFIG_GENERIC_COMMAND, cmd_id);
-    nla_put_u32(msg, QCA_WLAN_VENDOR_ATTR_CONFIG_GENERIC_VALUE, param_id);
-    nla_nest_end(msg, vdata);
+    return osw_plat_qsdk11_4_put_qca_vendor_cmd(nl, msg, ifindex, vendor_cmd, generic_cmd, param_id, 0, NULL, 0);
 }
 
 struct osw_plat_qsdk11_4_get_param_arg {
@@ -361,13 +349,13 @@ enum osw_plat_qsdk11_4_async_result {
 };
 
 typedef enum osw_plat_qsdk11_4_async_result
-osw_plat_qsdk11_4_async_poll_fn_t(void *priv);
+osw_plat_qsdk11_4_async_poll_fn_t(void *priv,
+                                  struct osw_plat_qsdk11_4_cb *waker);
 
 typedef void
 osw_plat_qsdk11_4_async_drop_fn_t(void *priv);
 
 struct osw_plat_qsdk11_4_async {
-    const struct osw_plat_qsdk11_4_cb *waker;
     osw_plat_qsdk11_4_async_poll_fn_t *poll_fn;
     osw_plat_qsdk11_4_async_drop_fn_t *drop_fn;
     void *priv;
@@ -376,31 +364,24 @@ struct osw_plat_qsdk11_4_async {
 
 static void
 osw_plat_qsdk11_4_async_init(struct osw_plat_qsdk11_4_async *async,
-                             const struct osw_plat_qsdk11_4_cb *waker,
                              osw_plat_qsdk11_4_async_poll_fn_t *poll_fn,
                              osw_plat_qsdk11_4_async_drop_fn_t *drop_fn,
                              void *priv)
 {
-    async->waker = waker;
     async->poll_fn = poll_fn;
     async->drop_fn = drop_fn;
     async->priv = priv;
 }
 
-static void
-osw_plat_qsdk11_4_async_wake(struct osw_plat_qsdk11_4_async *async)
-{
-    if (async == NULL) return;
-    osw_plat_qsdk11_4_cb_call(async->waker);
-}
-
 enum osw_plat_qsdk11_4_async_result
-osw_plat_qsdk11_4_async_poll(struct osw_plat_qsdk11_4_async *async)
+osw_plat_qsdk11_4_async_poll(struct osw_plat_qsdk11_4_async *async,
+                             struct osw_plat_qsdk11_4_cb *waker)
 {
     if (async == NULL) return OSW_PLAT_QSDK11_4_ASYNC_READY;
+    if (WARN_ON(waker == NULL)) return  OSW_PLAT_QSDK11_4_ASYNC_READY;
     if (WARN_ON(async->polling)) return OSW_PLAT_QSDK11_4_ASYNC_PENDING;
     async->polling = true;
-    const enum osw_plat_qsdk11_4_async_result result = async->poll_fn(async->priv);
+    const enum osw_plat_qsdk11_4_async_result result = async->poll_fn(async->priv, waker);
     async->polling = false;
     return result;
 }
@@ -409,8 +390,6 @@ static void
 osw_plat_qsdk11_4_async_drop(struct osw_plat_qsdk11_4_async *async)
 {
     if (async == NULL) return;
-    if (async->waker == NULL) return;
-    async->waker = NULL;
     async->drop_fn(async->priv);
 }
 
@@ -454,16 +433,16 @@ struct osw_plat_qsdk11_4_param_u32 {
 static void
 osw_plat_qsdk11_4_param_u32_done_cb(struct nl_cmd *cmd, void *priv)
 {
-    struct osw_plat_qsdk11_4_async *async = priv;
-    osw_plat_qsdk11_4_async_wake(async);
+    struct osw_plat_qsdk11_4_cb *waker = priv;
+    osw_plat_qsdk11_4_cb_call(waker);
 }
 
 static enum osw_plat_qsdk11_4_async_result
-osw_plat_qsdk11_4_param_u32_poll_cb(void *priv)
+osw_plat_qsdk11_4_param_u32_poll_cb(void *priv,
+                                    struct osw_plat_qsdk11_4_cb *waker)
 {
     struct osw_plat_qsdk11_4_param_u32 *ctx = priv;
     struct osw_plat_qsdk11_4_param_u32_arg *arg = &ctx->arg;
-    struct osw_plat_qsdk11_4_async *async = &ctx->async;
     const enum osw_plat_qsdk11_4_param_u32_policy policy = arg->policy;
     struct nl_cmd **get_cmd = &ctx->get_cmd;
     struct nl_cmd **set_cmd = &ctx->set_cmd;
@@ -490,10 +469,10 @@ osw_plat_qsdk11_4_param_u32_poll_cb(void *priv)
                 const uint32_t vcmd = QCA_NL80211_VENDOR_SUBCMD_GET_WIFI_CONFIGURATION;
                 osw_plat_qsdk11_4_put_qca_vendor_getparam(nl, msg, ifindex, vcmd, cmd_id, param_id);
                 nl_cmd_set_response_fn(cmd, osw_plat_qsdk11_4_get_param_resp_cb, &ctx->param);
-                nl_cmd_set_completed_fn(cmd, osw_plat_qsdk11_4_param_u32_done_cb, async);
                 nl_cmd_set_msg(cmd, msg);
                 *get_cmd = cmd;
             }
+            nl_cmd_set_completed_fn(*get_cmd, osw_plat_qsdk11_4_param_u32_done_cb, waker);
             if (nl_cmd_is_completed(*get_cmd) == false) {
                 return OSW_PLAT_QSDK11_4_ASYNC_PENDING;
             }
@@ -554,10 +533,10 @@ osw_plat_qsdk11_4_param_u32_poll_cb(void *priv)
         struct nl_msg *msg = nlmsg_alloc();
         const uint32_t vcmd = QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION;
         osw_plat_qsdk11_4_put_qca_vendor_setparam(nl, msg, ifindex, vcmd, cmd_id, param_id, &value_to_set, sizeof(value_to_set));
-        nl_cmd_set_completed_fn(cmd, osw_plat_qsdk11_4_param_u32_done_cb, async);
         nl_cmd_set_msg(cmd, msg);
         *set_cmd = cmd;
     }
+    nl_cmd_set_completed_fn(*set_cmd, osw_plat_qsdk11_4_param_u32_done_cb, waker);
     if (nl_cmd_is_completed(*set_cmd) == false) {
         return OSW_PLAT_QSDK11_4_ASYNC_PENDING;
     }
@@ -587,16 +566,122 @@ osw_plat_qsdk11_4_param_u32_drop_cb(void *priv)
 }
 
 static struct osw_plat_qsdk11_4_async *
-osw_plat_qsdk11_4_param_u32_alloc(const struct osw_plat_qsdk11_4_cb *waker,
-                                  const struct osw_plat_qsdk11_4_param_u32_arg *arg)
+osw_plat_qsdk11_4_param_u32_alloc(const struct osw_plat_qsdk11_4_param_u32_arg *arg)
 {
     struct osw_plat_qsdk11_4_param_u32 *ctx = CALLOC(1, sizeof(*ctx));
     ctx->arg = *arg;
     osw_plat_qsdk11_4_async_init(&ctx->async,
-                                 waker,
                                  osw_plat_qsdk11_4_param_u32_poll_cb,
                                  osw_plat_qsdk11_4_param_u32_drop_cb,
                                  ctx);
+    return &ctx->async;
+}
+
+struct osw_plat_qsdk11_4_mbss_tx_vdev {
+    struct osw_plat_qsdk11_4_async async;
+    struct osw_plat_qsdk11_4_async *job_param;
+    struct osw_drv_nl80211_ops *nl_ops;
+    char *phy_name;
+    char *vif_name;
+    uint32_t ifindex;
+    bool pulled_down;
+    bool pulled_up;
+};
+
+#define LOG_PREFIX_MBSS_TX_VDEV(ctx, fmt, ...) \
+    LOG_PREFIX("%s/%s: mbss_tx_vdev: " fmt, \
+               (ctx)->phy_name, \
+               (ctx)->vif_name, \
+               ## __VA_ARGS__)
+
+static enum osw_plat_qsdk11_4_async_result
+osw_plat_qsdk11_4_mbss_tx_vdev_poll_cb(void *priv,
+                                       struct osw_plat_qsdk11_4_cb *waker)
+{
+    struct osw_plat_qsdk11_4_mbss_tx_vdev *ctx = priv;
+    char *phy_name = ctx->phy_name;
+
+    if (ctx->pulled_down == false) {
+        LOGT(LOG_PREFIX_MBSS_TX_VDEV(ctx, "phy: bringing down"));
+        const bool down_failed = (os_nif_up(phy_name, false) == false);
+        WARN_ON(down_failed);
+        ctx->pulled_down = true;
+    }
+
+    if (ctx->job_param == NULL) {
+        LOGT(LOG_PREFIX_MBSS_TX_VDEV(ctx, "param: allocating"));
+
+        const uint32_t ifindex = ctx->ifindex;
+        const char *vif_name = ctx->vif_name;
+        struct osw_drv_nl80211_ops *nl_ops = ctx->nl_ops;
+
+        struct nl_80211 *nl = nl_ops->get_nl_80211_fn(nl_ops);
+        if (WARN_ON(nl == NULL)) {
+            return OSW_PLAT_QSDK11_4_ASYNC_READY;
+        }
+
+        const struct osw_plat_qsdk11_4_param_u32_arg arg = {
+            .nl = nl,
+            .ifindex = ifindex,
+            .cmd_id = QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS,
+            .param_id = IEEE80211_PARAM_MBSS_TXVDEV,
+            .policy = OSW_PLAT_QSDK11_4_PARAM_SET_ALWAYS,
+            .desired_value = 1,
+            .vif_name = vif_name,
+            .param_name = "mbss_tx_vdev",
+        };
+        ctx->job_param = osw_plat_qsdk11_4_param_u32_alloc(&arg);
+    }
+
+    const enum osw_plat_qsdk11_4_async_result result = osw_plat_qsdk11_4_async_poll(ctx->job_param, waker);
+    switch (result) {
+        case OSW_PLAT_QSDK11_4_ASYNC_PENDING:
+            LOGT(LOG_PREFIX_MBSS_TX_VDEV(ctx, "param: pending"));
+            return OSW_PLAT_QSDK11_4_ASYNC_PENDING;
+        case OSW_PLAT_QSDK11_4_ASYNC_READY:
+            LOGT(LOG_PREFIX_MBSS_TX_VDEV(ctx, "param: ready"));
+            break;
+    }
+
+    if (ctx->pulled_up == false) {
+        LOGT(LOG_PREFIX_MBSS_TX_VDEV(ctx, "phy: bringing up"));
+        const bool up_failed = (os_nif_up(phy_name, true) == false);
+        WARN_ON(up_failed);
+        ctx->pulled_up = true;
+    }
+
+    return OSW_PLAT_QSDK11_4_ASYNC_READY;
+}
+
+static void
+osw_plat_qsdk11_4_mbss_tx_vdev_drop_cb(void *priv)
+{
+    struct osw_plat_qsdk11_4_mbss_tx_vdev *ctx = priv;
+    if (ctx == NULL) return;
+
+    LOGT(LOG_PREFIX_MBSS_TX_VDEV(ctx, "dropping"));
+    osw_plat_qsdk11_4_async_drop(ctx->job_param);
+    FREE(ctx->phy_name);
+    FREE(ctx->vif_name);
+    FREE(ctx);
+}
+
+static struct osw_plat_qsdk11_4_async *
+osw_plat_qsdk11_4_mbss_tx_vdev_alloc(struct osw_drv_nl80211_ops *nl_ops,
+                                     const char *phy_name,
+                                     const char *vif_name,
+                                     uint32_t ifindex)
+{
+    struct osw_plat_qsdk11_4_mbss_tx_vdev *ctx = CALLOC(1, sizeof(*ctx));
+    ctx->nl_ops = nl_ops;
+    ctx->phy_name = STRDUP(phy_name);
+    ctx->vif_name = STRDUP(vif_name);
+    ctx->ifindex = ifindex;
+    osw_plat_qsdk11_4_async_init(&ctx->async,
+                                 osw_plat_qsdk11_4_mbss_tx_vdev_poll_cb,
+                                 osw_plat_qsdk11_4_mbss_tx_vdev_drop_cb,
+                                 ctx);
+    LOGT(LOG_PREFIX_MBSS_TX_VDEV(ctx, "allocated"));
     return &ctx->async;
 }
 
@@ -604,6 +689,8 @@ typedef void
 osw_plat_qsdk11_4_task_completed_fn_t(void *priv);
 
 struct osw_plat_qsdk11_4_task {
+    ev_async ev_async;
+    struct ev_loop *loop;
     struct osw_plat_qsdk11_4_cb waker;
     struct osw_plat_qsdk11_4_async *async;
     osw_plat_qsdk11_4_task_completed_fn_t *completed_fn;
@@ -613,6 +700,7 @@ struct osw_plat_qsdk11_4_task {
 static void
 osw_plat_qsdk11_4_task_drop(struct osw_plat_qsdk11_4_task *task)
 {
+    ev_async_start(task->loop, &task->ev_async);
     osw_plat_qsdk11_4_async_drop(task->async);
     task->async = NULL;
 }
@@ -625,10 +713,12 @@ osw_plat_qsdk11_4_task_drop_when_done_cb(void *priv)
 }
 
 static void
-osw_plat_qsdk11_4_task_wake_cb(void *priv)
+osw_plat_qsdk11_4_task_ev_cb(struct ev_loop *loop,
+                             ev_async *ev_async,
+                             int revents)
 {
-    struct osw_plat_qsdk11_4_task *task = priv;
-    const enum osw_plat_qsdk11_4_async_result result = osw_plat_qsdk11_4_async_poll(task->async);
+    struct osw_plat_qsdk11_4_task *task = ev_async->data;
+    const enum osw_plat_qsdk11_4_async_result result = osw_plat_qsdk11_4_async_poll(task->async, &task->waker);
     switch (result) {
         case OSW_PLAT_QSDK11_4_ASYNC_PENDING:
             break;
@@ -642,10 +732,25 @@ osw_plat_qsdk11_4_task_wake_cb(void *priv)
 }
 
 static void
+osw_plat_qsdk11_4_task_wake_cb(void *priv)
+{
+    struct osw_plat_qsdk11_4_task *task = priv;
+    if (ev_is_active(&task->ev_async)) {
+        ev_async_send(task->loop, &task->ev_async);
+    }
+    else {
+        WARN_ON(1);
+    }
+}
+
+static void
 osw_plat_qsdk11_4_task_init(struct osw_plat_qsdk11_4_task *task,
                             osw_plat_qsdk11_4_task_completed_fn_t *completed_fn,
                             void *priv)
 {
+    ev_async_init(&task->ev_async, osw_plat_qsdk11_4_task_ev_cb);
+    task->ev_async.data = task;
+    task->loop = EV_DEFAULT;
     task->waker.fn = osw_plat_qsdk11_4_task_wake_cb;
     task->waker.priv = task;
     task->completed_fn = completed_fn;
@@ -666,11 +771,12 @@ osw_plat_qsdk11_4_task_start(struct osw_plat_qsdk11_4_task *task,
 {
     osw_plat_qsdk11_4_task_drop(task);
     task->async = async;
-    osw_plat_qsdk11_4_async_wake(async);
+    ev_async_start(task->loop, &task->ev_async);
+    osw_plat_qsdk11_4_cb_call(&task->waker);
 }
 
 #define PARAM_U32_TASK_START(task, arg) \
-    osw_plat_qsdk11_4_task_start(task, osw_plat_qsdk11_4_param_u32_alloc(&(task)->waker, arg))
+    osw_plat_qsdk11_4_task_start(task, osw_plat_qsdk11_4_param_u32_alloc(arg))
 
 /*
 NL80211_CMD_VENDOR
@@ -710,6 +816,7 @@ struct osw_plat_qsdk11_4 {
     struct nl_conn *nl_conn;
     struct nl_conn_subscription *nl_conn_sub;
     struct nl_80211_sub *nl_sub;
+    struct ev_io wext_io;
 
     /* FIXME: This assumes a single 2GHz band PHY, which
      * isn't necessarily true, but in practice it is. But
@@ -724,9 +831,49 @@ struct osw_plat_qsdk11_4 {
      */
 };
 
+#define util_nl_each_msg(buf, hdr, len) \
+    for (hdr = buf; NLMSG_OK(hdr, len); hdr = NLMSG_NEXT(hdr, len))
+
+#define util_nl_each_msg_type(buf, hdr, len, type) \
+    util_nl_each_msg(buf, hdr, len) \
+        if (hdr->nlmsg_type == type)
+
+#define util_nl_each_attr(hdr, attr, attrlen) \
+    for (attr = NLMSG_DATA(hdr) + NLMSG_ALIGN(sizeof(struct ifinfomsg)), \
+         attrlen = NLMSG_PAYLOAD(hdr, sizeof(struct ifinfomsg)); \
+         RTA_OK(attr, attrlen); \
+         attr = RTA_NEXT(attr, attrlen))
+
+#define util_nl_each_attr_type(hdr, attr, attrlen, type) \
+    util_nl_each_attr(hdr, attr, attrlen) \
+        if (attr->rta_type == type)
+
+#define util_nl_iwe_data(iwe) \
+    ((void *)(iwe) + IW_EV_LCP_LEN)
+
+#define util_nl_iwe_payload(iwe) \
+    ((iwe)->len - IW_EV_POINT_LEN)
+
+#define util_nl_iwe_next(iwe, iwelen) \
+    ( (iwelen) -= (iwe)->len, (void *)(iwe) + (iwe)->len )
+
+#define util_nl_iwe_ok(iwe, iwelen) \
+    ((iwelen) >= (iwe)->len && (iwelen) > 0)
+
+#define util_nl_each_iwe(attr, iwe, iwelen) \
+    for (iwe = RTA_DATA(attr), \
+         iwelen = RTA_PAYLOAD(attr); \
+         util_nl_iwe_ok(iwe, iwelen); \
+         iwe = util_nl_iwe_next(iwe, iwelen))
+
+#define util_nl_each_iwe_type(attr, iwe, iwelen, type) \
+    util_nl_each_iwe(attr, iwe, iwelen) \
+        if (iwe->cmd == type)
+
 struct osw_plat_qsdk11_4_phy {
     struct osw_plat_qsdk11_4 *m;
     const struct nl_80211_phy *info;
+    struct osw_plat_qsdk11_4_task task_mbss_tx_vdev;
 };
 
 struct osw_plat_qsdk11_4_vif {
@@ -734,23 +881,26 @@ struct osw_plat_qsdk11_4_vif {
     const struct nl_80211_vif *info;
     struct rq q_stats;
     struct rq q_state;
-    struct rq q_config;
-    struct nl_cmd_task task_dbdc_enable;
-    struct nl_cmd_task task_dbdc_samessiddisable;
     struct nl_cmd_task task_get_chanlist;
     struct nl_cmd_task task_get_mcast2ucast;
     struct nl_cmd_task task_get_beacon_rate;
     struct nl_cmd_task task_get_rrm;
+    struct nl_cmd_task task_get_mbss_en;
+    struct nl_cmd_task task_get_mbss_tx_vdev;
+    struct nl_cmd_task task_get_ap_bridge;
     struct nl_cmd_task task_get_regdomain;
     struct nl_cmd_task task_get_country_id;
     struct nl_cmd_task task_get_country;
     struct nl_cmd_task task_survey;
+    struct osw_plat_qsdk11_4_task param_set_dbdc_enable;
+    struct osw_plat_qsdk11_4_task param_set_dbdc_samessiddisable;
     struct osw_plat_qsdk11_4_task param_set_frame_fwd;
     struct osw_plat_qsdk11_4_task param_set_frame_mask;
     struct osw_plat_qsdk11_4_task param_set_ol_stats;
     struct osw_plat_qsdk11_4_task param_set_flush_stats;
     struct osw_plat_qsdk11_4_task param_set_mcast2ucast;
     struct osw_plat_qsdk11_4_task param_set_rrm;
+    struct osw_plat_qsdk11_4_task param_set_ap_bridge;
     struct osw_plat_qsdk11_4_task param_set_beacon_rate;
     struct osw_plat_qsdk11_4_task param_set_disable_coex;
 
@@ -759,6 +909,9 @@ struct osw_plat_qsdk11_4_vif {
     struct osw_plat_qsdk11_4_get_param_arg mcast2ucast_arg;
     struct osw_plat_qsdk11_4_get_param_arg beacon_rate_arg;
     struct osw_plat_qsdk11_4_get_param_arg rrm_arg;
+    struct osw_plat_qsdk11_4_get_param_arg mbss_en_arg;
+    struct osw_plat_qsdk11_4_get_param_arg mbss_tx_vdev_arg;
+    struct osw_plat_qsdk11_4_get_param_arg ap_bridge_arg;
     struct osw_plat_qsdk11_4_get_param_arg regdomain_arg;
     struct osw_plat_qsdk11_4_get_param_arg country_id_arg;
     uint32_t mcast2ucast_next;
@@ -767,12 +920,20 @@ struct osw_plat_qsdk11_4_vif {
     uint32_t beacon_rate_prev;
     uint32_t rrm_next;
     uint32_t rrm_prev;
+    uint32_t mbss_en_next;
+    uint32_t mbss_en_prev;
+    uint32_t mbss_tx_vdev_next;
+    uint32_t mbss_tx_vdev_prev;
+    uint32_t ap_bridge_next;
+    uint32_t ap_bridge_prev;
     uint32_t regdomain_next;
     uint32_t regdomain_prev;
     uint32_t country_id_next;
     uint32_t country_id_prev;
     char country_next[3];
     char country_prev[3];
+
+    struct osw_timer tx_power_changed;
 
     /* Survey stats are reported across multiple nl_msg
      * responses. The first one will be for home-channel,
@@ -789,6 +950,7 @@ struct osw_plat_qsdk11_4_vif {
      * messages.
      */
     uint32_t scan_home_freq;
+    uint32_t last_home_freq;
 };
 
 static uint32_t
@@ -844,6 +1006,61 @@ osw_plat_qsdk11_4_is_disabled(void)
 {
     return osw_plat_qsdk11_4_is_enabled() == false;
 }
+
+static const char *
+osw_plat_qsdk11_4_vif_into_phy_name(struct osw_plat_qsdk11_4_vif *vif)
+{
+    if (WARN_ON(vif->info == NULL)) return NULL;
+
+    struct osw_plat_qsdk11_4 *m = vif->m;
+    struct osw_drv_nl80211_ops *nl_ops = m->nl_ops;
+    struct nl_80211 *nl = nl_ops->get_nl_80211_fn(nl_ops);
+    if (WARN_ON(nl == NULL)) return NULL;
+
+    const struct nl_80211_phy *phy_info = nl_80211_phy_by_wiphy(nl, vif->info->wiphy);
+    if (phy_info == NULL) return NULL;
+
+    return phy_info->name;
+}
+
+static void
+osw_plat_qsdk11_4_phy_report_changed(struct osw_plat_qsdk11_4_vif *vif)
+{
+    struct osw_plat_qsdk11_4 *m = vif->m;
+    struct osw_drv *drv = m->drv_nl80211;
+    const char *phy_name = osw_plat_qsdk11_4_vif_into_phy_name(vif);
+    if (drv == NULL) return;
+    if (phy_name == NULL) return;
+
+    osw_drv_report_phy_changed(drv, phy_name);
+}
+
+static void
+osw_plat_qsdk11_4_vif_report_changed(struct osw_plat_qsdk11_4_vif *vif)
+{
+    struct osw_plat_qsdk11_4 *m = vif->m;
+    struct osw_drv *drv = m->drv_nl80211;
+    const char *phy_name = osw_plat_qsdk11_4_vif_into_phy_name(vif);
+    const char *vif_name = vif->info->name;
+    if (drv == NULL) return;
+    if (phy_name == NULL) return;
+
+    osw_drv_report_vif_changed(drv, phy_name, vif_name);
+}
+
+static bool
+osw_plat_qsdk11_4_vif_attr_set(struct osw_plat_qsdk11_4_vif *vif,
+                               void *dst,
+                               const void *src,
+                               const size_t len)
+{
+    const bool changed = (memcmp(dst, src, len) != 0);
+    memcpy(dst, src, len);
+    return changed;
+}
+
+#define OSW_PLAT_QSDK11_4_VIF_ATTR_SET(vif, dst, src) \
+    osw_plat_qsdk11_4_vif_attr_set(vif, &(dst), &(src), sizeof(dst))
 
 static enum osw_acl_policy
 osw_plat_qsdk11_4_maccmd_to_policy(int num)
@@ -944,6 +1161,24 @@ osw_plat_qsdk11_4_conf_to_mode(const struct osw_drv_vif_config *vif,
     const int sec_offset = osw_channel_ht40_offset(c, max_2g_chan);
     const enum osw_band band = osw_freq_to_band(freq);
 
+    static const struct mode_map modes_eht[] = {
+        { OSW_BAND_2GHZ, OSW_CHANNEL_20MHZ, "11GEHT20", NULL, NULL },
+        { OSW_BAND_2GHZ, OSW_CHANNEL_40MHZ, "11GEHT40", "11AEHT40MINUS", "11GEHT40PLUS" },
+
+        { OSW_BAND_5GHZ, OSW_CHANNEL_20MHZ, "11AEHT20", NULL, NULL },
+        { OSW_BAND_5GHZ, OSW_CHANNEL_40MHZ, "11AEHT40", "11AEHT40MINUS", "11AEHT40PLUS" },
+        { OSW_BAND_5GHZ, OSW_CHANNEL_80MHZ, "11AEHT80", NULL, NULL },
+        { OSW_BAND_5GHZ, OSW_CHANNEL_160MHZ, "11AHE160", NULL, NULL },
+
+        { OSW_BAND_6GHZ, OSW_CHANNEL_20MHZ, "11AEHT20", NULL, NULL },
+        { OSW_BAND_6GHZ, OSW_CHANNEL_40MHZ, "11AEHT40", "11AEHT40MINUS", "11AEHT40PLUS" },
+        { OSW_BAND_6GHZ, OSW_CHANNEL_80MHZ, "11AEHT80", NULL, NULL },
+        { OSW_BAND_6GHZ, OSW_CHANNEL_160MHZ, "11AHE160", NULL, NULL },
+        { OSW_BAND_6GHZ, OSW_CHANNEL_320MHZ, "11AEHT320", NULL, NULL },
+
+        { OSW_BAND_UNDEFINED, OSW_CHANNEL_20MHZ, NULL, NULL, NULL },
+    };
+
     static const struct mode_map modes_he[] = {
         { OSW_BAND_2GHZ, OSW_CHANNEL_20MHZ, "11GHE20", NULL, NULL },
         { OSW_BAND_2GHZ, OSW_CHANNEL_40MHZ, "11GHE40", "11GHE40MINUS", "11GHE40PLUS" },
@@ -1006,7 +1241,8 @@ osw_plat_qsdk11_4_conf_to_mode(const struct osw_drv_vif_config *vif,
 
     const struct mode_map *mode = modes_legacy;
 
-    if (vif->u.ap.mode.he_enabled) mode = modes_he;
+    if (vif->u.ap.mode.eht_enabled) mode = modes_eht;
+    else if (vif->u.ap.mode.he_enabled) mode = modes_he;
     else if (vif->u.ap.mode.vht_enabled) mode = modes_vht;
     else if (vif->u.ap.mode.ht_enabled) mode = modes_ht;
 
@@ -1075,7 +1311,8 @@ osw_plat_qsdk11_4_exttool_get_chwidth(const struct osw_channel *c)
         case OSW_CHANNEL_40MHZ: return "1";
         case OSW_CHANNEL_80MHZ: return "2";
         case OSW_CHANNEL_160MHZ: return "3";
-        case OSW_CHANNEL_80P80MHZ: return "3"; /* FIXME */
+        case OSW_CHANNEL_80P80MHZ: return "4";
+        case OSW_CHANNEL_320MHZ: return "5";
     }
     return "";
 }
@@ -1310,7 +1547,8 @@ osw_plat_qsdk11_4_pre_request_config_vif_ap(struct osw_plat_qsdk11_4 *m,
                                             struct osw_drv_vif_config_ap *ap_conf)
 {
     const bool beacon_rate_supported = (ap_conf->mode.beacon_rate.type == OSW_BEACON_RATE_ABG);
-    const bool beacon_rate_changed = ap_conf->mode_changed
+    const bool beacon_rate_changed = vif_conf->enabled
+                                  && ap_conf->mode_changed
                                   && beacon_rate_supported;
 
     struct osw_drv_nl80211_ops *nl_ops = m->nl_ops;
@@ -1352,6 +1590,21 @@ osw_plat_qsdk11_4_pre_request_config_vif_ap(struct osw_plat_qsdk11_4 *m,
         PARAM_U32_TASK_START(&vif->param_set_rrm, &arg);
     }
 
+    if (ap_conf->isolated_changed) {
+        const uint32_t value = ap_conf->isolated ? 0 : 1;
+        const struct osw_plat_qsdk11_4_param_u32_arg arg = {
+            .nl = nl,
+            .ifindex = info->ifindex,
+            .cmd_id = QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS,
+            .param_id = IEEE80211_PARAM_APBRIDGE,
+            .policy = OSW_PLAT_QSDK11_4_PARAM_SET_ALWAYS,
+            .desired_value = value,
+            .vif_name = info->name,
+            .param_name = "ap_bridge",
+        };
+        PARAM_U32_TASK_START(&vif->param_set_ap_bridge, &arg);
+    }
+
     if (beacon_rate_changed) {
         const uint32_t beacon_rate = ap_conf->mode.beacon_rate.u.legacy;
         const uint32_t beacon_halfmbps = osw_rate_legacy_to_halfmbps(beacon_rate);
@@ -1380,6 +1633,20 @@ osw_plat_qsdk11_4_pre_request_config_vif(struct osw_plat_qsdk11_4 *m,
                                          struct osw_drv_phy_config *phy_conf,
                                          struct osw_drv_vif_config *vif_conf)
 {
+    if (vif_conf->tx_power_dbm_changed) {
+        /* The osw_drv_nl80211 itself is taking care of
+         * setting the tx_power. However the kernel WLAN
+         * driver updates the tx_power readouts with some
+         * delay. Without this delayed vif_changed_report
+         * tx_power value can remain stale in the system for
+         * longer than necessary. The system can operate
+         * without this but it's more responsive in settling
+         * down (osw_confsync) with it.
+         */
+        const uint64_t at = osw_time_mono_clk() + OSW_TIME_SEC(5);
+        osw_timer_arm_at_nsec(&vif->tx_power_changed, at);
+    }
+
     switch (vif_conf->vif_type) {
         case OSW_VIF_AP:
             osw_plat_qsdk11_4_pre_request_config_vif_ap(m, vif, drv_conf, phy_conf, vif_conf, &vif_conf->u.ap);
@@ -1390,6 +1657,45 @@ osw_plat_qsdk11_4_pre_request_config_vif(struct osw_plat_qsdk11_4 *m,
             break;
     }
 }
+
+static void
+osw_plat_qsdk11_4_phy_apply_mbss_tx_vif_name(struct osw_plat_qsdk11_4 *m,
+                                             struct osw_drv_phy_config *phy_conf)
+{
+    if (phy_conf->enabled == false) return;
+    if (phy_conf->mbss_tx_vif_name_changed == false) return;
+    if (osw_ifname_is_valid(&phy_conf->mbss_tx_vif_name) == false) return;
+
+    struct osw_drv_nl80211_ops *nl_ops = m->nl_ops;
+    if (nl_ops == NULL) return;
+
+    struct nl_80211 *nl = nl_ops->get_nl_80211_fn(nl_ops);
+    if (nl == NULL) return;
+
+    const char *phy_name = phy_conf->phy_name;
+    const struct nl_80211_phy *phy_info = nl_80211_phy_by_name(nl, phy_name);
+    if (phy_info == NULL) return;
+
+    struct nl_80211_sub *sub = m->nl_sub;
+    if (sub == NULL) return;
+
+    struct osw_plat_qsdk11_4_phy *phy = nl_80211_sub_phy_get_priv(sub, phy_info);
+    if (phy == NULL) return;
+
+    const char *vif_name = phy_conf->mbss_tx_vif_name.buf;
+    const struct nl_80211_vif *vif_info = nl_80211_vif_by_name(nl, vif_name);
+    if (vif_info == NULL) return;
+
+    osw_plat_qsdk11_4_task_drop(&phy->task_mbss_tx_vdev);
+
+    const uint32_t ifindex = vif_info->ifindex;
+    struct osw_plat_qsdk11_4_async *async = osw_plat_qsdk11_4_mbss_tx_vdev_alloc(m->nl_ops,
+                                                                                 phy_name,
+                                                                                 vif_name,
+                                                                                 ifindex);
+    osw_plat_qsdk11_4_task_start(&phy->task_mbss_tx_vdev, async);
+}
+
 static void
 osw_plat_qsdk11_4_pre_request_config_cb(struct osw_drv_nl80211_hook *hook,
                                         struct osw_drv_conf *drv_conf,
@@ -1409,6 +1715,7 @@ osw_plat_qsdk11_4_pre_request_config_cb(struct osw_drv_nl80211_hook *hook,
     size_t i;
     for (i = 0; i < drv_conf->n_phy_list; i++) {
         struct osw_drv_phy_config *phy_conf = &drv_conf->phy_list[i];
+        osw_plat_qsdk11_4_phy_apply_mbss_tx_vif_name(m, phy_conf);
         size_t j;
         for (j = 0; j < phy_conf->vif_list.count; j++) {
             struct osw_drv_vif_config *vif_conf = &phy_conf->vif_list.list[j];
@@ -1632,6 +1939,8 @@ osw_plat_qsdk11_4_get_survey_stats_resp_cb(struct nl_cmd *cmd,
     //struct osw_plat_qsdk11_4 *m = priv;
     struct osw_drv_nl80211_ops *nl_ops = m->nl_ops;
     struct osw_drv *drv = m->drv_nl80211;
+    if (drv == NULL) return;
+
     struct nl_80211 *nl = nl_ops->get_nl_80211_fn(nl_ops);
 
     struct nlattr *tb[NL80211_ATTR_MAX + 1];
@@ -1676,6 +1985,16 @@ osw_plat_qsdk11_4_get_survey_stats_resp_cb(struct nl_cmd *cmd,
             if (is_home) {
                 WARN_ON(*home_freq != 0);
                 *home_freq = cs->freq;
+                if (vif->last_home_freq != cs->freq) {
+                    if (vif->last_home_freq != 0) {
+                        LOGI(LOG_PREFIX_PHY(phy_name, "survey: resetting due to csa: "
+                                            "%"PRIu32"MHz -> %"PRIu32"MHz",
+                                            vif->last_home_freq,
+                                            cs->freq));
+                        osw_drv_report_stats_reset(OSW_STATS_CHAN);
+                    }
+                    vif->last_home_freq = cs->freq;
+                }
             }
         }
 
@@ -1744,7 +2063,7 @@ osw_plat_qsdk11_4_vif_cmd_survey_stats(struct nl_80211 *nl,
     const uint32_t flags = 0;
     const size_t len = sizeof(data);
     struct nl_msg *msg = nlmsg_alloc();
-    osw_plat_qsdk11_4_put_qca_vendor_cmd(nl, msg, ifindex, vcmd, gcmd, flags, &data, len);
+    osw_plat_qsdk11_4_put_qca_vendor_cmd(nl, msg, ifindex, vcmd, gcmd, 0, flags, &data, len);
     return msg;
 }
 
@@ -1899,6 +2218,8 @@ osw_plat_qsdk11_4_phy_added_cb(const struct nl_80211_phy *info,
     struct osw_plat_qsdk11_4_phy *phy = nl_80211_sub_phy_get_priv(sub, info);
     if (phy == NULL) return;
 
+    osw_plat_qsdk11_4_task_init_auto(&phy->task_mbss_tx_vdev);
+
     phy->info = info;
     phy->m = m;
 }
@@ -1911,6 +2232,8 @@ osw_plat_qsdk11_4_phy_removed_cb(const struct nl_80211_phy *info,
     struct nl_80211_sub *sub = m->nl_sub;
     struct osw_plat_qsdk11_4_phy *phy = nl_80211_sub_phy_get_priv(sub, info);
     if (phy == NULL) return;
+
+    osw_plat_qsdk11_4_task_drop(&phy->task_mbss_tx_vdev);
 
     phy->info = NULL;
     phy->m = NULL;
@@ -2033,33 +2356,60 @@ osw_plat_qsdk11_4_vif_get_rrm(struct osw_plat_qsdk11_4_vif *vif)
 }
 
 static void
+osw_plat_qsdk11_4_vif_get_mbss_en(struct osw_plat_qsdk11_4_vif *vif)
+{
+    struct rq *q = &vif->q_state;
+    rq_resume(q);
+
+    const struct nl_80211_vif *info = vif->info;
+    const char *vif_name = info->name;
+
+    if (osw_plat_qsdk11_4_is_vif_name_qcawifi_phy(vif_name) == false) return;
+
+    struct rq_task *t = &vif->task_get_mbss_en.task;
+    rq_task_kill(t);
+    rq_add_task(q, t);
+}
+
+static void
+osw_plat_qsdk11_4_vif_get_mbss_tx_vdev(struct osw_plat_qsdk11_4_vif *vif)
+{
+    struct rq *q = &vif->q_state;
+    rq_resume(q);
+
+    const struct nl_80211_vif *info = vif->info;
+    const char *vif_name = info->name;
+
+    if (osw_plat_qsdk11_4_is_vif_name_qcawifi_phy(vif_name)) return;
+
+    struct rq_task *t = &vif->task_get_mbss_tx_vdev.task;
+    rq_task_kill(t);
+    rq_add_task(q, t);
+}
+
+static void
+osw_plat_qsdk11_4_vif_get_ap_bridge(struct osw_plat_qsdk11_4_vif *vif)
+{
+    struct rq *q = &vif->q_state;
+    rq_resume(q);
+
+    const struct nl_80211_vif *info = vif->info;
+    const char *vif_name = info->name;
+
+    if (osw_plat_qsdk11_4_is_vif_name_qcawifi_phy(vif_name)) return;
+
+    struct rq_task *t = &vif->task_get_ap_bridge.task;
+    rq_task_kill(t);
+    rq_add_task(q, t);
+}
+
+static void
 osw_plat_qsdk11_4_vif_get_chanlist_done_cb(struct rq_task *task,
                                            void *priv)
 {
     struct osw_plat_qsdk11_4_vif *vif = priv;
-    const struct nl_80211_vif *info = vif->info;
-    const char *phy_name = info->name;
-    struct ieee80211req_chaninfo_full *next = &vif->chanlist_next;
-    struct ieee80211req_chaninfo_full *prev = &vif->chanlist_prev;
-    const size_t size = sizeof(*next);
-    const bool same = (memcmp(next, prev, size) == 0);
-
-    memcpy(prev, next, size);
-
-    if (same) {
-        LOGT(LOG_PREFIX_PHY(phy_name, "chanlist in sync"));
-        return;
-    }
-
-    /* This is actually PHY specific, but the driver has
-     * some commands bount to interfaces.. It's safer to
-     * manage this in _vif structures.
-     */
-    struct osw_plat_qsdk11_4 *m = vif->m;
-    struct osw_drv *drv = m->drv_nl80211;
-
-    LOGT(LOG_PREFIX_PHY(phy_name, "invalidated due to chanlist change"));
-    osw_drv_report_phy_changed(drv, phy_name);
+    const bool changed = OSW_PLAT_QSDK11_4_VIF_ATTR_SET(vif, vif->chanlist_prev, vif->chanlist_next);
+    if (changed) osw_plat_qsdk11_4_phy_report_changed(vif);
 }
 
 static void
@@ -2067,24 +2417,8 @@ osw_plat_qsdk11_4_vif_get_regdomain_done_cb(struct rq_task *task,
                                             void *priv)
 {
     struct osw_plat_qsdk11_4_vif *vif = priv;
-    const struct nl_80211_vif *vif_info = vif->info;
-    struct osw_plat_qsdk11_4 *m = vif->m;
-    struct osw_drv *drv = m->drv_nl80211;
-    struct osw_drv_nl80211_ops *nl_ops = m->nl_ops;
-    struct nl_80211 *nl = nl_ops->get_nl_80211_fn(nl_ops);
-    const uint32_t wiphy = vif_info->wiphy;
-    const struct nl_80211_phy *phy_info = nl_80211_phy_by_wiphy(nl, wiphy);
-    if (phy_info == NULL) return;
-    const char *phy_name = phy_info->name;
-    uint32_t *prev = &vif->regdomain_prev;
-    uint32_t *next = &vif->regdomain_next;
-    const bool same = (*next == *prev);
-
-    *prev = *next;
-
-    if (same) return;
-
-    osw_drv_report_phy_changed(drv, phy_name);
+    const bool changed = OSW_PLAT_QSDK11_4_VIF_ATTR_SET(vif, vif->regdomain_prev, vif->regdomain_next);
+    if (changed) osw_plat_qsdk11_4_phy_report_changed(vif);
 }
 
 static void
@@ -2092,24 +2426,8 @@ osw_plat_qsdk11_4_vif_get_country_id_done_cb(struct rq_task *task,
                                              void *priv)
 {
     struct osw_plat_qsdk11_4_vif *vif = priv;
-    const struct nl_80211_vif *vif_info = vif->info;
-    struct osw_plat_qsdk11_4 *m = vif->m;
-    struct osw_drv *drv = m->drv_nl80211;
-    struct osw_drv_nl80211_ops *nl_ops = m->nl_ops;
-    struct nl_80211 *nl = nl_ops->get_nl_80211_fn(nl_ops);
-    const uint32_t wiphy = vif_info->wiphy;
-    const struct nl_80211_phy *phy_info = nl_80211_phy_by_wiphy(nl, wiphy);
-    if (phy_info == NULL) return;
-    const char *phy_name = phy_info->name;
-    uint32_t *prev = &vif->country_id_prev;
-    uint32_t *next = &vif->country_id_next;
-    const bool same = (*next == *prev);
-
-    *prev = *next;
-
-    if (same) return;
-
-    osw_drv_report_phy_changed(drv, phy_name);
+    const bool changed = OSW_PLAT_QSDK11_4_VIF_ATTR_SET(vif, vif->country_id_prev, vif->country_id_next);
+    if (changed) osw_plat_qsdk11_4_phy_report_changed(vif);
 }
 
 static void
@@ -2117,25 +2435,8 @@ osw_plat_qsdk11_4_vif_get_country_done_cb(struct rq_task *task,
                                           void *priv)
 {
     struct osw_plat_qsdk11_4_vif *vif = priv;
-    const struct nl_80211_vif *vif_info = vif->info;
-    struct osw_plat_qsdk11_4 *m = vif->m;
-    struct osw_drv *drv = m->drv_nl80211;
-    struct osw_drv_nl80211_ops *nl_ops = m->nl_ops;
-    struct nl_80211 *nl = nl_ops->get_nl_80211_fn(nl_ops);
-    const uint32_t wiphy = vif_info->wiphy;
-    const struct nl_80211_phy *phy_info = nl_80211_phy_by_wiphy(nl, wiphy);
-    if (phy_info == NULL) return;
-    const char *phy_name = phy_info->name;
-    char *prev = vif->country_prev;
-    char *next = vif->country_next;
-    const size_t size = sizeof(vif->country_prev);
-    const bool same = (memcmp(prev, next, size) == 0);
-
-    memcpy(prev, next, size);
-
-    if (same) return;
-
-    osw_drv_report_phy_changed(drv, phy_name);
+    const bool changed = OSW_PLAT_QSDK11_4_VIF_ATTR_SET(vif, vif->mcast2ucast_prev, vif->mcast2ucast_next);
+    if (changed) osw_plat_qsdk11_4_phy_report_changed(vif);
 }
 
 static void
@@ -2143,25 +2444,8 @@ osw_plat_qsdk11_4_vif_get_mcast2ucast_done_cb(struct rq_task *task,
                                               void *priv)
 {
     struct osw_plat_qsdk11_4_vif *vif = priv;
-    const struct nl_80211_vif *vif_info = vif->info;
-    struct osw_plat_qsdk11_4 *m = vif->m;
-    struct osw_drv *drv = m->drv_nl80211;
-    struct osw_drv_nl80211_ops *nl_ops = m->nl_ops;
-    struct nl_80211 *nl = nl_ops->get_nl_80211_fn(nl_ops);
-    const uint32_t wiphy = vif_info->wiphy;
-    const struct nl_80211_phy *phy_info = nl_80211_phy_by_wiphy(nl, wiphy);
-    if (phy_info == NULL) return;
-    const char *vif_name = vif_info->name;
-    const char *phy_name = phy_info->name;
-    uint32_t *prev = &vif->mcast2ucast_prev;
-    uint32_t *next = &vif->mcast2ucast_next;
-    const bool same = (*next == *prev);
-
-    *prev = *next;
-
-    if (same) return;
-
-    osw_drv_report_vif_changed(drv, phy_name, vif_name);
+    const bool changed = OSW_PLAT_QSDK11_4_VIF_ATTR_SET(vif, vif->mcast2ucast_prev, vif->mcast2ucast_next);
+    if (changed) osw_plat_qsdk11_4_vif_report_changed(vif);
 }
 
 static void
@@ -2169,25 +2453,8 @@ osw_plat_qsdk11_4_vif_get_beacon_rate_done_cb(struct rq_task *task,
                                               void *priv)
 {
     struct osw_plat_qsdk11_4_vif *vif = priv;
-    const struct nl_80211_vif *vif_info = vif->info;
-    struct osw_plat_qsdk11_4 *m = vif->m;
-    struct osw_drv *drv = m->drv_nl80211;
-    struct osw_drv_nl80211_ops *nl_ops = m->nl_ops;
-    struct nl_80211 *nl = nl_ops->get_nl_80211_fn(nl_ops);
-    const uint32_t wiphy = vif_info->wiphy;
-    const struct nl_80211_phy *phy_info = nl_80211_phy_by_wiphy(nl, wiphy);
-    if (phy_info == NULL) return;
-    const char *vif_name = vif_info->name;
-    const char *phy_name = phy_info->name;
-    uint32_t *prev = &vif->beacon_rate_prev;
-    uint32_t *next = &vif->beacon_rate_next;
-    const bool same = (*next == *prev);
-
-    *prev = *next;
-
-    if (same) return;
-
-    osw_drv_report_vif_changed(drv, phy_name, vif_name);
+    const bool changed = OSW_PLAT_QSDK11_4_VIF_ATTR_SET(vif, vif->beacon_rate_prev, vif->beacon_rate_next);
+    if (changed) osw_plat_qsdk11_4_vif_report_changed(vif);
 }
 
 static void
@@ -2195,25 +2462,35 @@ osw_plat_qsdk11_4_vif_get_rrm_done_cb(struct rq_task *task,
                                       void *priv)
 {
     struct osw_plat_qsdk11_4_vif *vif = priv;
-    const struct nl_80211_vif *vif_info = vif->info;
-    struct osw_plat_qsdk11_4 *m = vif->m;
-    struct osw_drv *drv = m->drv_nl80211;
-    struct osw_drv_nl80211_ops *nl_ops = m->nl_ops;
-    struct nl_80211 *nl = nl_ops->get_nl_80211_fn(nl_ops);
-    const uint32_t wiphy = vif_info->wiphy;
-    const struct nl_80211_phy *phy_info = nl_80211_phy_by_wiphy(nl, wiphy);
-    if (phy_info == NULL) return;
-    const char *vif_name = vif_info->name;
-    const char *phy_name = phy_info->name;
-    uint32_t *prev = &vif->rrm_prev;
-    uint32_t *next = &vif->rrm_next;
-    const bool same = (*next == *prev);
+    const bool changed = OSW_PLAT_QSDK11_4_VIF_ATTR_SET(vif, vif->rrm_prev, vif->rrm_next);
+    if (changed) osw_plat_qsdk11_4_vif_report_changed(vif);
+}
 
-    *prev = *next;
+static void
+osw_plat_qsdk11_4_vif_get_mbss_en_done_cb(struct rq_task *task,
+                                          void *priv)
+{
+    struct osw_plat_qsdk11_4_vif *vif = priv;
+    const bool changed = OSW_PLAT_QSDK11_4_VIF_ATTR_SET(vif, vif->mbss_en_prev, vif->mbss_en_next);
+    if (changed) osw_plat_qsdk11_4_phy_report_changed(vif);
+}
 
-    if (same) return;
+static void
+osw_plat_qsdk11_4_vif_get_mbss_tx_vdev_done_cb(struct rq_task *task,
+                                               void *priv)
+{
+    struct osw_plat_qsdk11_4_vif *vif = priv;
+    const bool changed = OSW_PLAT_QSDK11_4_VIF_ATTR_SET(vif, vif->mbss_tx_vdev_prev, vif->mbss_tx_vdev_next);
+    if (changed) osw_plat_qsdk11_4_phy_report_changed(vif);
+}
 
-    osw_drv_report_vif_changed(drv, phy_name, vif_name);
+static void
+osw_plat_qsdk11_4_vif_get_ap_bridge_done_cb(struct rq_task *task,
+                                            void *priv)
+{
+    struct osw_plat_qsdk11_4_vif *vif = priv;
+    const bool changed = OSW_PLAT_QSDK11_4_VIF_ATTR_SET(vif, vif->ap_bridge_prev, vif->ap_bridge_next);
+    if (changed) osw_plat_qsdk11_4_vif_report_changed(vif);
 }
 
 static void
@@ -2225,6 +2502,7 @@ osw_plat_qsdk11_4_vif_enable_frame_fwd(struct osw_plat_qsdk11_4_vif *vif,
     if (osw_plat_qsdk11_4_is_vif_name_qcawifi_phy(vif_name)) return;
 
     const uint32_t bits = 0
+                        | (1 << (IEEE80211_FC0_SUBTYPE_AUTH >> IEEE80211_FC0_SUBTYPE_SHIFT))
                         | (1 << (IEEE80211_FC0_SUBTYPE_ASSOC_REQ >> IEEE80211_FC0_SUBTYPE_SHIFT))
                         | (1 << (IEEE80211_FC0_SUBTYPE_REASSOC_REQ >> IEEE80211_FC0_SUBTYPE_SHIFT))
                         | (1 << (IEEE80211_FC0_SUBTYPE_ACTION >> IEEE80211_FC0_SUBTYPE_SHIFT));
@@ -2257,6 +2535,59 @@ osw_plat_qsdk11_4_vif_enable_frame_fwd(struct osw_plat_qsdk11_4_vif *vif,
 }
 
 static void
+osw_plat_qsdk11_4_vif_disable_dbdc(struct osw_plat_qsdk11_4_vif *vif,
+                                   struct nl_80211 *nl)
+{
+    const struct nl_80211_vif *info = vif->info;
+    const char *vif_name = info->name;
+    const bool not_phy = (osw_plat_qsdk11_4_is_vif_name_qcawifi_phy(vif_name) == false);
+
+    if (not_phy) return;
+
+    const struct osw_plat_qsdk11_4_param_u32_arg arg_dbdc_enable = {
+            .nl = nl,
+            .ifindex = info->ifindex,
+            .cmd_id = QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS,
+            .param_id = OL_ATH_PARAM_SHIFT
+                      | OL_ATH_PARAM_DBDC_ENABLE,
+            .policy = OSW_PLAT_QSDK11_4_PARAM_SET_IF_NOT_EQUAL,
+            .desired_value = 0,
+            .vif_name = info->name,
+            .param_name = "dbdc_enable",
+    };
+
+    const struct osw_plat_qsdk11_4_param_u32_arg arg_dbdc_samessiddisable = {
+            .nl = nl,
+            .ifindex = info->ifindex,
+            .cmd_id = QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS,
+            .param_id = OL_ATH_PARAM_SHIFT
+                      | OL_ATH_PARAM_SAME_SSID_DISABLE,
+            /* There is no way to "get" for the this param */
+            .policy = OSW_PLAT_QSDK11_4_PARAM_SET_ALWAYS,
+            .desired_value = 1,
+            .vif_name = info->name,
+            .param_name = "dbdc_samessiddisable",
+    };
+
+    PARAM_U32_TASK_START(&vif->param_set_dbdc_enable, &arg_dbdc_enable);
+    PARAM_U32_TASK_START(&vif->param_set_dbdc_samessiddisable, &arg_dbdc_samessiddisable);
+}
+
+static void
+osw_plat_qsdk11_4_vif_tx_power_changed_cb(struct osw_timer *t)
+{
+    struct osw_plat_qsdk11_4_vif *vif = container_of(t, struct osw_plat_qsdk11_4_vif, tx_power_changed);
+    struct osw_plat_qsdk11_4 *m = vif->m;
+    struct osw_drv *drv = m->drv_nl80211;
+    const char *phy_name = osw_plat_qsdk11_4_vif_into_phy_name(vif);
+    const char *vif_name = vif->info->name;
+
+    if (drv == NULL) return;
+
+    osw_drv_report_vif_changed(drv, phy_name, vif_name);
+}
+
+static void
 osw_plat_qsdk11_4_vif_added_cb(const struct nl_80211_vif *info,
                                void *priv)
 {
@@ -2267,6 +2598,8 @@ osw_plat_qsdk11_4_vif_added_cb(const struct nl_80211_vif *info,
 
     vif->info = info;
     vif->m = m;
+
+    osw_timer_init(&vif->tx_power_changed, osw_plat_qsdk11_4_vif_tx_power_changed_cb);
 
     rq_init(&vif->q_stats, EV_DEFAULT);
     vif->q_stats.max_running = 1;
@@ -2280,56 +2613,20 @@ osw_plat_qsdk11_4_vif_added_cb(const struct nl_80211_vif *info,
     nl_cmd_set_response_fn(cmd, osw_plat_qsdk11_4_get_survey_stats_resp_cb, vif);
     nl_cmd_task_init(&vif->task_survey, cmd, msg);
 
+    osw_plat_qsdk11_4_task_init_auto(&vif->param_set_dbdc_enable);
+    osw_plat_qsdk11_4_task_init_auto(&vif->param_set_dbdc_samessiddisable);
     osw_plat_qsdk11_4_task_init_auto(&vif->param_set_frame_fwd);
     osw_plat_qsdk11_4_task_init_auto(&vif->param_set_frame_mask);
     osw_plat_qsdk11_4_task_init_auto(&vif->param_set_ol_stats);
     osw_plat_qsdk11_4_task_init_auto(&vif->param_set_flush_stats);
     osw_plat_qsdk11_4_task_init_auto(&vif->param_set_mcast2ucast);
     osw_plat_qsdk11_4_task_init_auto(&vif->param_set_rrm);
+    osw_plat_qsdk11_4_task_init_auto(&vif->param_set_ap_bridge);
     osw_plat_qsdk11_4_task_init_auto(&vif->param_set_beacon_rate);
     osw_plat_qsdk11_4_task_init_auto(&vif->param_set_disable_coex);
 
+    osw_plat_qsdk11_4_vif_disable_dbdc(vif, nl);
     osw_plat_qsdk11_4_vif_enable_frame_fwd(vif, nl);
-
-    {
-        rq_init(&vif->q_config, EV_DEFAULT);
-        vif->q_config.max_running = 1;
-    }
-
-    {
-        const uint32_t vcmd = QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION;
-        const uint32_t gcmd = QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS;
-        const uint32_t param_id = OL_ATH_PARAM_SHIFT
-                                | OL_ATH_PARAM_SAME_SSID_DISABLE;
-        const uint32_t value = 1;
-
-        struct nl_msg *msg = nlmsg_alloc();
-        osw_plat_qsdk11_4_put_qca_vendor_setparam(nl, msg, ifindex, vcmd, gcmd, param_id, &value, sizeof(value));
-
-        struct nl_cmd *cmd = nl_conn_alloc_cmd(conn);
-        nl_cmd_task_init(&vif->task_dbdc_samessiddisable, cmd, msg);
-    }
-
-    {
-        const uint32_t vcmd = QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION;
-        const uint32_t gcmd = QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS;
-        const uint32_t param_id = OL_ATH_PARAM_SHIFT
-                                | OL_ATH_PARAM_DBDC_ENABLE;
-        const uint32_t value = 0;
-
-        struct nl_msg *msg = nlmsg_alloc();
-        osw_plat_qsdk11_4_put_qca_vendor_setparam(nl, msg, ifindex, vcmd, gcmd, param_id, &value, sizeof(value));
-
-        struct nl_cmd *cmd = nl_conn_alloc_cmd(conn);
-        nl_cmd_task_init(&vif->task_dbdc_enable, cmd, msg);
-    }
-
-    {
-        struct rq *q = &vif->q_config;
-        rq_resume(q);
-        rq_add_task(q, &vif->task_dbdc_samessiddisable.task);
-        rq_add_task(q, &vif->task_dbdc_enable.task);
-    }
 
     {
         rq_init(&vif->q_state, EV_DEFAULT);
@@ -2350,7 +2647,7 @@ osw_plat_qsdk11_4_vif_added_cb(const struct nl_80211_vif *info,
         const size_t len = sizeof(data);
 
         struct nl_msg *msg = nlmsg_alloc();
-        osw_plat_qsdk11_4_put_qca_vendor_cmd(nl, msg, ifindex, vcmd, gcmd, flags, &data, len);
+        osw_plat_qsdk11_4_put_qca_vendor_cmd(nl, msg, ifindex, vcmd, gcmd, 0, flags, &data, len);
 
         struct nl_cmd *cmd = nl_conn_alloc_cmd(conn);
         nl_cmd_task_init(&vif->task_get_chanlist, cmd, msg);
@@ -2418,6 +2715,64 @@ osw_plat_qsdk11_4_vif_added_cb(const struct nl_80211_vif *info,
     {
         const uint32_t vcmd = QCA_NL80211_VENDOR_SUBCMD_GET_WIFI_CONFIGURATION;
         const uint32_t gcmd = QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS;
+        const uint32_t param_id = OL_ATH_PARAM_SHIFT
+                                | OL_ATH_PARAM_MBSS_EN;
+        struct osw_plat_qsdk11_4_get_param_arg *arg = &vif->mbss_en_arg;
+
+        arg->out = &vif->mbss_en_next;
+        arg->out_size = sizeof(vif->mbss_en_next);
+
+        struct nl_msg *msg = nlmsg_alloc();
+        osw_plat_qsdk11_4_put_qca_vendor_getparam(nl, msg, ifindex, vcmd, gcmd, param_id);
+
+        struct nl_cmd *cmd = nl_conn_alloc_cmd(conn);
+        nl_cmd_set_response_fn(cmd, osw_plat_qsdk11_4_get_param_resp_cb, arg);
+        nl_cmd_task_init(&vif->task_get_mbss_en, cmd, msg);
+        vif->task_get_mbss_en.task.completed_fn = osw_plat_qsdk11_4_vif_get_mbss_en_done_cb;
+        vif->task_get_mbss_en.task.priv = vif;
+    }
+
+    {
+        const uint32_t vcmd = QCA_NL80211_VENDOR_SUBCMD_GET_WIFI_CONFIGURATION;
+        const uint32_t gcmd = QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS;
+        const uint32_t param_id = IEEE80211_PARAM_MBSS_TXVDEV;
+        struct osw_plat_qsdk11_4_get_param_arg *arg = &vif->mbss_tx_vdev_arg;
+
+        arg->out = &vif->mbss_tx_vdev_next;
+        arg->out_size = sizeof(vif->mbss_tx_vdev_next);
+
+        struct nl_msg *msg = nlmsg_alloc();
+        osw_plat_qsdk11_4_put_qca_vendor_getparam(nl, msg, ifindex, vcmd, gcmd, param_id);
+
+        struct nl_cmd *cmd = nl_conn_alloc_cmd(conn);
+        nl_cmd_set_response_fn(cmd, osw_plat_qsdk11_4_get_param_resp_cb, arg);
+        nl_cmd_task_init(&vif->task_get_mbss_tx_vdev, cmd, msg);
+        vif->task_get_mbss_tx_vdev.task.completed_fn = osw_plat_qsdk11_4_vif_get_mbss_tx_vdev_done_cb;
+        vif->task_get_mbss_tx_vdev.task.priv = vif;
+    }
+
+    {
+        const uint32_t vcmd = QCA_NL80211_VENDOR_SUBCMD_GET_WIFI_CONFIGURATION;
+        const uint32_t gcmd = QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS;
+        const uint32_t param_id = IEEE80211_PARAM_APBRIDGE;
+        struct osw_plat_qsdk11_4_get_param_arg *arg = &vif->ap_bridge_arg;
+
+        arg->out = &vif->ap_bridge_next;
+        arg->out_size = sizeof(vif->ap_bridge_next);
+
+        struct nl_msg *msg = nlmsg_alloc();
+        osw_plat_qsdk11_4_put_qca_vendor_getparam(nl, msg, ifindex, vcmd, gcmd, param_id);
+
+        struct nl_cmd *cmd = nl_conn_alloc_cmd(conn);
+        nl_cmd_set_response_fn(cmd, osw_plat_qsdk11_4_get_param_resp_cb, arg);
+        nl_cmd_task_init(&vif->task_get_ap_bridge, cmd, msg);
+        vif->task_get_ap_bridge.task.completed_fn = osw_plat_qsdk11_4_vif_get_ap_bridge_done_cb;
+        vif->task_get_ap_bridge.task.priv = vif;
+    }
+
+    {
+        const uint32_t vcmd = QCA_NL80211_VENDOR_SUBCMD_GET_WIFI_CONFIGURATION;
+        const uint32_t gcmd = QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS;
         const uint32_t param_id = OL_SPECIAL_PARAM_SHIFT
                                 | OL_SPECIAL_PARAM_REGDOMAIN;
         struct osw_plat_qsdk11_4_get_param_arg *arg = &vif->regdomain_arg;
@@ -2460,8 +2815,9 @@ osw_plat_qsdk11_4_vif_added_cb(const struct nl_80211_vif *info,
         const uint32_t gcmd = QCA_NL80211_VENDORSUBCMD_COUNTRY_CONFIG;
         const uint32_t flags = 0;
 
+
         struct nl_msg *msg = nlmsg_alloc();
-        osw_plat_qsdk11_4_put_qca_vendor_cmd(nl, msg, ifindex, vcmd, gcmd, flags, NULL, 0);
+        osw_plat_qsdk11_4_put_qca_vendor_cmd(nl, msg, ifindex, vcmd, gcmd, 0, flags, NULL, 0);
 
         struct nl_cmd *cmd = nl_conn_alloc_cmd(conn);
         nl_cmd_set_response_fn(cmd, osw_plat_qsdk11_4_vif_get_country_resp_cb, vif);
@@ -2474,6 +2830,9 @@ osw_plat_qsdk11_4_vif_added_cb(const struct nl_80211_vif *info,
     osw_plat_qsdk11_4_vif_get_mcast2ucast(vif);
     osw_plat_qsdk11_4_vif_get_beacon_rate(vif);
     osw_plat_qsdk11_4_vif_get_rrm(vif);
+    osw_plat_qsdk11_4_vif_get_mbss_en(vif);
+    osw_plat_qsdk11_4_vif_get_mbss_tx_vdev(vif);
+    osw_plat_qsdk11_4_vif_get_ap_bridge(vif);
     osw_plat_qsdk11_4_vif_get_regdomain(vif);
     osw_plat_qsdk11_4_vif_get_country_id(vif);
     osw_plat_qsdk11_4_vif_get_country(vif);
@@ -2488,31 +2847,32 @@ osw_plat_qsdk11_4_vif_removed_cb(const struct nl_80211_vif *info,
     struct osw_plat_qsdk11_4_vif *vif = nl_80211_sub_vif_get_priv(sub, info);
     if (vif == NULL) return;
 
+    osw_plat_qsdk11_4_task_drop(&vif->param_set_dbdc_enable);
+    osw_plat_qsdk11_4_task_drop(&vif->param_set_dbdc_samessiddisable);
     osw_plat_qsdk11_4_task_drop(&vif->param_set_frame_fwd);
     osw_plat_qsdk11_4_task_drop(&vif->param_set_frame_mask);
     osw_plat_qsdk11_4_task_drop(&vif->param_set_ol_stats);
     osw_plat_qsdk11_4_task_drop(&vif->param_set_flush_stats);
     osw_plat_qsdk11_4_task_drop(&vif->param_set_mcast2ucast);
     osw_plat_qsdk11_4_task_drop(&vif->param_set_rrm);
+    osw_plat_qsdk11_4_task_drop(&vif->param_set_ap_bridge);
     osw_plat_qsdk11_4_task_drop(&vif->param_set_beacon_rate);
     osw_plat_qsdk11_4_task_drop(&vif->param_set_disable_coex);
 
     rq_stop(&vif->q_stats);
     rq_kill(&vif->q_stats);
     rq_fini(&vif->q_stats);
-    rq_stop(&vif->q_config);
-    rq_kill(&vif->q_config);
-    rq_fini(&vif->q_config);
     rq_stop(&vif->q_state);
     rq_kill(&vif->q_state);
     rq_fini(&vif->q_state);
     nl_cmd_task_fini(&vif->task_survey);
-    nl_cmd_task_fini(&vif->task_dbdc_enable);
-    nl_cmd_task_fini(&vif->task_dbdc_samessiddisable);
     nl_cmd_task_fini(&vif->task_get_chanlist);
     nl_cmd_task_fini(&vif->task_get_mcast2ucast);
     nl_cmd_task_fini(&vif->task_get_beacon_rate);
     nl_cmd_task_fini(&vif->task_get_rrm);
+    nl_cmd_task_fini(&vif->task_get_mbss_en);
+    nl_cmd_task_fini(&vif->task_get_mbss_tx_vdev);
+    nl_cmd_task_fini(&vif->task_get_ap_bridge);
     nl_cmd_task_fini(&vif->task_get_regdomain);
     nl_cmd_task_fini(&vif->task_get_country_id);
     nl_cmd_task_fini(&vif->task_get_country);
@@ -2647,8 +3007,17 @@ osw_plat_qsdk11_4_event_stats_avg(struct osw_plat_qsdk11_4 *m,
     while (tx_size >= sizeof(*tx)) {
         tx_mbps += tx->sum_mbps;
         tx_ppdu += tx->num_ppdu;
-        snr += tx->sum_snr;
-        snr_cnt += tx->num_snr;
+
+        /* It seems Tx ACK SNR is prone to misreporting
+         * lower-than-expected values. This can be mostly seen
+         * on 6GHz band. Until this is fully investigated and
+         * resolved don't use it unless explicitly enabled
+         * through env flag. This ends up using Rx SNR only.
+         */
+        if (getenv("OSW_PLAT_QSDK11_4_USE_TX_ACK_SNR")) {
+            snr += tx->sum_snr;
+            snr_cnt += tx->num_snr;
+        }
 
         tx_size -= sizeof(*tx);
         tx++;
@@ -2709,6 +3078,9 @@ osw_plat_qsdk11_4_event_stats(struct osw_plat_qsdk11_4 *m,
                               const char *phy_name,
                               struct nlattr *vendor_data)
 {
+    struct osw_drv *drv = m->drv_nl80211;
+    if (drv == NULL) return;
+
     if (WARN_ON(vendor_data == NULL)) return;
     if (WARN_ON(phy_name == NULL)) return;
 
@@ -2772,7 +3144,6 @@ osw_plat_qsdk11_4_event_stats(struct osw_plat_qsdk11_4 *m,
 
     osw_tlv_end_nested(&t, off);
 
-    struct osw_drv *drv = m->drv_nl80211;
     osw_drv_report_stats(drv, &t);
     osw_tlv_fini(&t);
 }
@@ -2797,19 +3168,28 @@ osw_plat_qsdk11_4_frame_fwd(struct osw_plat_qsdk11_4 *m,
     const uint16_t type = (fc & DOT11_FRAME_CTRL_TYPE_MASK);
     const uint16_t subtype = (fc & DOT11_FRAME_CTRL_SUBTYPE_MASK);
     const bool is_mgmt = (type == DOT11_FRAME_CTRL_TYPE_MGMT);
+    const bool is_auth = (subtype == DOT11_FRAME_CTRL_SUBTYPE_AUTH);
     const bool is_assoc_req = (subtype == DOT11_FRAME_CTRL_SUBTYPE_ASSOC_REQ);
     const bool is_reassoc_req = (subtype == DOT11_FRAME_CTRL_SUBTYPE_REASSOC_REQ);
     const bool is_action = (subtype == DOT11_FRAME_CTRL_SUBTYPE_ACTION);
-    const bool can_report = (is_mgmt && (is_assoc_req || is_reassoc_req || is_action));
+    const bool can_report = (is_mgmt && (is_auth
+                                      || is_assoc_req
+                                      || is_reassoc_req
+                                      || is_action));
     const bool skip_report = !can_report;
     if (skip_report) return;
 
     struct osw_drv *drv = m->drv_nl80211;
+    if (drv == NULL) return;
+
+    const struct osw_drv_vif_frame_rx rx = {
+        .data = data,
+        .len = data_len,
+    };
     osw_drv_report_vif_frame_rx(drv,
                                 phy_name,
                                 vif_name,
-                                data,
-                                data_len);
+                                &rx);
 }
 
 static void
@@ -3051,6 +3431,88 @@ osw_plat_qsdk11_4_fix_phy_enabled(const char *phy_name,
     os_nif_is_up((char *)phy_name, &state->enabled);
 }
 
+struct sw_plat_qsdk11_4_phy_find_tx_vif_name_arg {
+    struct osw_plat_qsdk11_4 *m;
+    struct osw_plat_qsdk11_4_vif *tx_vif;
+};
+
+static void
+osw_plat_qsdk11_4_phy_find_tx_vif_name_cb(const struct nl_80211_vif *vif_info,
+                                          void *priv)
+{
+    const char *vif_name = vif_info->name;
+    const bool is_wifi_vif = (strstr(vif_name, "wifi") == vif_name);
+    if (is_wifi_vif) return;
+
+    struct sw_plat_qsdk11_4_phy_find_tx_vif_name_arg *arg = priv;
+    if (arg->tx_vif != NULL) {
+        return;
+    }
+
+    struct osw_plat_qsdk11_4 *m = arg->m;
+    struct nl_80211_sub *sub = m->nl_sub;
+    struct osw_plat_qsdk11_4_vif *vif = nl_80211_sub_vif_get_priv(sub, vif_info);
+    if (vif == NULL) return;
+    if (vif->mbss_tx_vdev_prev == 0) return;
+
+    arg->tx_vif = vif;
+}
+
+static const char *
+osw_plat_qsdk11_4_phy_find_tx_vif_name(struct osw_plat_qsdk11_4 *m,
+                                       struct osw_plat_qsdk11_4_vif *phy_vif)
+{
+    struct osw_drv_nl80211_ops *nl_ops = m->nl_ops;
+    struct nl_80211 *nl = nl_ops->get_nl_80211_fn(nl_ops);
+    const struct nl_80211_vif *vif_info = phy_vif->info;
+    const uint32_t wiphy = vif_info->wiphy;
+    struct sw_plat_qsdk11_4_phy_find_tx_vif_name_arg arg = {
+        .m = m,
+        .tx_vif = NULL,
+    };
+
+    nl_80211_vif_each(nl,
+                      &wiphy,
+                      osw_plat_qsdk11_4_phy_find_tx_vif_name_cb,
+                      &arg);
+
+    if (arg.tx_vif == NULL) {
+        return NULL;
+    }
+    if (WARN_ON(arg.tx_vif->info == NULL)) {
+        return NULL;
+    }
+
+    const char *vif_name = arg.tx_vif->info->name;
+    return vif_name;
+}
+
+static void
+osw_plat_qsdk11_4_fix_phy_mbss_tx_vif_name(struct osw_plat_qsdk11_4 *m,
+                                           const char *phy_name,
+                                           struct osw_drv_phy_state *state)
+{
+    const struct nl_80211_vif *vif_info = osw_plat_qsdk11_4_get_vif(m, phy_name, true);
+    struct nl_80211_sub *sub = m->nl_sub;
+    struct osw_plat_qsdk11_4_vif *vif = vif_info
+                                      ? nl_80211_sub_vif_get_priv(sub, vif_info)
+                                      : NULL;
+    const bool mbss_is_disabled = (vif == NULL)
+                               || (vif->mbss_en_prev == false);
+    if (mbss_is_disabled) {
+        STRSCPY_WARN(state->mbss_tx_vif_name.buf, "");
+        return;
+    }
+
+    const char *tx_vif_name = osw_plat_qsdk11_4_phy_find_tx_vif_name(m, vif);
+    if (tx_vif_name == NULL) {
+        STRSCPY_WARN(state->mbss_tx_vif_name.buf, "");
+        return;
+    }
+
+    STRSCPY_WARN(state->mbss_tx_vif_name.buf, tx_vif_name);
+}
+
 static void
 osw_plat_qsdk11_4_fix_phy_state_cb(struct osw_drv_nl80211_hook *hook,
                                    const char *phy_name,
@@ -3065,6 +3527,7 @@ osw_plat_qsdk11_4_fix_phy_state_cb(struct osw_drv_nl80211_hook *hook,
     osw_plat_qsdk11_4_fix_phy_regdomain(m, phy_name, state);
     osw_plat_qsdk11_4_fix_phy_country_id(m, phy_name, state);
     osw_plat_qsdk11_4_fix_phy_country(m, phy_name, state);
+    osw_plat_qsdk11_4_fix_phy_mbss_tx_vif_name(m, phy_name, state);
     osw_plat_qsdk11_4_update_max_2g_chan(m, phy_name, state);
 }
 
@@ -3120,6 +3583,23 @@ osw_plat_qsdk11_4_fix_rrm(struct osw_plat_qsdk11_4_vif *vif,
     LOGT(LOG_PREFIX_VIF(phy_name, vif_name, "rrm: %d", rrm));
     ap->mode.rrm_neighbor_report = rrm;
 }
+
+static void
+osw_plat_qsdk11_4_fix_ap_bridge(struct osw_plat_qsdk11_4_vif *vif,
+                                const char *phy_name,
+                                const char *vif_name,
+                                struct osw_drv_vif_state *state)
+{
+    if (vif == NULL) return;
+    if (state->vif_type != OSW_VIF_AP) return;
+
+    struct osw_drv_vif_state_ap *ap = &state->u.ap;
+    const uint32_t ap_bridge = vif->ap_bridge_prev;
+
+    LOGT(LOG_PREFIX_VIF(phy_name, vif_name, "ap_bridge: %d", ap_bridge));
+    ap->isolated = !ap_bridge;
+}
+
 static void
 osw_plat_qsdk11_4_fix_vif_state_cb(struct osw_drv_nl80211_hook *hook,
                                    const char *phy_name,
@@ -3138,10 +3618,186 @@ osw_plat_qsdk11_4_fix_vif_state_cb(struct osw_drv_nl80211_hook *hook,
     osw_plat_qsdk11_4_fix_mcast2ucast(vif, phy_name, vif_name, state);
     osw_plat_qsdk11_4_fix_rates(vif, phy_name, vif_name, state);
     osw_plat_qsdk11_4_fix_rrm(vif, phy_name, vif_name, state);
+    osw_plat_qsdk11_4_fix_ap_bridge(vif, phy_name, vif_name, state);
 
     osw_plat_qsdk11_4_vif_get_mcast2ucast(vif);
     osw_plat_qsdk11_4_vif_get_beacon_rate(vif);
     osw_plat_qsdk11_4_vif_get_rrm(vif);
+    osw_plat_qsdk11_4_vif_get_mbss_en(vif);
+    osw_plat_qsdk11_4_vif_get_mbss_tx_vdev(vif);
+    osw_plat_qsdk11_4_vif_get_ap_bridge(vif);
+}
+
+static void
+util_nl_parse_iwevcustom(struct osw_plat_qsdk11_4 *m,
+                         const char *ifname,
+                         const void *data,
+                         const size_t len)
+{
+    struct osw_drv *drv = m->drv_nl80211;
+    const char *vif_name = ifname;
+
+    struct osw_drv_nl80211_ops *nl_ops = m->nl_ops;
+    if (nl_ops == NULL) return;
+
+    struct nl_80211 *nl = nl_ops->get_nl_80211_fn(nl_ops);
+    if (nl == NULL) return;
+
+    struct nl_80211_sub *sub = m->nl_sub;
+    if (sub == NULL) return;
+
+    const struct nl_80211_vif *vif_info = nl_80211_vif_by_name(nl, vif_name);
+    if (vif_info == NULL) return;
+
+    struct osw_plat_qsdk11_4_vif *vif = nl_80211_sub_vif_get_priv(sub, vif_info);
+    if (vif == NULL) return;
+
+    const char *phy_name = osw_plat_qsdk11_4_vif_into_phy_name(vif);
+    if (phy_name == NULL) return;
+
+    const struct iw_point *iwp;
+
+    iwp = data - IW_EV_POINT_OFF;;
+    data += IW_EV_POINT_LEN - IW_EV_POINT_OFF;
+
+    LOGT(LOG_PREFIX_VIF(phy_name, vif_name, "parsing iwevcustom: flags=%hu length=%hu len=%zu",
+                        iwp->flags, iwp->length, len));
+
+    if (iwp->length > len) {
+        LOGD(LOG_PREFIX_VIF(phy_name, vif_name, "parsing iwevcustom: bad length"));
+        return;
+    }
+
+    switch (iwp->flags) {
+        case IEEE80211_EV_BLKLST_STA_AUTH_IND_AP:
+            {
+                const struct ev_msg *msg = data;
+                if (iwp->length < sizeof(*msg)) return;
+
+                const struct osw_hwaddr *addr = osw_hwaddr_from_cptr_unchecked(msg->addr);
+
+                os_macaddr_t bssid;
+                const bool bssid_ok = os_nif_macaddr_get((char *)ifname, &bssid);
+                const bool bssid_not_ok = !bssid_ok;
+                if (bssid_not_ok) return;
+
+                struct osw_drv_dot11_frame_header auth_frame;
+                MEMZERO(auth_frame);
+                auth_frame.frame_control = htole16(DOT11_FRAME_CTRL_SUBTYPE_AUTH);
+                memcpy(auth_frame.sa, addr->octet, ETH_ALEN);
+                memcpy(auth_frame.da, bssid.addr, ETH_ALEN);
+                memcpy(auth_frame.bssid, bssid.addr, ETH_ALEN);
+
+                const struct osw_drv_vif_frame_rx rx = {
+                    .data = (const void *)&auth_frame,
+                    .len = sizeof(auth_frame),
+                };
+
+                if (drv == NULL) return;
+                osw_drv_report_vif_frame_rx(drv,
+                                            phy_name,
+                                            vif_name,
+                                            &rx);
+            }
+            return;
+    }
+}
+
+static void
+osw_plat_qsdk11_4_wext_fd_rx(struct osw_plat_qsdk11_4 *m,
+                             const void *data,
+                             size_t len)
+{
+    const struct iw_event *iwe;
+    const struct nlmsghdr *hdr;
+    const struct rtattr *attr;
+    char ifname[32];
+    int attrlen;
+    int iwelen;
+
+    util_nl_each_msg(data, hdr, len)
+        if (hdr->nlmsg_type == RTM_NEWLINK ||
+            hdr->nlmsg_type == RTM_DELLINK) {
+
+            memset(ifname, 0, sizeof(ifname));
+
+            util_nl_each_attr_type(hdr, attr, attrlen, IFLA_IFNAME)
+                memcpy(ifname, RTA_DATA(attr), RTA_PAYLOAD(attr));
+
+            if (strlen(ifname) == 0)
+                continue;
+
+            util_nl_each_attr_type(hdr, attr, attrlen, IFLA_WIRELESS)
+                util_nl_each_iwe_type(attr, iwe, iwelen, IWEVCUSTOM)
+                    util_nl_parse_iwevcustom(m,
+                                             ifname,
+                                             util_nl_iwe_data(iwe),
+                                             util_nl_iwe_payload(iwe));
+        }
+}
+
+static void
+osw_plat_qsdk11_4_wext_stop(EV_P_ struct osw_plat_qsdk11_4 *m)
+{
+    ev_io_stop(EV_A_ &m->wext_io);
+}
+
+static void
+osw_plat_qsdk11_4_wext_io_cb(EV_P_ ev_io *io, int events)
+{
+    struct osw_plat_qsdk11_4 *m = io->data;
+    if (events == EV_READ) {
+        const int fd = io->fd;
+        char buf[4096];
+        ssize_t len = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
+        if (len > 0) {
+            osw_plat_qsdk11_4_wext_fd_rx(m, buf, (size_t)len);
+        }
+        else {
+            switch (errno) {
+                case EAGAIN: return;
+                case ENOBUFS: return;
+                default:
+                    LOGE(LOG_PREFIX("wext socket died: errno=%d (%s)",
+                                    errno, strerror(errno)));
+                    osw_plat_qsdk11_4_wext_stop(EV_A_ m);
+                    break;
+            }
+        }
+    }
+}
+
+static int
+osw_plat_qsdk11_4_wext_open(void)
+{
+     const int fd = socket(AF_NETLINK, SOCK_DGRAM, NETLINK_ROUTE);
+     const bool failed_to_create_socket = (fd < 0);
+     if (WARN_ON(failed_to_create_socket)) return -1;
+
+     struct sockaddr_nl addr;
+     MEMZERO(addr);
+     addr.nl_family = AF_NETLINK;
+     addr.nl_groups = RTMGRP_LINK;
+     const int bind_err = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
+     const bool failed_to_bind = (bind_err != 0);
+     if (WARN_ON(failed_to_bind)) {
+        close(fd);
+        return -1;
+     }
+
+     return fd;
+}
+
+static void
+osw_plat_qsdk11_4_wext_start(EV_P_ struct osw_plat_qsdk11_4 *m)
+{
+    const int fd = osw_plat_qsdk11_4_wext_open();
+    const bool failed_to_open = (fd < 0);
+    if (WARN_ON(failed_to_open)) return;
+
+    ev_io_init(&m->wext_io, osw_plat_qsdk11_4_wext_io_cb, fd, EV_READ);
+    ev_io_start(EV_A_ &m->wext_io);
+    m->wext_io.data = m;
 }
 
 static void
@@ -3181,6 +3837,9 @@ osw_plat_qsdk11_4_start(struct osw_plat_qsdk11_4 *m)
         .ap_conf_mutate_fn = osw_plat_qsdk11_4_ap_conf_mutate_cb,
     };
 
+    struct ev_loop *loop = OSW_MODULE_LOAD(osw_ev);
+    if (loop == NULL) return;
+
     m->nl_ops = OSW_MODULE_LOAD(osw_drv_nl80211);
     if (m->nl_ops == NULL) return;
 
@@ -3202,6 +3861,7 @@ osw_plat_qsdk11_4_start(struct osw_plat_qsdk11_4 *m)
     m->hostap_hook = osw_hostap_hook_alloc(m->hostap, &hapd_hook_ops, m);
     if (WARN_ON(m->hostap_hook == NULL)) return;
 
+    osw_plat_qsdk11_4_wext_start(loop, m);
     osw_plat_qsdk11_4_rename_wiphy();
     osw_state_register_observer(&m->state_obs);
 }

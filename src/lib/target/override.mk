@@ -33,14 +33,14 @@ UNIT_SRC := $(TARGET_COMMON_SRC)
 
 # Platform specific target library sources
 UNIT_SRC_PLATFORM := $(OVERRIDE_DIR)
-ifeq ($(CONFIG_PLATFORM_QCA_QSDK110),y)
-UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_ioctl_stats_11ax.c
-UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_qca_11ax.c
-UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/wiphy_info_11ax.c
-else
+ifeq ($(CONFIG_PLATFORM_QCA_QSDK53),y)
 UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_ioctl_stats.c
 UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_qca.c
 UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/wiphy_info.c
+else
+UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_ioctl_stats_11ax.c
+UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_qca_11ax.c
+UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/wiphy_info_11ax.c
 endif
 
 UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_init.c
@@ -52,7 +52,7 @@ UNIT_SRC_TOP += $(OVERRIDE_DIR)/ssdk_util.c
 UNIT_CFLAGS += -I$(OVERRIDE_DIR)
 UNIT_CFLAGS += -I$(OVERRIDE_DIR)/inc
 
-ifeq ($(CONFIG_PLATFORM_QCA_QSDK110),y)
+ifneq ($(CONFIG_PLATFORM_QCA_QSDK53),y)
 UNIT_LDFLAGS += -lqca_tools
 UNIT_LDFLAGS += -lqca_nl80211_wrapper
 UNIT_LDFLAGS += -lnl-3
@@ -81,5 +81,13 @@ $(UNIT_BUILD)/wpa_ctrl.o: $(STAGING_USR_LIB)/wpa_ctrl.o
 
 UNIT_OBJ += $(UNIT_BUILD)/os_unix.o
 UNIT_OBJ += $(UNIT_BUILD)/wpa_ctrl.o
+
+ifeq ($(CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4),y)
+UNIT_CFLAGS += -DCONFIG_QCA_TARGET_EXTTOOL_LIST_CHAN_STATE=y
+endif
+
+ifeq ($(CONFIG_PLATFORM_QCA_QSDK120),y)
+UNIT_CFLAGS += -DCONFIG_QCA_TARGET_EXTTOOL_LIST_CHAN_STATE=y
+endif
 
 UNIT_EXPORT_CFLAGS := $(UNIT_CFLAGS)

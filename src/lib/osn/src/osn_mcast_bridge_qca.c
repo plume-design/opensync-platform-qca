@@ -29,6 +29,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "log.h"
 #include "execsh.h"
 #include "os_util.h"
+#include "kconfig.h"
 
 #include "osn_mcast_qca.h"
 
@@ -354,6 +355,8 @@ bool osn_mcast_apply()
 void osn_mcast_apply_fn(struct ev_loop *loop, ev_debounce *w, int revent)
 {
     osn_mcast_bridge *self = &osn_mcast_bridge_base;
+
+    if (kconfig_enabled(CONFIG_TARGET_USE_NATIVE_BRIDGE)) return;
 
     if (!self->igmp_initialized && !self->mld_initialized)
         return;

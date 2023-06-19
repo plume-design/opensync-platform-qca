@@ -54,7 +54,7 @@ typedef uint16_t u16;
 typedef uint8_t  u8;
 typedef int16_t  s16;
 
-#ifdef CONFIG_PLATFORM_QCA_QSDK110
+#if defined(CONFIG_PLATFORM_QCA_QSDK110) || defined(CONFIG_PLATFORM_QCA_QSDK120)
 #include "ps_uapi_11ax.h"
 #else
 #include "ps_uapi.h"

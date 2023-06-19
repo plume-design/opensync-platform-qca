@@ -50,7 +50,7 @@ bool target_init(target_init_opt_t opt, struct ev_loop *loop)
             }
             break;
         case TARGET_INIT_MGR_BM:
-            if (kconfig_enabled(CONFIG_PLATFORM_QCA_QSDK110)) {
+            if (kconfig_enabled(CONFIG_PLATFORM_QCA_QSDK110) || kconfig_enabled(CONFIG_PLATFORM_QCA_QSDK120)) {
                 if (ioctl80211_init(loop, false) != IOCTL_STATUS_OK) {
                     return false;
                 }

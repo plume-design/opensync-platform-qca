@@ -1,3 +1,4 @@
+
 # Copyright (c) 2015, Plume Design Inc. All rights reserved.
 # 
 # Redistribution and use in source and binary forms, with or without
@@ -22,16 +23,13 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-UNIT_NAME := fut_platform_qca_lib_override
-
-UNIT_DISABLE := n
-
-# Template type:
-UNIT_TYPE := FUT
-# Output directory
-UNIT_DIR := shell/lib/override/
-
-UNIT_FILE := pp203x_lib_override.sh
-UNIT_FILE += pp603x_lib_override.sh
-UNIT_FILE += qca_platform_override.sh
-UNIT_FILE += ipq807x_ap_hk09_lib_override.sh
+# OSW gets built with multiple driver backends. These
+# backends operate independently and enumerate PHY/VIFs with
+# no regard to one another. In some cases these drivers will
+# conflict with one another due to nature of the platform.
+#
+# One such case is osw_drv_nl80211 on QSDK11.x (and newer)
+# which supersedes the legacy osw_drv_target. This line
+# makes sure the legacy driver is not initialized on
+# startup.
+export OSW_DRV_TARGET_DISABLED=1

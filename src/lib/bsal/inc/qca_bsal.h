@@ -51,7 +51,7 @@ int     qca_bsal_rrm_get_neighbors(const char *ifname, bsal_neigh_info_t *nrs,
                                    unsigned int *nr_cnt, const unsigned int max_nr_cnt);
 int     qca_bsal_send_action(const char *ifname, const uint8_t *mac_addr, const uint8_t *data, unsigned int data_len);
 
-#ifdef CONFIG_PLATFORM_QCA_QSDK110
+#if defined(CONFIG_PLATFORM_QCA_QSDK110) || defined(CONFIG_PLATFORM_QCA_QSDK120)
 int     qca_bsal_client_get_datarate_info(const char *ifname, const uint8_t *mac_addr, bsal_datarate_info_t *datarate);
 #endif
 

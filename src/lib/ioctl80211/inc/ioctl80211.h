@@ -31,7 +31,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <linux/types.h>
 #include <linux/wireless.h>
 
-#ifdef CONFIG_PLATFORM_QCA_QSDK110
+#if defined(CONFIG_PLATFORM_QCA_QSDK110) || defined(CONFIG_PLATFORM_QCA_QSDK120)
 #include <cfg80211_nlwrapper_api.h>
 #endif
 

@@ -116,10 +116,10 @@ struct ioctl80211_vap_stats
 #define send_nl_command(sk_ctx, ifname, buf, len, cb, cmd) \
             send_command(sk_ctx, ifname, buf, len, cb, cmd, 0);
 
-#if defined(CONFIG_PLATFORM_QCA_QSDK110) && !defined(CONFIG_PLATFORM_QCA_QSDK120)
+#if defined(CONFIG_PLATFORM_QCA_QSDK110)
 #define send_setparam_command(sock_ctx, subcmd, cmd, ifname, buf, len) \
             wifi_cfg80211_send_setparam_command(sock_ctx, subcmd, cmd, ifname, buf, len);
-#else
+#elif defined(CONFIG_PLATFORM_QCA_QSDK120)
 #define send_setparam_command(sock_ctx, subcmd, cmd, ifname, buf, len) \
             wifi_cfg80211_send_setparam_command(sock_ctx, subcmd, cmd, ifname, buf, len, 0);
 #endif
@@ -461,7 +461,7 @@ osync_nl80211_bsal_bs_client_config(int fd, const char *ifname, const uint8_t *m
     athdbg.data.acl_cli_param.auth_rssi_lwm        = conf->rssi_auth_lwm;      // Set LWM here for Auth pkts
     athdbg.data.acl_cli_param.auth_reject_reason   = conf->auth_reject_reason; // 0 = drop, > 0 = reject reason code
 
-#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+#if defined(CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4) || defined(CONFIG_PLATFORM_QCA_QSDK120)
     athdbg.data.acl_cli_param.inact_snr_xing       = conf->rssi_inact_xing;
     athdbg.data.acl_cli_param.low_snr_xing         = conf->rssi_low_xing;
     athdbg.data.acl_cli_param.high_rate_snr_xing   = conf->rssi_high_xing;

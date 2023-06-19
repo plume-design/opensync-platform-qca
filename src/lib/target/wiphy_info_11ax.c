@@ -73,6 +73,8 @@ static const struct {
     { 0x0046, 0x168c, 0, "qca9984", "Cascade" },
     { 0x0056, 0x168c, 0, "qca9888", "Besra" },
     { 0x1104, 0x17cb, 0, "qcn9000", "Pine" },
+    { 0x1109, 0x17cb, 0, "qcn9224", "Waikiki" },
+    { 0x1004, 0x17cb, 0, "qcn6122", "Spruce" },
     { 0, 0, "qca,wifi-ipq40xx", "qca4019", "Dakota" },
     { 0, 0, "qcom,cnss-qca5018", "qca5018", "Maple" },
     { 0, 0, "qca,wifi-ar956x", "qca9563", "Dragonfly" },
@@ -235,7 +237,7 @@ identify_band_wlanconfig2(const char *ifname,
     int flags = 0;
     char *buf = NULL;
 
-#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+#ifdef CONFIG_QCA_TARGET_EXTTOOL_LIST_CHAN_STATE
     buf = strexa("exttool", "--list_chan_state", "--interface", ifname);
 #else
     buf = strexa("exttool", "--interface", ifname, "--list");
@@ -244,7 +246,8 @@ identify_band_wlanconfig2(const char *ifname,
         return -EOPNOTSUPP;
 
     while ((line = strsep(&buf, "\r\n"))) {
-#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+
+#ifdef CONFIG_QCA_TARGET_EXTTOOL_LIST_CHAN_STATE
         if(!strstr(line, "chan"))
             continue;
 #endif
@@ -377,6 +380,7 @@ identify_max_width(const char *ifname,
         case 40: *htmode = "HT40"; return 0;
         case 80: *htmode = "HT80"; return 0;
         case 160: *htmode = "HT160"; return 0;
+        case 320: *htmode = "HT320"; return 0;
     }
 
     return -1;
@@ -422,7 +426,10 @@ wiphy_info_init_ifname(const char *ifname)
         !strcmp(info->chip, "qca5018") ||
         !strcmp(info->chip, "qca9574")) {
         info->mode = "11ax";
-    } else {
+    } else if (!strcmp(info->chip, "qcn9224")) {
+        info->mode = "11be";
+    }
+    else {
         if (strstr(info->band, "5G") == info->band)
             info->mode = "11ac";
         else

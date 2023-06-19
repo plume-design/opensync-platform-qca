@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WCN_VenTool>
+  <VendorCmd name="nxt_rdr_freq" ID="74" DEFAULTS="17,18">
+    <Attribute name="dparam0" ID="17" TYPE="u32" DEFAULT="200"/>
+    <Attribute name="dparam1" ID="18" TYPE="u32" DEFAULT="4540"/>
+    <Attribute name="value0" ID="19" TYPE="u32"/>
+  </VendorCmd>
+  <VendorCmd name="g_nxt_rdr_freq" ID="75" DEFAULTS="17,18">
+    <Attribute name="dparam0" ID="17" TYPE="u32" DEFAULT="200"/>
+    <Attribute name="dparam1" ID="18" TYPE="u32" DEFAULT="4540"/>
+    <VendorRsp name="g_nxt_rdr_freq" ID="75" ATTR_MAX="2">
+      <Attribute name="g_nxt_rdr_freq" ID="1" TYPE="u32"/>
+    </VendorRsp>
+  </VendorCmd>
+</WCN_VenTool>
