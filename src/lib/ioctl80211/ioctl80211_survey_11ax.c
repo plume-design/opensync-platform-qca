@@ -52,7 +52,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define MODULE_ID LOG_MODULE_ID_IOCTL
 #define QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION 74
 
-#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+#ifdef CONFIG_GET_CHANNEL_SURVEY_STATS_VERSION_2
 #define CFG80211_GET_CHAN_SURVEY_HOME_CHANNEL_STATS (1)
 #define CFG80211_GET_CHAN_SURVEY_SCAN_CHANNEL_STATS (2)
 #endif
@@ -85,7 +85,7 @@ static const unsigned           NL80211_ATTR_MAX_INTERNAL = 256;
 /******************************************************************************
  *  PUBLIC definitions
  *****************************************************************************/
-#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+#ifdef CONFIG_GET_CHANNEL_SURVEY_STATS_VERSION_2
 void parse_channel_survey_stats_cb(struct cfg80211_data *arg)
 {
     char                   *vendata = arg->nl_vendordata;
@@ -121,6 +121,11 @@ void parse_channel_survey_stats_cb(struct cfg80211_data *arg)
     }
 
     num_chan_stats =  chan_stats_len / sizeof(*chan_stats);
+
+    if (chan_stats->freq <= 0) {
+        LOGI("Skip invalid stats reported by driver, freq = %d", chan_stats->freq);
+        return;
+    }
 
     if (flags == CFG80211_GET_CHAN_SURVEY_HOME_CHANNEL_STATS) {
         if (num_chan_stats != 1) {
@@ -324,7 +329,7 @@ ioctl_status_t ioctl80211_survey_results_get(
             data.u.survey_chan.get.channels[index].rx    = g_chan_data.u.survey_chan.get.channels[index].rx;
             data.u.survey_chan.get.channels[index].nf    = g_chan_data.u.survey_chan.get.channels[index].nf;
         }
-#ifdef CONFIG_PLATFORM_QCA_QSDK11_SUB_VER4
+#ifdef CONFIG_GET_CHANNEL_SURVEY_STATS_VERSION_2
         g_chan_idx = 0;
 #endif
     }

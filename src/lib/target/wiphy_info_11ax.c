@@ -74,7 +74,6 @@ static const struct {
     { 0x0056, 0x168c, 0, "qca9888", "Besra" },
     { 0x1104, 0x17cb, 0, "qcn9000", "Pine" },
     { 0x1109, 0x17cb, 0, "qcn9224", "Waikiki" },
-    { 0x1004, 0x17cb, 0, "qcn6122", "Spruce" },
     { 0, 0, "qca,wifi-ipq40xx", "qca4019", "Dakota" },
     { 0, 0, "qcom,cnss-qca5018", "qca5018", "Maple" },
     { 0, 0, "qca,wifi-ar956x", "qca9563", "Dragonfly" },
@@ -82,6 +81,7 @@ static const struct {
     { 0, 0, "qcom,cnss-qca8074v2", "qca8074", "Hawkeye" },
     { 0, 0, "qcom,cnss-qca6018", "qca6018", "Cypress" },
     { 0, 0, "qcom,cnss-qca9574", "qca9574", "Alder" },
+    { 0, 0, "qcom,cnss-qcn6122", "qcn6122", "Spruce" },
 };
 
 /* runtime data */
@@ -424,6 +424,7 @@ wiphy_info_init_ifname(const char *ifname)
     if (!strcmp(info->chip, "qca8074") ||
         !strcmp(info->chip, "qcn9000") ||
         !strcmp(info->chip, "qca5018") ||
+        !strcmp(info->chip, "qcn6122") ||
         !strcmp(info->chip, "qca9574")) {
         info->mode = "11ax";
     } else if (!strcmp(info->chip, "qcn9224")) {
