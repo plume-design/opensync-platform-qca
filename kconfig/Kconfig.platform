@@ -55,6 +55,18 @@ config QSDK_VERSION
     default 0x1200 if PLATFORM_QCA_QSDK120
     default 0
 
+config QCA_TARGET_EXTTOOL_LIST_CHAN_STATE
+    bool
+    default y if PLATFORM_QCA_QSDK11_SUB_VER4
+    default y if PLATFORM_QCA_QSDK120
+    default n
+
+config QCA_TARGET_GET_CHANNEL_SURVEY_STATS_VERSION_2
+    bool
+    default y if PLATFORM_QCA_QSDK11_SUB_VER4
+    default y if PLATFORM_QCA_QSDK120
+    default n
+
 config QCA_USE_SYSUPGRADE
     bool "Use sysupgrade for upgrades"
     default n
