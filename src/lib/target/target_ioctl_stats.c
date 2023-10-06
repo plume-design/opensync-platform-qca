@@ -103,6 +103,26 @@ bool target_radio_fast_scan_enable(radio_entry_t *radio_cfg, ifname_t if_name)
     return true;
 }
 
+bool target_stats_client_get(radio_type_t radio_type,
+                             char *if_name,
+                             char *phy_name,
+                             mac_address_t mac,
+                             dpp_client_stats_t *stats)
+{
+    ioctl_status_t rc;
+    rc = ioctl80211_client_stats_get(radio_type,
+                                     if_name,
+                                     phy_name,
+                                     mac,
+                                     stats);
+    if (IOCTL_STATUS_OK != rc)
+    {
+        return false;
+    }
+
+    return true;
+}
+
 
 /******************************************************************************
  *  CLIENT definitions
@@ -209,6 +229,21 @@ bool target_stats_survey_convert(radio_entry_t *radio_cfg,
                                            data_new,
                                            data_old,
                                            survey_record);
+    if (IOCTL_STATUS_OK != rc)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+bool target_stats_survey_noise_floor_get(char *ifname,
+                                         int *noise_floor)
+{
+    ioctl_status_t rc;
+
+    rc = ioctl80211_survey_noise_floor_get(ifname,
+                                           noise_floor);
     if (IOCTL_STATUS_OK != rc)
     {
         return false;
