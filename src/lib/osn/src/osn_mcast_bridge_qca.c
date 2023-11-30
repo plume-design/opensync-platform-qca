@@ -34,7 +34,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "osn_mcast_qca.h"
 
 /* Default number of apply retries before giving up */
-#define MCPD_APPLY_RETRIES  5
+#define MCPROXY_APPLY_RETRIES  5
 
 void osn_mcast_apply_fn(struct ev_loop *loop, ev_debounce *w, int revent);
 
@@ -47,6 +47,12 @@ static char set_max_groups[] = _S(ovs-vsctl set Bridge "$1" other_config:mcast-s
 static char set_unknown_group[] = _S(ovs-vsctl set Bridge "$1" other_config:mcast-snooping-disable-flood-unregistered="$2");
 static char set_static_mrouter[] = _S(ovs-vsctl set Port "$1" other_config:mcast-snooping-flood-reports="$2");
 static char set_igmp_age[] = _S(ovs-vsctl set Bridge "$1" other_config:mcast-snooping-aging-time="$2");
+
+/* Qualcomm snooping daemon configuration */
+static char set_mcast_snooping_mcs[] = _S(mcsctl -s "$1" state "$2");
+static char set_unknown_group_mcs[] = _S(mcsctl -s "$1" policy "$2");
+static char set_igmp_exceptions_mcs[] = _S(mcsctl -s "$1" acl add igmp NonSnooping ipv4 "$2" "$3");
+static char set_mld_exceptions_mcs[] = _S(mcsctl -s "$1" acl add mld NonSnooping ipv6 "$2" "$3");
 
 osn_mcast_bridge osn_mcast_bridge_base;
 
@@ -172,6 +178,25 @@ static bool osn_mcast_ovs_deconfigure(osn_mcast_bridge *self)
                     self->static_mrouter);
         }
         self->static_mrouter[0] = '\0';
+    }
+
+    self->snooping_bridge[0] = '\0';
+    return true;
+}
+
+static bool osn_mcast_native_deconfigure(osn_mcast_bridge *self)
+{
+    int status;
+
+    if (self->snooping_bridge[0] == '\0')
+        return true;
+
+    /* With native bridge Qualcomm relies on it's multicast snooping daemon */
+    status = execsh_log(LOG_SEVERITY_DEBUG, set_mcast_snooping_mcs, self->snooping_bridge, "disable");
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+    {
+        LOG(INFO, "osn_mcast_native_deconfigure: Cannot disable snooping on bridge %s",
+                self->snooping_bridge);
     }
 
     self->snooping_bridge[0] = '\0';
@@ -343,10 +368,127 @@ bool osn_mcast_apply_ovs_config(osn_mcast_bridge *self)
     return true;
 }
 
+bool osn_mcast_apply_native_config(osn_mcast_bridge *self)
+{
+    osn_igmp_t *igmp = &self->igmp;
+    osn_mld_t *mld = &self->mld;
+    bool snooping_enabled;
+    char *snooping_bridge;
+    bool snooping_bridge_up;
+    bool flood_unknown;
+    int status, i;
+    osn_ip_addr_t ip_addr;
+    osn_ip6_addr_t ip6_addr;
+    char ip_addr_str[INET6_ADDRSTRLEN];
+    char ip_mask_str[INET6_ADDRSTRLEN];
+
+    if (igmp->snooping_enabled || !mld->snooping_enabled)
+    {
+        snooping_enabled = igmp->snooping_enabled;
+        snooping_bridge = igmp->snooping_bridge;
+        snooping_bridge_up = igmp->snooping_bridge_up;
+        flood_unknown = igmp->unknown_group == OSN_MCAST_UNKNOWN_FLOOD;
+    }
+    else
+    {
+        snooping_enabled = mld->snooping_enabled;
+        snooping_bridge = mld->snooping_bridge;
+        snooping_bridge_up = mld->snooping_bridge_up;
+        flood_unknown = mld->unknown_group == OSN_MCAST_UNKNOWN_FLOOD;
+    }
+
+    /* If snooping was turned off or snooping bridge was changed, deconfigure it first */
+    if (snooping_bridge_up == false || strncmp(self->snooping_bridge, snooping_bridge, IFNAMSIZ) != 0)
+        osn_mcast_native_deconfigure(self);
+
+    if (snooping_bridge_up == false || snooping_bridge[0] == '\0')
+        return true;
+
+    /* Enable/disable snooping */
+    status = execsh_log(LOG_SEVERITY_DEBUG, set_mcast_snooping_mcs, snooping_bridge,
+                        snooping_enabled ? "enable" : "disable");
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+    {
+        LOG(INFO, "osn_mcast_apply_native_config: Cannot disable snooping on bridge %s",
+                self->snooping_bridge);
+        return true;
+    }
+    STRSCPY_WARN(self->snooping_bridge, snooping_bridge);
+
+    status = execsh_log(LOG_SEVERITY_DEBUG, set_unknown_group_mcs, snooping_bridge,
+                        (flood_unknown == true) ? "flood" : "drop");
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+    {
+        LOG(INFO, "osn_mcast_apply_native_config: Cannot set unknown group behavior on bridge %s",
+                self->snooping_bridge);
+        return true;
+    }
+
+    /* IGMP exceptions */
+    if (snooping_enabled && igmp->mcast_exceptions_len > 0)
+    {
+        for (i=0; i<igmp->mcast_exceptions_len; i++)
+        {
+            memset(&ip_addr, 0, sizeof(ip_addr));
+            if (!osn_ip_addr_from_str(&ip_addr, igmp->mcast_exceptions[i]))
+            {
+                LOG(ERR, "osn_mcast_apply_native_config: Error parsing IGMP exception %s", igmp->mcast_exceptions[i]);
+                continue;
+            }
+
+            memset(ip_addr_str, 0, sizeof(ip_addr_str));
+            memset(ip_mask_str, 0, sizeof(ip_mask_str));
+
+            inet_ntop(AF_INET, &ip_addr.ia_addr, ip_addr_str, sizeof(ip_addr_str));
+            ip_addr = osn_ip_addr_from_prefix(ip_addr.ia_prefix);
+            inet_ntop(AF_INET, &ip_addr.ia_addr, ip_mask_str, sizeof(ip_mask_str));
+
+            status = execsh_log(LOG_SEVERITY_DEBUG, set_igmp_exceptions_mcs, snooping_bridge, ip_addr_str, ip_mask_str);
+            if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+            {
+                LOG(ERR, "osn_mcast_apply_ovs_config: Error setting IGMP exceptions, command failed for %s",
+                        snooping_bridge);
+                return true;
+            }
+        }
+    }
+
+    /* MLD exceptions */
+    if (snooping_enabled && mld->mcast_exceptions_len > 0)
+    {
+        for (i=0; i<mld->mcast_exceptions_len; i++)
+        {
+            memset(&ip6_addr, 0, sizeof(ip6_addr));
+            if (!osn_ip6_addr_from_str(&ip6_addr, mld->mcast_exceptions[i]))
+            {
+                LOG(ERR, "osn_mcast_apply_native_config: Error parsing MLD exception %s", mld->mcast_exceptions[i]);
+                continue;
+            }
+
+            memset(ip_addr_str, 0, sizeof(ip_addr_str));
+            memset(ip_mask_str, 0, sizeof(ip_mask_str));
+
+            inet_ntop(AF_INET6, &ip6_addr.ia6_addr, ip_addr_str, sizeof(ip_addr_str));
+            ip6_addr = osn_ip6_addr_from_prefix(ip6_addr.ia6_prefix);
+            inet_ntop(AF_INET6, &ip6_addr.ia6_addr, ip_mask_str, sizeof(ip_mask_str));
+
+            status = execsh_log(LOG_SEVERITY_DEBUG, set_mld_exceptions_mcs, snooping_bridge, ip_addr_str, ip_mask_str);
+            if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+            {
+                LOG(ERR, "osn_mcast_apply_ovs_config: Error setting MLD exceptions, command failed for %s",
+                        snooping_bridge);
+                return true;
+            }
+        }
+    }
+
+    return true;
+}
+
 bool osn_mcast_apply()
 {
     osn_mcast_bridge *self = &osn_mcast_bridge_base;
-    self->apply_retry = MCPD_APPLY_RETRIES;
+    self->apply_retry = MCPROXY_APPLY_RETRIES;
     ev_debounce_start(EV_DEFAULT, &self->apply_debounce);
 
     return true;
@@ -355,14 +497,18 @@ bool osn_mcast_apply()
 void osn_mcast_apply_fn(struct ev_loop *loop, ev_debounce *w, int revent)
 {
     osn_mcast_bridge *self = &osn_mcast_bridge_base;
+    bool status;
 
-    if (kconfig_enabled(CONFIG_TARGET_USE_NATIVE_BRIDGE)) return;
+    if (kconfig_enabled(CONFIG_TARGET_USE_NATIVE_BRIDGE))
+        status = osn_mcast_apply_native_config(self);
+    else
+        status = osn_mcast_apply_ovs_config(self);
 
     if (!self->igmp_initialized && !self->mld_initialized)
         return;
 
-    /* Apply OVS configuration */
-    if (osn_mcast_apply_ovs_config(self) == false)
+    /* Apply mcast bridge configuration */
+    if (status == false)
     {
         /* Schedule retry until retry limit reached */
         if (self->apply_retry > 0)
@@ -373,7 +519,7 @@ void osn_mcast_apply_fn(struct ev_loop *loop, ev_debounce *w, int revent)
             return;
         }
 
-        LOG(ERR, "osn_mcast_apply_fn: Unable to apply OVS configuration.");
+        LOG(ERR, "osn_mcast_apply_fn: Unable to apply mcast bridge configuration.");
     }
 
     return;

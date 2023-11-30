@@ -52,6 +52,12 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define MODULE_ID LOG_MODULE_ID_IOCTL
 #define QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION 74
 
+// In SPF11.4 the noise floor is included through patch which also add IEEE80211_CHAN_NOISE_FLOOR_SUPPORTED define.
+// In SPF12 the noise floor in channel stats is supported by default, force the define.
+#ifdef CONFIG_PLATFORM_QCA_QSDK120
+#define IEEE80211_CHAN_NOISE_FLOOR_SUPPORTED 1
+#endif
+
 #ifdef CONFIG_QCA_TARGET_GET_CHANNEL_SURVEY_STATS_VERSION_2
 #define CFG80211_GET_CHAN_SURVEY_HOME_CHANNEL_STATS (1)
 #define CFG80211_GET_CHAN_SURVEY_SCAN_CHANNEL_STATS (2)
@@ -123,7 +129,7 @@ void parse_channel_survey_stats_cb(struct cfg80211_data *arg)
     num_chan_stats =  chan_stats_len / sizeof(*chan_stats);
 
     if (chan_stats->freq <= 0) {
-        LOGI("Skip invalid stats reported by driver, freq = %d", chan_stats->freq);
+        LOGD("Skip invalid stats reported by driver, freq = %d", chan_stats->freq);
         return;
     }
 
@@ -142,7 +148,7 @@ void parse_channel_survey_stats_cb(struct cfg80211_data *arg)
         g_bss_data.u.survey_bss.get.rx         = chan_stats->rx_frm_cnt;
         g_bss_data.u.survey_bss.get.busy_ext   = chan_stats->ext_busy_cnt;
 #ifdef IEEE80211_CHAN_NOISE_FLOOR_SUPPORTED
-        g_bss_data.u.survey_bss.get.nf         = chan_stats->noise_floor;
+        g_bss_data.u.survey_bss.get.nf         = chan_stats->chan_nf;
 #endif
         LOGD("Home channel survey stats:");
         LOGD("freq: %4d, rx_bss: %12"PRIu64", total: %12"PRIu64" tx: %12"PRIu64", "
@@ -151,7 +157,7 @@ void parse_channel_survey_stats_cb(struct cfg80211_data *arg)
              chan_stats->tx_frm_cnt, chan_stats->rx_frm_cnt, chan_stats->clear_cnt,
              chan_stats->ext_busy_cnt);
 #ifdef IEEE80211_CHAN_NOISE_FLOOR_SUPPORTED
-        LOGD("noise_floor: %"PRIi16"", chan_stats->noise_floor);
+        LOGD("chan_nf: %"PRIi16"", chan_stats->chan_nf);
 #endif
         LOGD("Scan channel survey stats:");
         memset(&g_chan_data, 0, sizeof(g_chan_data));
@@ -164,7 +170,7 @@ void parse_channel_survey_stats_cb(struct cfg80211_data *arg)
                 g_chan_data.u.survey_chan.get.channels[chan_stats_index].tx    = chan_stats->tx_frm_cnt;
                 g_chan_data.u.survey_chan.get.channels[chan_stats_index].rx    = chan_stats->rx_frm_cnt;
 #ifdef IEEE80211_CHAN_NOISE_FLOOR_SUPPORTED
-                g_chan_data.u.survey_chan.get.channels[chan_stats_index].nf    = chan_stats->noise_floor;
+                g_chan_data.u.survey_chan.get.channels[chan_stats_index].nf    = chan_stats->chan_nf;
 #else
                 if (g_bss_data.u.survey_bss.get.freq == chan_stats->freq)
                     g_bss_data.u.survey_bss.get.nf = chan_stats->chan_nf;
@@ -172,13 +178,13 @@ void parse_channel_survey_stats_cb(struct cfg80211_data *arg)
 #endif
 
                 LOGD("freq: %4d, rx_bss: %12"PRIu64", total: %12"PRIu64", tx: %12"PRIu64", "
-                     "rx: %12"PRIu64", busy: %12"PRIu64", busy_ext: %12"PRIu64", noise_floor: %"PRIi16"",
+                     "rx: %12"PRIu64", busy: %12"PRIu64", busy_ext: %12"PRIu64", chan_nf: %"PRIi16"",
                      chan_stats->freq, chan_stats->bss_rx_cnt, chan_stats->cycle_cnt,
                      chan_stats->tx_frm_cnt, chan_stats->rx_frm_cnt, chan_stats->clear_cnt,
 #ifdef IEEE80211_CHAN_NOISE_FLOOR_SUPPORTED
-                     chan_stats->ext_busy_cnt, chan_stats->noise_floor);
-#else
                      chan_stats->ext_busy_cnt, chan_stats->chan_nf);
+#else
+                     0);
 #endif
                 chan_index++;
             }
@@ -229,7 +235,7 @@ void parse_channel_survey_stats_cb(struct cfg80211_data *arg)
     g_bss_data.u.survey_bss.get.rx         = chan_stats->rx_frm_cnt;
     g_bss_data.u.survey_bss.get.busy_ext   = chan_stats->ext_busy_cnt;
 #ifdef IEEE80211_CHAN_NOISE_FLOOR_SUPPORTED
-    g_bss_data.u.survey_bss.get.nf         = chan_stats->noise_floor;
+    g_bss_data.u.survey_bss.get.nf         = chan_stats->chan_nf;
 #endif
     LOGD("Home channel survey stats msg_len: %zu, num_elements: %d", msg_len, num_elements);
     LOGD("freq: %4d, rx_bss: %12"PRIu64", total: %12"PRIu64" tx: %12"PRIu64", "
@@ -238,7 +244,7 @@ void parse_channel_survey_stats_cb(struct cfg80211_data *arg)
          chan_stats->tx_frm_cnt, chan_stats->rx_frm_cnt, chan_stats->clear_cnt,
          chan_stats->ext_busy_cnt);
 #ifdef IEEE80211_CHAN_NOISE_FLOOR_SUPPORTED
-    LOGD("noise_floor: %"PRIi16"", chan_stats->noise_floor);
+    LOGD("chan_nf: %"PRIi16"", chan_stats->chan_nf);
 #endif
 
     LOGD("Scan channel survey stats:");
@@ -252,7 +258,7 @@ void parse_channel_survey_stats_cb(struct cfg80211_data *arg)
             g_chan_data.u.survey_chan.get.channels[g_chan_idx].tx    = chan_stats->tx_frm_cnt;
             g_chan_data.u.survey_chan.get.channels[g_chan_idx].rx    = chan_stats->rx_frm_cnt;
 #ifdef IEEE80211_CHAN_NOISE_FLOOR_SUPPORTED
-            g_chan_data.u.survey_chan.get.channels[g_chan_idx].nf    = chan_stats->noise_floor;
+            g_chan_data.u.survey_chan.get.channels[g_chan_idx].nf    = chan_stats->chan_nf;
 #endif
             LOGD("freq: %4d, rx_bss: %12"PRIu64", total: %12"PRIu64", tx: %12"PRIu64", "
                  "rx: %12"PRIu64", busy: %12"PRIu64", busy_ext: %12"PRIu64"",
@@ -260,7 +266,7 @@ void parse_channel_survey_stats_cb(struct cfg80211_data *arg)
                  chan_stats->tx_frm_cnt, chan_stats->rx_frm_cnt, chan_stats->clear_cnt,
                  chan_stats->ext_busy_cnt);
 #ifdef IEEE80211_CHAN_NOISE_FLOOR_SUPPORTED
-            LOGD("noise_floor: %"PRIi16"", chan_stats->noise_floor);
+            LOGD("chan_nf: %"PRIi16"", chan_stats->chan_nf);
 #endif
             g_chan_idx++;
         }

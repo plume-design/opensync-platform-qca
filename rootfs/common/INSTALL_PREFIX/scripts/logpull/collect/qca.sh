@@ -32,7 +32,6 @@
 collect_qcawl()
 {
     collect_cmd iwconfig
-    collect_cmd apstats -R
 
     # Collect list of STA clients
     for IF in $(cat /proc/net/wireless | sed 1,2d | grep -v wifi | cut -d : -f 1); do

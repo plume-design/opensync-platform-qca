@@ -140,6 +140,7 @@ struct socket_context {
 
 extern int  _bsal_ioctl_fd;
 
+bool util_wifi_is_ap_vlan(const char *ifname);
 const char *qca_get_xml_path(const char *ifname);
 int readcmd(char *buf, size_t buflen, void (*xfrm)(char *), const char *fmt, ...);
 
@@ -449,6 +450,18 @@ osync_nl80211_bsal_bs_client_config(int fd, const char *ifname, const uint8_t *m
 #endif
     send_nl_command(&sock_ctx, ifname, &athdbg, sizeof(athdbg), NULL, QCA_NL80211_VENDOR_SUBCMD_DBGREQ);
 #endif
+#ifdef OPENSYNC_NL_SUPPORT
+#ifdef CONFIG_PLATFORM_QCA_QSDK120
+    struct cfg80211_data            buffer;
+    buffer.data = (uint8_t *)mac_addr;
+    buffer.length = BSAL_MAC_ADDR_LEN;
+    buffer.callback = NULL;
+    buffer.parse_data = 0;
+    send_setparam_command(&(sock_ctx.cfg80211_ctxt),
+                          QCA_NL80211_VENDOR_SUBCMD_PROBE_WH_CONFIG,
+                          1, ifname, (char *)&buffer, sizeof(uint32_t));
+#endif
+#endif
 
     memset(&athdbg, 0, sizeof(athdbg));
     athdbg.cmd = IEEE80211_DBGREQ_ACL_SET_CLI_PARAMS;
@@ -719,6 +732,8 @@ osync_nl80211_bsal_client_measure(const char *ifname, const uint8_t *mac_addr, i
 }
 #endif
 #if defined (OSYNC_IOCTL_LIB) && (OSYNC_IOCTL_LIB == 2)
+
+#ifndef strdupa
 # define strdupa(s)                                    \
   (__extension__                                       \
     ({                                                 \
@@ -727,6 +742,7 @@ osync_nl80211_bsal_client_measure(const char *ifname, const uint8_t *mac_addr, i
       char *__new = (char *) __builtin_alloca (__len); \
       (char *) memcpy (__new, __old, __len);           \
     }))
+#endif
 
 #include <string.h>
 #include "util.h"
@@ -766,6 +782,17 @@ osync_nl80211_init(struct ev_loop *loop, bool init_callback)
            LOG(ERR,"Getting file description failed (fd: %d)", fd);
            wifi_destroy_nl80211(&sock_ctx.cfg80211_ctxt);
            return -EIO;
+        }
+
+        const int sk_buf_bytes = 2 * 1024 * 1024;  /* 2 MB */
+        const int sk_rxbuf_bytes = sk_buf_bytes;
+        const int sk_txbuf_bytes = sk_buf_bytes;
+        const int sk_buf_err = nl_socket_set_buffer_size(sock_ctx.cfg80211_ctxt.event_sock, sk_rxbuf_bytes, sk_txbuf_bytes);
+        if (sk_buf_err < 0) {
+            LOGN("ioctl80211: failed to set netlink socket buffer size, "
+                 "expect overrun issues: nl_error=%d errno=%d",
+                 sk_buf_err,
+                 errno);
         }
 
         nl_socket_set_nonblocking(sock_ctx.cfg80211_ctxt.event_sock);
@@ -1566,6 +1593,7 @@ qca_get_int(const char *ifname, const char *iwprivname, int *v)
 #ifdef OPENSYNC_NL_SUPPORT
     char command[32] = "--";
     strcat(command,iwprivname);
+
     const char *argv[] = { "cfg80211tool.1", "-i", ifname, "-f", xml_path, "-h", "none", "--START_CMD", command, "--RESPONSE", command,
                             "--END_CMD", NULL };
 #else

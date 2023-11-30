@@ -1672,7 +1672,7 @@ int qca_bsal_send_action(
 
     bssid_found = os_nif_macaddr_get(strdupa(ifname), &bssid);
     if (bssid_found == false) {
-        LOGW("%s send action frame failed, unable to lookuop vif bssid", ifname);
+        LOGW("%s send action frame failed, unable to lookup vif bssid", ifname);
         return -1;
     }
 

@@ -809,6 +809,8 @@ int qca_bsal_client_get_datarate_info(
 #ifdef CONFIG_PLATFORM_QCA_QSDK12_SUB_VER1
     memset(&mesh_dbg_req, 0, sizeof(mesh_dbg_req));
     mesh_dbg_req.mesh_cmd = MESH_BSTEERING_GET_DATARATE_INFO;
+    memcpy(&mesh_dbg_req.dstmac, mac_addr, sizeof(mesh_dbg_req.dstmac));
+    mesh_dbg_req.needs_reply = DBGREQ_REPLY_IS_REQUIRED;
 #else
     athdbg.data.mesh_dbg_req.mesh_cmd = MESH_BSTEERING_GET_DATARATE_INFO;
 #endif
@@ -831,6 +833,21 @@ int qca_bsal_client_get_datarate_info(
         return result;
     }
 #endif
+
+#ifdef OPENSYNC_NL_SUPPORT
+#ifdef CONFIG_PLATFORM_QCA_QSDK12_SUB_VER1
+    struct cfg80211_data    buffer;
+    buffer.data = (void *)&mesh_dbg_req;
+    buffer.length = sizeof(mesh_dbg_req);
+    buffer.callback = NULL;
+    buffer.parse_data = 0;
+
+    send_setparam_command(&(sock_ctx.cfg80211_ctxt),
+                          QCA_NL80211_VENDOR_SUBCMD_MESH_SET_GET_CONFIG,
+                          1, ifname, (char *)&buffer, sizeof(uint32_t));
+#endif
+#endif
+
 #ifdef CONFIG_PLATFORM_QCA_QSDK12_SUB_VER1
     datarate->max_chwidth = mesh_dbg_req.mesh_data.bsteering_datarate_info.max_chwidth;
     datarate->max_streams = mesh_dbg_req.mesh_data.bsteering_datarate_info.num_streams;
@@ -1243,7 +1260,7 @@ int qca_bsal_send_action(
 
     bssid_found = os_nif_macaddr_get(strdupa(ifname), &bssid);
     if (bssid_found == false) {
-        LOGW("%s send action frame failed, unable to lookuop vif bssid", ifname);
+        LOGW("%s send action frame failed, unable to lookup vif bssid", ifname);
         return -1;
     }
 

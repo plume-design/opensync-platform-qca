@@ -60,6 +60,7 @@ UNIT_LDFLAGS += -lnl-genl-3
 endif
 
 UNIT_DEPS += $(PLATFORM_DIR)/src/lib/ioctl80211
+UNIT_DEPS += src/lib/ff
 
 UNIT_DEPS += $(PLATFORM_DIR)/src/lib/bsal
 UNIT_DEPS += src/lib/hostap
@@ -67,6 +68,7 @@ UNIT_DEPS_CFLAGS += src/lib/crt
 UNIT_DEPS_CFLAGS += src/lib/json_util
 UNIT_DEPS_CFLAGS += src/lib/ovsdb
 UNIT_DEPS_CFLAGS += src/lib/daemon
+UNIT_DEPS_CFLAGS += src/lib/ff
 
 UNIT_EXPORT_CFLAGS := -I$(UNIT_PATH)
 UNIT_EXPORT_LDFLAGS += $(SDK_LIB_DIR) -lm $(UNIT_LDFLAGS)

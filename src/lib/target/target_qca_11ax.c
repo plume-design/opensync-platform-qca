@@ -97,6 +97,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <opensync-ctrl-dpp.h>
 #include <opensync-wpas.h>
 #include <opensync-hapd.h>
+#include "ff_lib.h"
 
 #define MODULE_ID LOG_MODULE_ID_TARGET
 #define RTT_MODULE_ID 22
@@ -147,6 +148,7 @@ static struct schema_Wifi_VIF_Config *g_vconfs;
 static int g_num_rconfs;
 static int g_num_vconfs;
 
+bool target_ap_vlan_state_get(char *vif, struct schema_Wifi_VIF_State *vstate);
 /******************************************************************************
  * Generic helpers
  *****************************************************************************/
@@ -601,7 +603,7 @@ util_net_get_macaddr(const char *ifname,
 static int
 util_wifi_get_phy_vifs_cnt(const char *phy);
 
-static bool
+bool
 util_wifi_is_ap_vlan(const char *ifname)
 {
     return strstr(ifname, ".sta") != NULL;
@@ -620,8 +622,9 @@ util_wifi_get_parent(const char *vif,
 {
     char path[128];
     int err;
+    char *vif_cpy = strdupa(vif);
 
-    snprintf(path, sizeof(path), "/sys/class/net/%s/parent", vif);
+    snprintf(path, sizeof(path), "/sys/class/net/%s/parent", strsep(&vif_cpy, "."));
     err = util_file_read_str(path, buf, len);
     if (err <= 0)
         return err;
@@ -1061,15 +1064,24 @@ static void
 util_cb_vif_state_update(const char *vif)
 {
     struct schema_Wifi_VIF_State vstate;
-    const char *phy = strchomp(R(F("/sys/class/net/%s/parent", vif)), "\r\n ");
+    char phy[32];
     char ifname[32];
     bool ok;
+
+    util_wifi_get_parent(vif, phy, sizeof(phy));
 
     LOGD("%s: updating state", vif);
 
     STRSCPY(ifname, vif);
 
-    ok = target_vif_state_get(ifname, &vstate);
+    if (util_wifi_is_ap_vlan(vif))
+    {
+        ok = target_ap_vlan_state_get(ifname, &vstate);
+    }
+    else
+    {
+        ok = target_vif_state_get(ifname, &vstate);
+    }
     if (!ok) {
         LOGW("%s: failed to get vif state: %d (%s)",
              vif, errno, strerror(errno));
@@ -1516,7 +1528,6 @@ qca_ctrl_discover(const char *bss)
         hapd->wps_success = qca_hapd_wps_success;
         hapd->wps_timeout = qca_hapd_wps_timeout;
         hapd->wps_disable = qca_hapd_wps_disable;
-        hapd->respect_multi_ap = 1;
         hapd->skip_probe_response = 1;
         hapd->ieee80211n = 1;
         hapd->ieee80211ac = 1;
@@ -1546,7 +1557,6 @@ qca_ctrl_discover(const char *bss)
         wpas->ctrl.dpp_conf_received = qca_ctrl_dpp_conf_received;
         wpas->connected = qca_wpas_connected;
         wpas->disconnected = qca_wpas_disconnected;
-        wpas->respect_multi_ap = 1;
         qca_ctrl_fill_freqlist(wpas);
         ctrl_enable(&wpas->ctrl);
         wpas = NULL;
@@ -1594,12 +1604,22 @@ qca_ctrl_apply(const char *bss,
     struct wpas *wpas = wpas_lookup(bss);
     bool first = false;
     int err = 0;
-
+    size_t len;
+    char *buf;
     WARN_ON(hapd && wpas);
 
     if (hapd) {
         first = (hapd->ctrl.wpa == NULL);
         err |= WARN_ON(hapd_conf_gen(hapd, rconf, vconf) < 0);
+        if (!strcmp(vconf->multi_ap, "backhaul_bss"))
+        {
+            // QCA specifically needs "wds_sta" set if interface is backhaul_bss.
+            // Find last line and add it to config.
+            buf = hapd->conf;
+            while (*buf != '\0') buf++;
+            len = sizeof(hapd->conf);
+            csnprintf(&buf, &len, "wds_sta=1\n");
+        }
         err |= WARN_ON(hapd_conf_apply(hapd) < 0);
     }
 
@@ -1775,6 +1795,39 @@ util_qca_get_ht_mode(const char *vif, char *htmode, int htmode_len)
 	return qca_get_ht_mode(vif,htmode,htmode_len);
 }
 
+static void
+util_qca_set_dfs_punc(const char *phy)
+{
+    if (kconfig_enabled(CONFIG_QCA_TARGET_PUNCTURING_SUPPORT)) {
+        const bool ff_use_dfs_punc = ff_is_flag_enabled("use_dfs_punc");
+        util_qca_set_int_lazy(phy, "g_dfs_puncture_en", "dfs_puncture_en", ff_use_dfs_punc);
+    }
+}
+
+static void
+util_qca_set_punct_strict(const char *phy, int v)
+{
+    if (kconfig_enabled(CONFIG_QCA_TARGET_PUNCTURING_SUPPORT))
+        util_qca_set_int_lazy(phy, "g_puncture_strict", "puncture_strict", v);
+}
+
+static bool
+util_qca_get_puncturing(const char *phy, int *v)
+{
+    if (kconfig_enabled(CONFIG_QCA_TARGET_PUNCTURING_SUPPORT)) {
+
+        char *vif;
+
+        vif = util_iwconfig_any_phy_vif_type(phy, "ap", A(32));
+        if (!vif)
+            return false;
+
+        return util_qca_get_int(vif, "get_puncture_bitmap", v);
+    } else {
+        return false;
+    }
+}
+
 #if 0
 /*
  * The issue specific to "*scanfilter*" command is fixed in
@@ -1836,10 +1889,10 @@ static ds_dlist_t g_thermal_list = DS_DLIST_INIT(struct util_thermal, list);
 static const char **
 util_thermal_get_qca_names(const char *phy)
 {
-    static const char *hard[] = { "get_txchainmask", "txchainmask" };
+    static const char *soft[] = { "get_txchainsoft", "txchainsoft" };
 
-    LOGT("%s: thermal: using txchainmask", phy);
-    return hard;
+    LOGT("%s: thermal: using txchainsoft", phy);
+    return soft;
 }
 
 static int
@@ -2502,15 +2555,20 @@ util_csa_start(const char *phy,
                const char *freq_band,
                const char *ht_mode,
                int channel,
-               int ccfs0)
+               int ccfs0,
+               bool punc_exists,
+               int punc)
 {
     char mode[32];
     int err;
     char cfreq2[32] = "";
+    char punc_s[32] = "";
 
     if (!strcmp(hw_mode, "11be")) {
         if (ccfs0 != 0)
             snprintf(cfreq2, sizeof(cfreq2), "--cfreq2 %d", ccfs0);
+        if (punc_exists)
+            snprintf(punc_s, sizeof(punc_s), "--punc %d", punc);
     }
 
     if (util_cac_in_progress(phy)) {
@@ -2536,14 +2594,15 @@ util_csa_start(const char *phy,
         return err ? -1 : 0;
     }
 
-    err = runcmd("exttool --chanswitch --interface %s --chan %d --band %d --numcsa %d --chwidth %d --secoffset %d %s",
+    err = runcmd("exttool --chanswitch --interface %s --chan %d --band %d --numcsa %d --chwidth %d --secoffset %d %s %s",
                  phy,
                  channel,
                  util_get_radio_band(freq_band),
                  CSA_COUNT,
                  util_csa_get_chwidth(phy, ht_mode),
                  util_csa_get_secoffset(phy, channel),
-                 cfreq2);
+                 cfreq2,
+                 punc_s);
     if (err) {
         LOGW("%s: failed to run exttool; is csa already running? invalid channel? nop active?",
              phy);
@@ -2917,7 +2976,7 @@ util_nl_parse(const void *buf, unsigned int len)
             if ((created || updated || deleted) &&
                 (access(F("/sys/class/net/%s/parent", ifname), R_OK) == 0))
                 util_cb_delayed_update(UTIL_CB_VIF, ifname);
-            if (deleted && util_wifi_is_ap_vlan(ifname))
+            if ((created || deleted) && util_wifi_is_ap_vlan(ifname))
                 util_cb_delayed_update(UTIL_CB_VIF, ifname);
         }
 }
@@ -3628,6 +3687,8 @@ util_radio_country_get(const char *phy, char *country, int country_len)
     int err;
     const char *xml_path = qca_get_xml_path(phy);
 
+    const char *fmt = strfmta("%%%d[a-zA-Z]", country_len - 1);
+
     memset(country, '\0', country_len);
 #ifdef OPENSYNC_NL_SUPPORT
     if ((err = util_exec_read(rtrimws, buf, sizeof(buf), "cfg80211tool.1", "-i", phy, "-f", xml_path, "-h", "none", "--START_CMD", "--getCountry","--RESPONSE", "--getCountry", "--END_CMD"))) {
@@ -3641,7 +3702,7 @@ util_radio_country_get(const char *phy, char *country, int country_len)
     }
 #endif
     if ((p = strstr(buf, "getCountry:")))
-        strscpy(country, strstr(p, ":")+1, country_len);
+        sscanf(strstr(p, ":") + 1, fmt, country);
 
     return strlen(country);
 }
@@ -3734,6 +3795,9 @@ bool target_radio_state_get(char *phy, struct schema_Wifi_Radio_State *rstate)
 
     if ((rstate->center_freq0_chan_exists = util_qca_get_center_freq0_chan(phy, &v)))
         rstate->center_freq0_chan = v;
+
+    if ((rstate->puncture_bitmap_exists = util_qca_get_puncturing(phy, &v)))
+        rstate->puncture_bitmap = v;
 
     STRSCPY(rstate->if_name, phy);
     STRSCPY(rstate->hw_type, hw_type);
@@ -3979,7 +4043,7 @@ target_radio_config_set2(const struct schema_Wifi_Radio_Config *rconf,
         util_radio_update_radar_escape_freq_mhz(phy);
     }
 
-    if ((changed->channel || changed->ht_mode || changed->center_freq0_chan)) {
+    if ((changed->channel || changed->ht_mode || changed->center_freq0_chan || changed->puncture_bitmap)) {
         if (rconf->channel_exists && rconf->channel > 0 && rconf->ht_mode_exists) {
             if ((vif = util_iwconfig_any_phy_vif_type(phy, "ap", A(32)))) {
                 if (util_radio_bgcac_active(phy, rconf->channel, rconf->ht_mode)) {
@@ -3992,8 +4056,15 @@ target_radio_config_set2(const struct schema_Wifi_Radio_Config *rconf,
                      * This can be removed if the issue is fixed in default SPF
                      */
                     util_mode_reconfig(vif, rconf->hw_mode, rconf->freq_band, rconf->ht_mode);
+
+                    if (changed->puncture_bitmap) {
+                        int punc_strict = rconf->puncture_bitmap_exists && rconf->puncture_bitmap > 0 ? 1 : 0;
+                        util_qca_set_punct_strict(phy, punc_strict);
+                    }
+
                     if (util_csa_start(phy, vif, rconf->hw_mode, rconf->freq_band, rconf->ht_mode, rconf->channel,
-                                       rconf->center_freq0_chan_exists ? rconf->center_freq0_chan : 0))
+                                       rconf->center_freq0_chan_exists ? rconf->center_freq0_chan : 0,
+                                       rconf->puncture_bitmap_exists, rconf->puncture_bitmap))
                         LOGW("%s: failed to start csa: %d (%s)", phy, errno, strerror(errno));
                     else if (util_radio_config_only_channel_changed(changed))
                         goto report;
@@ -4061,6 +4132,8 @@ target_radio_config_set2(const struct schema_Wifi_Radio_Config *rconf,
     if (util_qca_set_int(phy, "samessid_disable", 1))
         LOGW("Failed to disable repeater samessid feature support\n");
 
+    if (strstr(rconf->freq_band, "5G"))
+        util_qca_set_dfs_punc(phy);
     util_thermal_sys_recalc_tx_chainmask();
     util_cb_phy_state_update(phy);
 report:
@@ -4401,6 +4474,28 @@ util_vif_acl_enforce(const char *phy,
     }
 }
 
+static void
+util_vif_wds_set(const char *vif, const char *multi_ap)
+{
+    util_qca_set_int_lazy(vif, "get_wds", "wds", strcmp(multi_ap, "backhaul_sta") ? 0:1);
+    assert(0 == util_exec_simple("iw", vif, "set", "4addr", strcmp(multi_ap, "backhaul_sta") ? "off":"on"));
+}
+
+static int
+util_vif_wds_get(struct hapd *hapd, char *buf, int len)
+{
+    const char *conf = R(hapd->confpath) ?:"";
+    const char *wds = ini_geta(conf, "wds_sta");
+
+    if (atoi(wds ?: "0"))
+    {
+        strscpy(buf, "backhaul_bss", len);
+        return 1;
+    }
+    return 0;
+}
+
+
 /******************************************************************************
  * Vif implementation
  *****************************************************************************/
@@ -4423,6 +4518,16 @@ target_vif_config_set2(const struct schema_Wifi_VIF_Config *vconf,
     char buf[128];
     const char *phy_xml_path = qca_get_xml_path(phy);
     const char *vif_xml_path = qca_get_xml_path(vif);
+
+    if (!phy_xml_path) {
+        LOGW("%s: unsupported interface", phy);
+        return false;
+    }
+    if (!vif_xml_path) {
+        LOGW("%s: unsupported interface", vif);
+        return false;
+    }
+
 
     if (!rconf ||
         changed->enabled ||
@@ -4617,6 +4722,9 @@ target_vif_config_set2(const struct schema_Wifi_VIF_Config *vconf,
         if (changed->min_hw_mode)
             util_vif_min_hw_mode_set(vif, vconf->min_hw_mode);
 
+    if (changed->multi_ap)
+        util_vif_wds_set(vif, vconf->multi_ap);
+
     qca_ctrl_apply(vif, vconf, rconf, cconfs, num_cconfs);
     if (changed->wps_pbc || changed->wps || changed->wps_pbc_key_id) {
         qca_ctrl_wps_session(vif, vconf->wps, vconf->wps_pbc);
@@ -4674,13 +4782,6 @@ bool target_vif_state_get(char *vif, struct schema_Wifi_VIF_State *vstate)
     if ((vstate->mode_exists = util_iwconfig_get_opmode(vif, buf, sizeof(buf))))
         STRSCPY(vstate->mode, buf);
 
-    if (util_wifi_is_ap_vlan(vif)) {
-        SCHEMA_SET_STR(vstate->mode, "ap_vlan");
-
-        if (!WARN_ON(util_vif_ap_vlan_addr(vif, buf, sizeof(buf)) < 0))
-            SCHEMA_SET_STR(vstate->ap_vlan_sta_addr, buf);
-    }
-
     if ((vstate->ssid_broadcast_exists = util_qca_get_int(vif, "get_hide_ssid", &v)))
         STRSCPY(vstate->ssid_broadcast, v ? "disabled" : "enabled");
 
@@ -4734,6 +4835,55 @@ bool target_vif_state_get(char *vif, struct schema_Wifi_VIF_State *vstate)
 
     if (hapd) hapd_bss_get(hapd, vstate);
     if (wpas) wpas_bss_get(wpas, vstate);
+
+    if (hapd && (vstate->multi_ap_exists = util_vif_wds_get(hapd, buf, sizeof(buf))))
+    {
+        STRSCPY(vstate->multi_ap, buf);
+    }
+    else if (util_qca_get_int(vif, "get_wds", &v) && v)
+    {
+        SCHEMA_SET_STR(vstate->multi_ap, "backhaul_sta");
+    }
+    else
+    {
+        SCHEMA_SET_STR(vstate->multi_ap, "none");
+    }
+
+    return true;
+}
+
+bool target_ap_vlan_state_get(char *vif, struct schema_Wifi_VIF_State *vstate)
+{
+    char buf[256];
+    bool isup;
+
+    memset(vstate, 0, sizeof(*vstate));
+
+    schema_Wifi_VIF_State_mark_all_present(vstate);
+    vstate->_partial_update = true;
+    vstate->associated_clients_present = false;
+    vstate->vif_config_present = false;
+
+    SCHEMA_SET_STR(vstate->if_name, vif);
+    SCHEMA_SET_INT(vstate->enabled, os_nif_is_up(vif, &isup) && isup);
+
+    if (!vstate->enabled)
+        return true;
+
+    // This is for STA interfaces on gw. Since WDS STA interface on gw does not support use of cfg80211tool,
+    // collect only necesary parameters and return.
+    SCHEMA_SET_STR(vstate->mode, "ap_vlan");
+    SCHEMA_SET_STR(vstate->multi_ap, "backhaul_bss");
+    SCHEMA_SET_INT(vstate->wds, 1);
+
+    if (!WARN_ON(util_vif_ap_vlan_addr(vif, buf, sizeof(buf)) < 0))
+        SCHEMA_SET_STR(vstate->ap_vlan_sta_addr, buf);
+
+    // Mac address should be of parent and not acutal sta interface
+    char *vif_cpy = strdupa(vif);
+    char *bss = strsep(&vif_cpy, ".");
+    if ((vstate->mac_exists = (0 == util_net_get_macaddr_str(bss, buf, sizeof(buf)))))
+        STRSCPY(vstate->mac, buf);
 
     return true;
 }

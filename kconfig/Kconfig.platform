@@ -67,6 +67,11 @@ config QCA_TARGET_GET_CHANNEL_SURVEY_STATS_VERSION_2
     default y if PLATFORM_QCA_QSDK120
     default n
 
+config QCA_TARGET_PUNCTURING_SUPPORT
+    bool
+    default y if PLATFORM_QCA_QSDK120
+    default n
+
 config QCA_USE_SYSUPGRADE
     bool "Use sysupgrade for upgrades"
     default n

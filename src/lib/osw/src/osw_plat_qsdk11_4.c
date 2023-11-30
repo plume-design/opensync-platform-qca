@@ -51,6 +51,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <nl_conn.h>
 #include <nl_80211.h>
 #include <nl_cmd_task.h>
+#include <osn_netif.h>
 
 /* osw */
 #include <osw_drv.h>
@@ -700,8 +701,8 @@ struct osw_plat_qsdk11_4_task {
 static void
 osw_plat_qsdk11_4_task_drop(struct osw_plat_qsdk11_4_task *task)
 {
-    ev_async_start(task->loop, &task->ev_async);
     osw_plat_qsdk11_4_async_drop(task->async);
+    ev_async_stop(task->loop, &task->ev_async);
     task->async = NULL;
 }
 
@@ -874,6 +875,7 @@ struct osw_plat_qsdk11_4_phy {
     struct osw_plat_qsdk11_4 *m;
     const struct nl_80211_phy *info;
     struct osw_plat_qsdk11_4_task task_mbss_tx_vdev;
+    osn_netif_t *netif;
 };
 
 struct osw_plat_qsdk11_4_vif {
@@ -1627,6 +1629,45 @@ osw_plat_qsdk11_4_pre_request_config_vif_ap(struct osw_plat_qsdk11_4 *m,
 }
 
 static void
+osw_plat_qsdk11_4_vif_disable_dbdc(struct osw_plat_qsdk11_4_vif *vif,
+                                   struct nl_80211 *nl)
+{
+    const struct nl_80211_vif *info = vif->info;
+    const char *vif_name = info->name;
+    const bool not_phy = (osw_plat_qsdk11_4_is_vif_name_qcawifi_phy(vif_name) == false);
+
+    if (not_phy) return;
+
+    const struct osw_plat_qsdk11_4_param_u32_arg arg_dbdc_enable = {
+            .nl = nl,
+            .ifindex = info->ifindex,
+            .cmd_id = QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS,
+            .param_id = OL_ATH_PARAM_SHIFT
+                      | OL_ATH_PARAM_DBDC_ENABLE,
+            .policy = OSW_PLAT_QSDK11_4_PARAM_SET_IF_NOT_EQUAL,
+            .desired_value = 0,
+            .vif_name = info->name,
+            .param_name = "dbdc_enable",
+    };
+
+    const struct osw_plat_qsdk11_4_param_u32_arg arg_dbdc_samessiddisable = {
+            .nl = nl,
+            .ifindex = info->ifindex,
+            .cmd_id = QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS,
+            .param_id = OL_ATH_PARAM_SHIFT
+                      | OL_ATH_PARAM_SAME_SSID_DISABLE,
+            /* There is no way to "get" for the this param */
+            .policy = OSW_PLAT_QSDK11_4_PARAM_SET_ALWAYS,
+            .desired_value = 1,
+            .vif_name = info->name,
+            .param_name = "dbdc_samessiddisable",
+    };
+
+    PARAM_U32_TASK_START(&vif->param_set_dbdc_enable, &arg_dbdc_enable);
+    PARAM_U32_TASK_START(&vif->param_set_dbdc_samessiddisable, &arg_dbdc_samessiddisable);
+}
+
+static void
 osw_plat_qsdk11_4_pre_request_config_vif(struct osw_plat_qsdk11_4 *m,
                                          struct osw_plat_qsdk11_4_vif *vif,
                                          struct osw_drv_conf *drv_conf,
@@ -1697,6 +1738,31 @@ osw_plat_qsdk11_4_phy_apply_mbss_tx_vif_name(struct osw_plat_qsdk11_4 *m,
 }
 
 static void
+osw_plat_qsdk11_4_phy_apply_disable_dbdc(struct osw_plat_qsdk11_4 *m,
+                                         struct osw_drv_phy_config *phy_conf)
+{
+    if (phy_conf->enabled == false) return;
+
+    struct osw_drv_nl80211_ops *nl_ops = m->nl_ops;
+    if (nl_ops == NULL) return;
+
+    struct nl_80211 *nl = nl_ops->get_nl_80211_fn(nl_ops);
+    if (nl == NULL) return;
+
+    const char *phy_vif_name = phy_conf->phy_name;
+    const struct nl_80211_vif *vif_info = nl_80211_vif_by_name(nl, phy_vif_name);
+    if (vif_info == NULL) return;
+
+    struct nl_80211_sub *sub = m->nl_sub;
+    if (sub == NULL) return;
+
+    struct osw_plat_qsdk11_4_vif *vif = nl_80211_sub_vif_get_priv(sub, vif_info);
+    if (vif == NULL) return;
+
+    osw_plat_qsdk11_4_vif_disable_dbdc(vif, nl);
+}
+
+static void
 osw_plat_qsdk11_4_pre_request_config_cb(struct osw_drv_nl80211_hook *hook,
                                         struct osw_drv_conf *drv_conf,
                                         void *priv)
@@ -1716,6 +1782,9 @@ osw_plat_qsdk11_4_pre_request_config_cb(struct osw_drv_nl80211_hook *hook,
     for (i = 0; i < drv_conf->n_phy_list; i++) {
         struct osw_drv_phy_config *phy_conf = &drv_conf->phy_list[i];
         osw_plat_qsdk11_4_phy_apply_mbss_tx_vif_name(m, phy_conf);
+        osw_plat_qsdk11_4_phy_apply_disable_dbdc(m, phy_conf);
+
+
         size_t j;
         for (j = 0; j < phy_conf->vif_list.count; j++) {
             struct osw_drv_vif_config *vif_conf = &phy_conf->vif_list.list[j];
@@ -1879,7 +1948,7 @@ osw_plat_qsdk11_4_put_survey(struct osw_plat_qsdk11_4 *m,
     const uint32_t rx = osw_plat_qsdk11_4_cycle_to_msec(m, cs->rx_frm_cnt);
     const uint32_t inbss = osw_plat_qsdk11_4_cycle_to_msec(m, cs->bss_rx_cnt);
     const uint32_t busy = osw_plat_qsdk11_4_cycle_to_msec(m, cs->clear_cnt);
-    const float noise = cs->noise_floor;
+    const float noise = cs->chan_nf;
 
     LOGT(LOG_PREFIX_PHY(phy_name, "stats: survey:"
                         " freq=%"PRIu32" MHz"
@@ -1890,7 +1959,7 @@ osw_plat_qsdk11_4_put_survey(struct osw_plat_qsdk11_4 *m,
                         " rx_bss=%"PRIu32
                         " clear=%"PRIu32,
                         cs->freq,
-                        cs->noise_floor,
+                        cs->chan_nf,
                         active,
                         tx,
                         rx,
@@ -2116,7 +2185,7 @@ osw_plat_qsdk11_4_get_survey_phy(const struct nl_80211_phy *phy,
     struct osw_plat_qsdk11_4 *m = priv;
     const char *phy_name = phy->name;
     const struct nl_80211_vif *vif_info = osw_plat_qsdk11_4_get_vif(m, phy_name, false);
-    if (WARN_ON(vif_info == NULL)) return;
+    if (vif_info == NULL) return;
 
     struct nl_80211_sub *sub = m->nl_sub;
     struct osw_plat_qsdk11_4_vif *vif = nl_80211_sub_vif_get_priv(sub, vif_info);
@@ -2143,8 +2212,19 @@ osw_plat_qsdk11_4_flush_peer_stats_phy(const struct nl_80211_phy *phy,
                                        void *priv)
 {
     struct osw_plat_qsdk11_4 *m = priv;
+    bool is_phy_up = false;
+    bool ret = false;
 
     const char *phy_name = phy->name;
+    ret = os_nif_is_up(phy_name, &is_phy_up);
+    if (ret == false) {
+        LOGW(LOG_PREFIX_PHY(phy_name, "query whether interface is up failed"));
+        return;
+    }
+    if (is_phy_up == false) {
+        LOGT(LOG_PREFIX_PHY(phy_name, "state is down. %s skipped", __func__));
+        return;
+    }
     const struct nl_80211_vif *vif_info = osw_plat_qsdk11_4_get_vif(m, phy_name, true);
     if (WARN_ON(vif_info == NULL)) return;
 
@@ -2210,6 +2290,18 @@ osw_plat_qsdk11_4_pre_request_stats_cb(struct osw_drv_nl80211_hook *hook,
 }
 
 static void
+osw_plat_qsdk11_4_phy_netif_cb(osn_netif_t *netif,
+                               struct osn_netif_status *status)
+{
+    struct osw_plat_qsdk11_4_phy *phy = osn_netif_data_get(netif);
+    struct osw_plat_qsdk11_4 *m = phy->m;
+    struct osw_drv *drv = m->drv_nl80211;
+    const char *phy_name = phy->info->name;
+
+    osw_drv_report_phy_changed(drv, phy_name);
+}
+
+static void
 osw_plat_qsdk11_4_phy_added_cb(const struct nl_80211_phy *info,
                                void *priv)
 {
@@ -2222,6 +2314,11 @@ osw_plat_qsdk11_4_phy_added_cb(const struct nl_80211_phy *info,
 
     phy->info = info;
     phy->m = m;
+
+    const char *phy_name = phy->info->name;
+    phy->netif = osn_netif_new(phy_name);
+    osn_netif_data_set(phy->netif, phy);
+    osn_netif_status_notify(phy->netif, osw_plat_qsdk11_4_phy_netif_cb);
 }
 
 static void
@@ -2237,6 +2334,9 @@ osw_plat_qsdk11_4_phy_removed_cb(const struct nl_80211_phy *info,
 
     phy->info = NULL;
     phy->m = NULL;
+
+    osn_netif_del(phy->netif);
+    phy->netif = NULL;
 }
 
 static void
@@ -2532,45 +2632,6 @@ osw_plat_qsdk11_4_vif_enable_frame_fwd(struct osw_plat_qsdk11_4_vif *vif,
 
     PARAM_U32_TASK_START(&vif->param_set_frame_fwd, &arg_frame_fwd);
     PARAM_U32_TASK_START(&vif->param_set_frame_mask, &arg_frame_mask);
-}
-
-static void
-osw_plat_qsdk11_4_vif_disable_dbdc(struct osw_plat_qsdk11_4_vif *vif,
-                                   struct nl_80211 *nl)
-{
-    const struct nl_80211_vif *info = vif->info;
-    const char *vif_name = info->name;
-    const bool not_phy = (osw_plat_qsdk11_4_is_vif_name_qcawifi_phy(vif_name) == false);
-
-    if (not_phy) return;
-
-    const struct osw_plat_qsdk11_4_param_u32_arg arg_dbdc_enable = {
-            .nl = nl,
-            .ifindex = info->ifindex,
-            .cmd_id = QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS,
-            .param_id = OL_ATH_PARAM_SHIFT
-                      | OL_ATH_PARAM_DBDC_ENABLE,
-            .policy = OSW_PLAT_QSDK11_4_PARAM_SET_IF_NOT_EQUAL,
-            .desired_value = 0,
-            .vif_name = info->name,
-            .param_name = "dbdc_enable",
-    };
-
-    const struct osw_plat_qsdk11_4_param_u32_arg arg_dbdc_samessiddisable = {
-            .nl = nl,
-            .ifindex = info->ifindex,
-            .cmd_id = QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS,
-            .param_id = OL_ATH_PARAM_SHIFT
-                      | OL_ATH_PARAM_SAME_SSID_DISABLE,
-            /* There is no way to "get" for the this param */
-            .policy = OSW_PLAT_QSDK11_4_PARAM_SET_ALWAYS,
-            .desired_value = 1,
-            .vif_name = info->name,
-            .param_name = "dbdc_samessiddisable",
-    };
-
-    PARAM_U32_TASK_START(&vif->param_set_dbdc_enable, &arg_dbdc_enable);
-    PARAM_U32_TASK_START(&vif->param_set_dbdc_samessiddisable, &arg_dbdc_samessiddisable);
 }
 
 static void
@@ -2909,10 +2970,6 @@ osw_plat_qsdk11_4_event_stats_rx(struct osw_plat_qsdk11_4 *m,
     WARN_ON(left != 0);
     WARN_ON(stats_len != 0);
 
-    WARN_ON(bytes >= UINT32_MAX);
-    WARN_ON(mpdu >= UINT32_MAX);
-    WARN_ON(retry >= UINT32_MAX);
-
     osw_tlv_put_u32_delta(t, OSW_STATS_STA_RX_BYTES, bytes);
     osw_tlv_put_u32_delta(t, OSW_STATS_STA_RX_FRAMES, mpdu);
     osw_tlv_put_u32_delta(t, OSW_STATS_STA_RX_RETRIES, retry);
@@ -2925,6 +2982,10 @@ osw_plat_qsdk11_4_event_stats_rx(struct osw_plat_qsdk11_4 *m,
                         mpdu,
                         retry,
                         bytes));
+
+    WARN_ON(bytes >= UINT32_MAX);
+    WARN_ON(mpdu >= UINT32_MAX);
+    WARN_ON(retry >= UINT32_MAX);
 }
 
 static void
@@ -2943,6 +3004,17 @@ osw_plat_qsdk11_4_event_stats_tx(struct osw_plat_qsdk11_4 *m,
     uint64_t bytes = 0;
 
     while (stats_len >= sizeof(*stats) && left > 0) {
+        if (WARN_ON(stats->mpdu_attempts < stats->mpdu_success)) {
+            LOGW(LOG_PREFIX_STA(phy_name, vif_name, sta_addr,
+                                "stats: tx:"
+                                " mpdu_attempts=%"PRIu32
+                                " mpdu_auccess=%"PRIu32
+                                " num_bytes=%"PRIu32,
+                                stats->mpdu_success,
+                                stats->mpdu_attempts,
+                                stats->num_bytes));
+        }
+
         mpdu += stats->mpdu_success;
         retry += stats->mpdu_attempts - stats->mpdu_success;
         bytes += stats->num_bytes;
@@ -2961,10 +3033,6 @@ osw_plat_qsdk11_4_event_stats_tx(struct osw_plat_qsdk11_4 *m,
     const struct wlan_tx_sojourn_stats *sojourn = (const void *)stats;
     if (WARN_ON(stats_len < sizeof(*sojourn))) return;
 
-    WARN_ON(bytes >= UINT32_MAX);
-    WARN_ON(mpdu >= UINT32_MAX);
-    WARN_ON(retry >= UINT32_MAX);
-
     osw_tlv_put_u32_delta(t, OSW_STATS_STA_TX_BYTES, bytes);
     osw_tlv_put_u32_delta(t, OSW_STATS_STA_TX_FRAMES, mpdu);
     osw_tlv_put_u32_delta(t, OSW_STATS_STA_TX_RETRIES, retry);
@@ -2977,6 +3045,10 @@ osw_plat_qsdk11_4_event_stats_tx(struct osw_plat_qsdk11_4 *m,
                         mpdu,
                         retry,
                         bytes));
+
+    WARN_ON(bytes >= UINT32_MAX);
+    WARN_ON(mpdu >= UINT32_MAX);
+    WARN_ON(retry >= UINT32_MAX);
 }
 
 static void
@@ -3037,14 +3109,6 @@ osw_plat_qsdk11_4_event_stats_avg(struct osw_plat_qsdk11_4 *m,
     if (rx_ppdu > 0) rx_mbps /= rx_ppdu;
     if (snr_cnt > 0) snr /= snr_cnt;
 
-    WARN_ON(tx_ppdu == 0 && tx_mbps > 0);
-    WARN_ON(rx_ppdu == 0 && rx_mbps > 0);
-    WARN_ON(snr_cnt == 0 && snr > 0);
-
-    WARN_ON(tx_mbps >= UINT32_MAX);
-    WARN_ON(rx_mbps >= UINT32_MAX);
-    WARN_ON(snr >= UINT32_MAX);
-
     if (tx_ppdu > 0) osw_tlv_put_u32(t, OSW_STATS_STA_TX_RATE_MBPS, tx_mbps);
     if (rx_ppdu > 0) osw_tlv_put_u32(t, OSW_STATS_STA_RX_RATE_MBPS, rx_mbps);
     if (snr_cnt > 0) osw_tlv_put_u32(t, OSW_STATS_STA_SNR_DB, snr);
@@ -3057,6 +3121,14 @@ osw_plat_qsdk11_4_event_stats_avg(struct osw_plat_qsdk11_4 *m,
                         tx_mbps,
                         rx_mbps,
                         snr));
+
+    WARN_ON(tx_ppdu == 0 && tx_mbps > 0);
+    WARN_ON(rx_ppdu == 0 && rx_mbps > 0);
+    WARN_ON(snr_cnt == 0 && snr > 0);
+
+    WARN_ON(tx_mbps >= UINT32_MAX);
+    WARN_ON(rx_mbps >= UINT32_MAX);
+    WARN_ON(snr >= UINT32_MAX);
 }
 
 static const char *

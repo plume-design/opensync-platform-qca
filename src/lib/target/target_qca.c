@@ -3362,6 +3362,7 @@ util_radio_country_get(const char *phy, char *country, int country_len)
     char buf[256];
     char *p;
     int err;
+    const char *fmt = strfmta("%%%d[a-zA-Z]", country_len - 1);
 
     memset(country, '\0', country_len);
 
@@ -3371,7 +3372,7 @@ util_radio_country_get(const char *phy, char *country, int country_len)
     }
 
     if ((p = strstr(buf, "getCountry:")))
-        strscpy(country, strstr(p, ":") + 1, country_len);
+        sscanf(strstr(p, ":") + 1, fmt, country);
 
     return strlen(country);
 }
