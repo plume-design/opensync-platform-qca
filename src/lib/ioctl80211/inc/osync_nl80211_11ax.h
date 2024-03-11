@@ -459,7 +459,8 @@ osync_nl80211_bsal_bs_client_config(int fd, const char *ifname, const uint8_t *m
     buffer.parse_data = 0;
     send_setparam_command(&(sock_ctx.cfg80211_ctxt),
                           QCA_NL80211_VENDOR_SUBCMD_PROBE_WH_CONFIG,
-                          1, ifname, (char *)&buffer, sizeof(uint32_t));
+                          ((conf->rssi_probe_hwm || conf->rssi_probe_lwm) ? 1 : 0),
+                          ifname, (char *)&buffer, sizeof(uint32_t));
 #endif
 #endif
 

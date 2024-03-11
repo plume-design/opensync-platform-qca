@@ -1,0 +1,232 @@
+#!/bin/sh
+. /lib/opensync_functions.sh
+
+include log
+
+OPENSYNC_OWM_BHAUL_AP_PREFIX=${OPENSYNC_OWM_BHAUL_AP_PREFIX:-b-}
+OPENSYNC_OWM_HOME_AP_PREFIX=${OPENSYNC_OWM_HOME_AP_PREFIX:-h-}
+USE_SHORT_SUFFIX_V1=${USE_SHORT_SUFFIX_V1:-1}
+osff_get=${INSTALL_PREFIX}/tools/osff_get
+
+mld_base() {
+    cat /sys/class/net/wifi0/address
+}
+
+mld_is_enabled() {
+    $osff_get prov_mld
+}
+
+nl_v0() {
+    # This behaves comparably to `nl -v0`, ie. it
+    # inserts a line prefix, starting with 0, to
+    # each line.
+    awk '{printf "%d ", i; i += 1; print}'
+}
+
+mlds() {
+    # Each line implies a distinct MLD.
+    #
+    # Each line contains 2 words: the index and
+    # regex filter.
+    #
+    # Each MLD will pull in a number of Affiliated netdevs
+    # as per regex match.
+    #
+    # Only same-type netdev can be grouped. Be careful.
+    nl_v0 <<.
+bhaul-sta-.*
+${OPENSYNC_OWM_BHAUL_AP_PREFIX}.*
+${OPENSYNC_OWM_HOME_AP_PREFIX}.*
+onboard-ap-.*
+svc-d-ap-.*
+svc-e-ap-.*
+fh-.*
+cp-.*
+.
+}
+
+mld_addr_gen() {
+    tr ':' '\n' \
+        | sed 's/^/0x/' \
+        | xargs -n1 printf ":%d" \
+        | cut -b2- \
+        | awk -v "idx=${1:-0}" '
+                BEGIN{FS=":"}
+                {
+                    $1 = ($1 + 2) % 256;
+                    $2 = ($2 + 1 + idx) % 256;
+
+                    printf("%02x:%02x:%02x:%02x:%02x:%02x", $1, $2, $3, $4, $5, $6);
+                }
+                '
+}
+
+vap_mld_addr() {
+    if_name=$1
+    set -- $(mlds)
+    while test "$#" -ge 2
+    do
+        mld=$1
+        mld_ifname=mld$mld
+        filter=$2
+        shift 2
+
+        if echo "$if_name" | grep -q "^$filter"
+        then
+            cat /sys/class/net/$mld_ifname/address
+            shift $#
+        fi
+    done
+}
+
+prov_mld() {
+    set -- $(mlds)
+    while test "$#" -ge 2
+    do
+        mld=$1
+        mld_ifname=mld$mld
+        mld_addr=$(mld_base | mld_addr_gen "$mld")
+        filter=$2
+        shift 2
+
+        # Create it only if it doesn't exist yet
+        test -e /sys/class/net/$mld_ifname || {
+            iw mld-wifi0 interface add $mld_ifname type __ap mld_addr $mld_addr
+        }
+    done
+}
+
+radio_suffix() {
+    # $1 = phy#X
+    iw $1 info \
+    | sed -n 's/* \([[:digit:]]\+\) MHz [[[:digit:]]\+] ([[:digit:]]\+.[[:digit:]] dBm)/\1/p' \
+    | awk '
+        $1 >= 2412 && $1 <= 2600 { band_2g=1; }
+        $1 >= 5180 && $1 <= 5320 { band_5gl=1; }
+        $1 >= 5500 && $1 <= 5825 { band_5gu=1; }
+        $1 >= 5935 && $1 <= 7115 { band_6g=1; }
+        END {
+            if (band_5gl && band_5gu) {
+                band_5gl=0;
+                band_5gu=0;
+                band_5g=1;
+            }
+            if (band_5gl) { print "l50"; }
+            if (band_5gu) { print "u50"; }
+            if (band_2g) { print "24"; }
+            if (band_5g) { print "50"; }
+            if (band_6g) { print "60"; }
+        }
+    '
+}
+
+short_radio_suffix() {
+    iw $1 info \
+    | sed -n 's/* \([[:digit:]]\+\) MHz [[[:digit:]]\+] ([[:digit:]]\+.[[:digit:]] dBm)/\1/p' \
+    | awk '
+        $1 >= 2412 && $1 <= 2600 { band_2g=1; }
+        $1 >= 5180 && $1 <= 5320 { band_5gl=1; }
+        $1 >= 5500 && $1 <= 5825 { band_5gu=1; }
+        $1 >= 5935 && $1 <= 7115 { band_6g=1; }
+        END {
+            if (band_5gl && band_5gu) {
+                band_5gl=0;
+                band_5gu=0;
+                band_5g=1;
+            }
+            if (band_5gl) { print "l5"; }
+            if (band_5gu) { print "u5"; }
+            if (band_2g) { print "24"; }
+            if (band_5g) { print "50"; }
+            if (band_6g) { print "60"; }
+        }
+    '
+}
+
+short_radio_suffix_try() {
+    phy=$1
+    if test "$USE_SHORT_SUFFIX_V1" -eq 1
+    then
+        short_radio_suffix "$phy"
+    else
+        radio_suffix "$phy"
+    fi
+}
+
+create_vap() {
+    phy=$1
+    name=$2
+    type=$3
+
+    mld_addr=$(vap_mld_addr "$name")
+    mld_arg=${mld_addr:+mld_addr $mld_addr}
+
+    test -e /sys/class/net/$name || {
+        iw $phy interface add $name type $type $mld_arg
+    }
+}
+
+prov_wifi() {
+    # eg. wifi0
+    wifi=$1
+    # eg. "lpm", "boot"
+    mode=$2
+
+    wiphy=$(cat /sys/class/net/$wifi/phy80211/index)
+    phy="phy#$wiphy"
+    suffix=$(radio_suffix $phy)
+    suffix_short=$(short_radio_suffix_try $phy)
+
+    log_info "prov: $wifi: $vap: provisioning, mode=$mode"
+
+    create_vap "$phy" bhaul-sta-$suffix station
+
+    # Make sure Station being down doesn't pull APs down.
+    cfg80211tool bhaul-sta-$suffix athnewind 1
+
+    # Disable powersave on Station because it introduces
+    # various reliability issues
+    cfg80211tool bhaul-sta-$suffix powersave 0
+    cfg80211tool bhaul-sta-$suffix uapsd 0
+
+    create_vap "$phy" $OPENSYNC_OWM_BHAUL_AP_PREFIX$suffix_short __ap
+    create_vap "$phy" $OPENSYNC_OWM_HOME_AP_PREFIX$suffix_short __ap
+    create_vap "$phy" onboard-ap-$suffix __ap
+    create_vap "$phy" svc-d-ap-$suffix __ap
+    create_vap "$phy" svc-e-ap-$suffix __ap
+    create_vap "$phy" fh-$suffix __ap
+    create_vap "$phy" cp-$suffix __ap
+}
+
+unprov_wifi() {
+    wifi=$1
+    mode=$2
+
+    for vap_path in $(grep "$wifi" /sys/class/net/*/parent)
+    do
+        vap=$(basename "$(dirname "$vap_path")")
+        log_info "prov: $wifi: $vap: unprovisioning, mode=$mode"
+        iwpriv "$vap" dbgLVL 0xf5ffffff
+        ifconfig "$vap" down
+        iw "$vap" del
+    done
+}
+
+prov() {
+    # eg. "lpm", "boot"
+    mode=$1
+
+    if mld_is_enabled
+    then
+        prov_mld
+    fi
+
+    for i in /sys/class/net/wifi*/phy80211/index
+    do
+        wifi=$(basename $(dirname $(dirname $i)))
+        prov_wifi "$wifi" "$mode"
+    done
+    touch /tmp/do_not_destroy_vaps
+}
+
+"$@"

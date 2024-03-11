@@ -1,4 +1,3 @@
-#!/bin/sh
 
 # Copyright (c) 2015, Plume Design Inc. All rights reserved.
 # 
@@ -24,16 +23,8 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-
-# Enable fw_recovery; this prevents an immediate reboot after a Wifi firmware
-# crash. The crash will be handled by OpenSync and it will result in a reboot
-# in the end, but this gives us time to collect logs and update the reboot
-# status
-
-for wifidev in /sys/class/net/wifi?
-do
-    wifi=$(basename $wifidev)
-    cfg80211tool $wifi 2>&1 | grep -q set_fw_recovery || continue
-    cfg80211tool $wifi set_fw_recovery 1
-done
-
+# The new chips have multiple Tx MBSS groups, instead of just one.
+# The current code in OW and OSW is unable to work with that properly.
+# Disable this for the time being. It's not
+# criticalto basic operation and allows bring up.
+export OW_MBSS_PREFER_NONHIDDEN_DISABLE=1

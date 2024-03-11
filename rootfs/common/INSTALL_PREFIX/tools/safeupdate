@@ -9,8 +9,12 @@ OSP_UPG_IMG_FAIL=7
 OSP_UPG_FL_WRITE=9
 OSP_UPG_BC_SET=11
 
+WPD=/etc/init.d/wpd
+
 function upg_image_write()
 {
+    # Before upgrade disable WPD if it exists.
+    [ -x ${WPD} ] && ${WPD} stop
     sysupgrade -n "$1" || exit $OSP_UPG_FL_WRITE
 }
 

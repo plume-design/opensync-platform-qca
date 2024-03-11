@@ -1,4 +1,3 @@
-#!/bin/sh
 
 # Copyright (c) 2015, Plume Design Inc. All rights reserved.
 # 
@@ -24,16 +23,33 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+# This depends on 51_owm.sh possibly as it can
+# override OWM Node_Services configuration.
 
-# Enable fw_recovery; this prevents an immediate reboot after a Wifi firmware
-# crash. The crash will be handled by OpenSync and it will result in a reboot
-# in the end, but this gives us time to collect logs and update the reboot
-# status
+ovsh=${INSTALL_PREFIX}/tools/ovsh
+prov=$INSTALL_PREFIX/scripts/prov
 
-for wifidev in /sys/class/net/wifi?
-do
-    wifi=$(basename $wifidev)
-    cfg80211tool $wifi 2>&1 | grep -q set_fw_recovery || continue
-    cfg80211tool $wifi set_fw_recovery 1
-done
+owm_wanted() {
+    $ovsh s Node_Services \
+        -w service==owm \
+        -w enable==true \
+        -w status==enabled >/dev/null
+}
 
+# Legacy driver is only intended for testing, not
+# actual use. But since it was designed around
+# being able to create interfaces from scratch,
+# let it do it. Interface creation is currently
+# tied to osw_drv_nl80211 anyway.
+is_legacy() {
+    test -z "$OSW_DRV_TARGET_DISABLED"
+}
+
+is_not_legacy() {
+    ! is_legacy
+}
+
+if owm_wanted && is_not_legacy
+then
+    "$prov" prov boot
+fi

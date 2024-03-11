@@ -72,6 +72,39 @@ config QCA_TARGET_PUNCTURING_SUPPORT
     default y if PLATFORM_QCA_QSDK120
     default n
 
+config QCA_WIFI_DFS_STATE_ENUM_V1
+    bool
+    default y if PLATFORM_QCA_QSDK11_SUB_VER4
+    default n
+
+config QCA_WIFI_DFS_STATE_ENUM_V2
+    bool
+    default y if PLATFORM_QCA_QSDK120
+    default n
+
+config QCA_WIFI_PUNCTURE_SUPPORTED
+    bool
+    default y if PLATFORM_QCA_QSDK120
+    default n
+
+config QCA_WIFI_MODE_NO_RESET_SUPPORTED
+    bool
+    default y if PLATFORM_QCA_QSDK120
+    default n
+
+config QCA_WIFI_NL80211_SUPPORTED
+    bool
+    default y if PLATFORM_QCA_QSDK110
+    default y if PLATFORM_QCA_QSDK120
+    default n
+    help
+        Ever since QSDK11.0 the qcawifi driver started
+        supporting nl80211 configuration interface.
+
+        It has its quirks and still requires some vendor
+        specific commands and events to be handled over
+        NL80211_CMD_VENDOR.
+
 config QCA_USE_SYSUPGRADE
     bool "Use sysupgrade for upgrades"
     default n

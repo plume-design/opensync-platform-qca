@@ -29,4 +29,6 @@
 ##############################################################################
 
 UNIT_SRC_TOP += $(if $(CONFIG_OSP_L2SWITCH_SSDKSH),$(OVERRIDE_DIR)/src/osp_l2switch_ssdksh.c)
+UNIT_SRC_TOP += $(OVERRIDE_DIR)/src/osp_temp_platform.c
 
+UNIT_CFLAGS += -I$(OVERRIDE_DIR)/inc
