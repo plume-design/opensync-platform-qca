@@ -966,6 +966,7 @@ struct osw_plat_qsdk11_4_vif {
     struct nl_cmd_task task_survey;
     struct osw_plat_qsdk11_4_task param_set_dbdc_enable;
     struct osw_plat_qsdk11_4_task param_set_dbdc_samessiddisable;
+    struct osw_plat_qsdk11_4_task param_set_min_rssi_min;
     struct osw_plat_qsdk11_4_task param_set_frame_fwd;
     struct osw_plat_qsdk11_4_task param_set_frame_mask;
     struct osw_plat_qsdk11_4_task param_set_ol_stats;
@@ -1784,6 +1785,29 @@ osw_plat_qsdk11_4_vif_disable_dbdc(struct osw_plat_qsdk11_4_vif *vif,
 
     PARAM_U32_TASK_START(&vif->param_set_dbdc_enable, &arg_dbdc_enable);
     PARAM_U32_TASK_START(&vif->param_set_dbdc_samessiddisable, &arg_dbdc_samessiddisable);
+}
+
+
+static void
+osw_plat_qsdk11_4_vif_set_min_rssi_min(struct osw_plat_qsdk11_4_vif *vif,
+                                   struct nl_80211 *nl)
+{
+    const struct nl_80211_vif *info = vif->info;
+    const char *vif_name = info->name;
+    if (osw_plat_qsdk11_4_is_vif_name_qcawifi_phy(vif_name)) return;
+
+    const struct osw_plat_qsdk11_4_param_u32_arg arg_min_rssi_min = {
+            .nl = nl,
+            .ifindex = info->ifindex,
+            .cmd_id = QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS,
+            .param_id = IEEE80211_PARAM_ASSOC_MIN_RSSI,
+            .policy = OSW_PLAT_QSDK11_4_PARAM_SET_IF_NOT_EQUAL,
+            .desired_value = -120,
+            .vif_name = info->name,
+            .param_name = "min_asoc_rssi",
+    };
+
+    PARAM_U32_TASK_START(&vif->param_set_min_rssi_min, &arg_min_rssi_min);
 }
 
 static void
@@ -3089,9 +3113,7 @@ osw_plat_qsdk11_4_vif_task_get_acl_done_cb(void *priv)
                       || (vif->last_getmac != NULL && macs == NULL)
                       || ((vif->last_getmac != NULL && macs != NULL && memcmp(vif->last_getmac, macs, size) != 0));
     FREE(vif->last_getmac);
-    vif->last_getmac = macs != NULL
-                     ? MEMNDUP(macs, size)
-                     : NULL;
+    vif->last_getmac = macs;
     vif->last_getmac_count = n_macs;
     if (changed) osw_plat_qsdk11_4_vif_report_changed(vif);
 }
@@ -3204,6 +3226,7 @@ osw_plat_qsdk11_4_vif_added_cb(const struct nl_80211_vif *info,
 
     osw_plat_qsdk11_4_task_init_auto(&vif->param_set_dbdc_enable);
     osw_plat_qsdk11_4_task_init_auto(&vif->param_set_dbdc_samessiddisable);
+    osw_plat_qsdk11_4_task_init_auto(&vif->param_set_min_rssi_min);
     osw_plat_qsdk11_4_task_init_auto(&vif->param_set_frame_fwd);
     osw_plat_qsdk11_4_task_init_auto(&vif->param_set_frame_mask);
     osw_plat_qsdk11_4_task_init_auto(&vif->param_set_ol_stats);
@@ -3228,6 +3251,7 @@ osw_plat_qsdk11_4_vif_added_cb(const struct nl_80211_vif *info,
 
     osw_plat_qsdk11_4_vif_disable_dbdc(vif, nl);
     osw_plat_qsdk11_4_vif_enable_frame_fwd(vif, nl);
+    osw_plat_qsdk11_4_vif_set_min_rssi_min(vif, nl);
 
     {
         rq_init(&vif->q_state, EV_DEFAULT);
@@ -3548,6 +3572,7 @@ osw_plat_qsdk11_4_vif_removed_cb(const struct nl_80211_vif *info,
 
     osw_plat_qsdk11_4_task_drop(&vif->param_set_dbdc_enable);
     osw_plat_qsdk11_4_task_drop(&vif->param_set_dbdc_samessiddisable);
+    osw_plat_qsdk11_4_task_drop(&vif->param_set_min_rssi_min);
     osw_plat_qsdk11_4_task_drop(&vif->param_set_frame_fwd);
     osw_plat_qsdk11_4_task_drop(&vif->param_set_frame_mask);
     osw_plat_qsdk11_4_task_drop(&vif->param_set_ol_stats);
@@ -4310,6 +4335,27 @@ osw_plat_qsdk11_4_fix_ap_bridge(struct osw_plat_qsdk11_4_vif *vif,
     ap->isolated = !ap_bridge;
 }
 
+static uint32_t osw_plat_qsdk11_4_puncture_bitmap_from_raw_u32(const char *phy_name,
+                                      const char *vif_name,
+                                      uint32_t prev_puncture_bitmap)
+{
+    uint32_t puncture_bitmap = prev_puncture_bitmap;
+
+    /* The driver uses the same struct for handling connections
+     * on interface as an AP and as a station. As AP in mode 802.11be
+     * puncturing bitmap will be correctly set. As station, connected
+     * to (i.e. GW) in non-802.11be mode the puncturing bitmap field
+     * will be invalidated. Value "puncturing invalid" for
+     * puncture_bitmap is 0xffff, while every channel is available.
+     */
+    if (prev_puncture_bitmap == 0xffff)
+    {
+        LOGT(LOG_PREFIX_VIF(phy_name, vif_name, "puncture_bitmap: invalid value - fixing"));
+        puncture_bitmap = 0x0000;
+    }
+    return puncture_bitmap;
+}
+
 static void
 osw_plat_qsdk11_4_fix_puncture_bitmap(struct osw_plat_qsdk11_4_vif *vif,
                                       const char *phy_name,
@@ -4320,7 +4366,7 @@ osw_plat_qsdk11_4_fix_puncture_bitmap(struct osw_plat_qsdk11_4_vif *vif,
     if (state->vif_type != OSW_VIF_AP) return;
 
     struct osw_drv_vif_state_ap *ap = &state->u.ap;
-    const uint32_t puncture_bitmap = vif->puncture_bitmap_prev;
+    const uint32_t puncture_bitmap = osw_plat_qsdk11_4_puncture_bitmap_from_raw_u32(phy_name, vif_name, vif->puncture_bitmap_prev);
 
     LOGT(LOG_PREFIX_VIF(phy_name, vif_name, "puncture_bitmap: %"PRIx32, puncture_bitmap));
     ap->channel.puncture_bitmap = (puncture_bitmap & 0xffff);
@@ -4434,15 +4480,46 @@ osw_plat_qsdk_find_if_name_by_mac(struct nl_msg **msgs,
     return NULL;
 }
 
+static struct nl_msg *
+osw_plat_qsdk_msg_genl_get_family(const char *name)
+{
+    struct nl_msg *msg = nlmsg_alloc();
+    if (WARN_ON(genlmsg_put(msg, NL_AUTO_PORT, NL_AUTO_SEQ, GENL_ID_CTRL, 0, 0, CTRL_CMD_GETFAMILY, 1) == NULL)) {
+        goto free;
+    }
+    if (WARN_ON(nla_put_string(msg, CTRL_ATTR_FAMILY_NAME, name) < 0)) {
+        goto free;
+    }
+    return msg;
+free:
+    nlmsg_free(msg);
+    return NULL;
+}
+
+static int
+osw_plat_qsdk_parse_genl_family_id(struct nl_msg *msg)
+{
+    static struct nla_policy policy[CTRL_ATTR_MAX + 1] = {
+        [CTRL_ATTR_FAMILY_ID] = { .type = NLA_U16 },
+    };
+    struct nlattr *tb[CTRL_ATTR_MAX + 1];
+    struct nlmsghdr *nlh = nlmsg_hdr(msg);
+    const int parse_err = genlmsg_parse(nlh, 0, tb, CTRL_ATTR_MAX, policy);
+    if (parse_err) return -1;
+    struct nlattr *id = tb[CTRL_ATTR_FAMILY_ID];
+    if (id != NULL) return nla_get_u16(id);
+    return -1;
+}
+
 static int
 osw_plat_qsdk_get_nl80211_family_id(void)
 {
-    struct nl_sock *s = nl_socket_alloc();
-    if (WARN_ON(s == NULL)) return -1;
-    const int connect_err = genl_connect(s);
-    const int family_id = genl_ctrl_resolve(s, "nl80211");
-    nl_socket_free(s);
-    if (WARN_ON(connect_err != 0)) return -1;
+    struct nl_msg *msg = osw_plat_qsdk_msg_genl_get_family("nl80211");
+    cr_nl_cmd_t *cmd = cr_nl_cmd(NULL, NETLINK_GENERIC, msg);
+    while (cr_nl_cmd_run(cmd) == false) {}
+    struct nl_msg *resp = cr_nl_cmd_resp(cmd);
+    const int family_id = osw_plat_qsdk_parse_genl_family_id(resp);
+    cr_nl_cmd_drop(&cmd);
     return family_id;
 }
 
@@ -4536,6 +4613,93 @@ osw_plat_qsdk11_4_fix_status(struct osw_plat_qsdk11_4_vif *vif,
 }
 
 static void
+osw_plat_qsdk_fix_vif_sta_multi_ap_networks(struct osw_plat_qsdk11_4_vif *vif,
+                                            const char *phy_name,
+                                            const char *vif_name,
+                                            struct osw_drv_vif_state *state)
+{
+    if (vif == NULL) return;
+    if (state->vif_type != OSW_VIF_STA) return;
+
+    const bool wds_state = vif->wds_prev;
+
+    LOGT(LOG_PREFIX_VIF(phy_name, vif_name, "wds: %d", wds_state));
+
+    struct osw_drv_vif_state_sta *sta = &state->u.sta;
+    struct osw_drv_vif_sta_network *network = sta->network;
+
+    while (network != NULL) {
+        network->multi_ap = wds_state;
+        network = network->next;
+    }
+}
+
+static void
+osw_plat_qsdk_fix_vif_sta_multi_ap_link(struct osw_plat_qsdk11_4_vif *vif,
+                                        const char *phy_name,
+                                        const char *vif_name,
+                                        struct osw_drv_vif_state *state)
+{
+    if (vif == NULL) return;
+    if (state->vif_type != OSW_VIF_STA) return;
+
+    struct osw_drv_vif_state_sta *sta = &state->u.sta;
+
+    if (sta == NULL) return;
+
+    switch (sta->link.status) {
+        case OSW_DRV_VIF_STATE_STA_LINK_CONNECTED:
+            {
+                sta->link.multi_ap = vif->wds_prev;
+            }
+        case OSW_DRV_VIF_STATE_STA_LINK_CONNECTING:
+        case OSW_DRV_VIF_STATE_STA_LINK_DISCONNECTED:
+        case OSW_DRV_VIF_STATE_STA_LINK_UNKNOWN:
+            break;
+    }
+}
+
+static void
+osw_plat_qsdk_fix_vif_sta_multi_ap(struct osw_plat_qsdk11_4_vif *vif,
+                                   const char *phy_name,
+                                   const char *vif_name,
+                                   struct osw_drv_vif_state *state)
+{
+    osw_plat_qsdk_fix_vif_sta_multi_ap_networks(vif, phy_name, vif_name, state);
+    osw_plat_qsdk_fix_vif_sta_multi_ap_link(vif, phy_name, vif_name, state);
+}
+
+static const struct osw_state_vif_info *
+osw_plat_qsdk_find_parent_ap_vlan(struct osw_plat_qsdk11_4_vif *child_vif,
+                                  const char *vif_name)
+{
+    char *vif_name_copy = strdupa(vif_name);
+    const char *parent_if_name = strsep(&vif_name_copy, ".");
+    return osw_state_vif_lookup_by_vif_name(parent_if_name);
+}
+
+static void
+osw_plat_qsdk_fix_vif_ap_multi_ap(struct osw_plat_qsdk11_4_vif *vif,
+                                  const char *phy_name,
+                                  const char *vif_name,
+                                  struct osw_drv_vif_state *state)
+{
+    if (vif == NULL) return;
+    if (state->vif_type != OSW_VIF_AP_VLAN) return;
+
+    struct osw_drv_vif_state_ap_vlan *ap_vlan = &state->u.ap_vlan;
+    if (ap_vlan == NULL) return;
+
+    const struct osw_state_vif_info *parent_ap = osw_plat_qsdk_find_parent_ap_vlan(vif, vif_name);
+    if (parent_ap == NULL) return;
+
+    const struct osw_hwaddr *sta_addr = &state->mac_addr;
+
+    osw_hwaddr_list_append(&ap_vlan->sta_addrs, sta_addr);
+    memcpy(state->mac_addr.octet, &parent_ap->drv_state->mac_addr.octet, ETH_ALEN);
+}
+
+static void
 osw_plat_qsdk11_4_fix_vif_state_cb(struct osw_drv_nl80211_hook *hook,
                                    const char *phy_name,
                                    const char *vif_name,
@@ -4573,6 +4737,8 @@ osw_plat_qsdk11_4_fix_vif_state_cb(struct osw_drv_nl80211_hook *hook,
     osw_plat_qsdk11_4_vif_get_acl_policy(vif);
     osw_plat_qsdk11_4_vif_get_wds(vif);
     osw_plat_qsdk_fix_state_mld(m, vif_name, state);
+    osw_plat_qsdk_fix_vif_sta_multi_ap(vif, phy_name, vif_name, state);
+    osw_plat_qsdk_fix_vif_ap_multi_ap(vif, phy_name, vif_name, state);
 }
 
 static const struct osw_hwaddr *
