@@ -121,4 +121,11 @@ ioctl_status_t ioctl80211_client_stats_convert(
         ioctl80211_client_record_t *data_old,
         dpp_client_record_t        *client_result);
 
+ioctl_status_t ioctl80211_client_stats_get(
+        radio_type_t                radio_type,
+        char                       *ifName,
+        char                       *phyName,
+        mac_address_t               mac,
+        dpp_client_stats_t         *stats);
+
 #endif /* IOCTL80211_CLIENT_H_INCLUDED */
