@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/sh -e
 
 # Copyright (c) 2015, Plume Design Inc. All rights reserved.
 # 
@@ -36,8 +36,8 @@ out_of_channels()
 {
     radio=$(cat /sys/class/net/$1/parent)
     if exttool --help | grep -q 'list_chan_state '; then
-        chan_cnt=$(exttool --list_chan_state --interface $1 | grep chan | wc -l)
-        nop_cnt=$(exttool --list_chan_state --interface $1 | grep DFS_NOL | wc -l)
+        chan_cnt=$(exttool --list_chan_state --interface $radio | grep chan | wc -l)
+        nop_cnt=$(exttool --list_chan_state --interface $radio | grep DFS_NOL | wc -l)
     else
         chan_cnt=$(exttool --list --interface $1 | wc -l)
         nop_cnt=$(exttool --list --interface $1 | grep NOP_STARTED | wc -l)

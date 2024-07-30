@@ -68,7 +68,7 @@ collect_qcawl()
         for arg in 1 2 3 5 6 7 8; do
             # There's no guarantee that requests stats will be available in
             # kernel log after iwpriv returns hence the crude sleep.
-            collect_cmd sh -c "iwpriv $ifname txrx_fw_stats $arg; sleep 1 ; dmesg -c"
+            collect_cmd sh -c "cfg80211tool $ifname txrx_fw_stats $arg; sleep 1 ; dmesg -c"
         done
     done
 

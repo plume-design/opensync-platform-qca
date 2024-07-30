@@ -16,6 +16,10 @@ mld_is_enabled() {
     $osff_get prov_mld
 }
 
+ofdma_is_enabled() {
+    $osff_get enable_ofdma
+}
+
 nl_v0() {
     # This behaves comparably to `nl -v0`, ie. it
     # inserts a line prefix, starting with 0, to
@@ -23,25 +27,58 @@ nl_v0() {
     awk '{printf "%d ", i; i += 1; print}'
 }
 
+mode_translate() {
+    # The sysfs hwmodes are slightly different
+    # than the one cfg80211tool expects. It's
+    # pretty close and requires minor adjustments
+    # though.
+    sed '
+        s/AXA_/A/;
+        s/AXG_/G/;
+        s/BEG_/G/;
+        s/BEA_/A/;'
+}
+
+wifi_max_mode() {
+    wifi=$1
+    # Last mode is assumed to be the highest/best.
+    # Hopefully this won't ever change. The file
+    # is space-separated list of words. Does not
+    # have a newline.
+    awk '{print $NF}' /sys/class/net/"$wifi"/hwmodes | mode_translate
+}
+
+vap_max_mode() {
+    vap=$1
+    wifi=$(cat /sys/class/net/"$vap"/parent)
+    wifi_max_mode "$wifi"
+}
+
+vap_set_max_mode() {
+    vap=$1
+    max=$(vap_max_mode "$vap")
+    cfg80211tool "$vap" mode "$max"
+}
+
 mlds() {
     # Each line implies a distinct MLD.
     #
-    # Each line contains 2 words: the index and
-    # regex filter.
+    # Each line contains 3 words: the index,
+    # regex filter, and the iftype (__ap, managed)
     #
     # Each MLD will pull in a number of Affiliated netdevs
     # as per regex match.
     #
     # Only same-type netdev can be grouped. Be careful.
     nl_v0 <<.
-bhaul-sta-.*
-${OPENSYNC_OWM_BHAUL_AP_PREFIX}.*
-${OPENSYNC_OWM_HOME_AP_PREFIX}.*
-onboard-ap-.*
-svc-d-ap-.*
-svc-e-ap-.*
-fh-.*
-cp-.*
+bhaul-sta-.* managed
+${OPENSYNC_OWM_BHAUL_AP_PREFIX}.* __ap
+${OPENSYNC_OWM_HOME_AP_PREFIX}.* __ap
+onboard-ap-.* __ap
+svc-d-ap-.* __ap
+svc-e-ap-.* __ap
+fh-.* __ap
+cp-.* __ap
 .
 }
 
@@ -64,12 +101,13 @@ mld_addr_gen() {
 vap_mld_addr() {
     if_name=$1
     set -- $(mlds)
-    while test "$#" -ge 2
+    while test "$#" -ge 3
     do
         mld=$1
         mld_ifname=mld$mld
         filter=$2
-        shift 2
+        mld_type=$3
+        shift 3
 
         if echo "$if_name" | grep -q "^$filter"
         then
@@ -81,17 +119,18 @@ vap_mld_addr() {
 
 prov_mld() {
     set -- $(mlds)
-    while test "$#" -ge 2
+    while test "$#" -ge 3
     do
         mld=$1
         mld_ifname=mld$mld
         mld_addr=$(mld_base | mld_addr_gen "$mld")
         filter=$2
-        shift 2
+        mld_type=$3
+        shift 3
 
         # Create it only if it doesn't exist yet
         test -e /sys/class/net/$mld_ifname || {
-            iw mld-wifi0 interface add $mld_ifname type __ap mld_addr $mld_addr
+            iw mld-wifi0 interface add $mld_ifname type $mld_type mld_addr $mld_addr
         }
     done
 }
@@ -163,6 +202,19 @@ create_vap() {
 
     test -e /sys/class/net/$name || {
         iw $phy interface add $name type $type $mld_arg
+        cfg80211tool $name vlan_tag 1
+        if ofdma_is_enabled; then
+            cfg80211tool $name he_dl_ofdma 1
+            cfg80211tool $name he_ul_ofdma 1
+            cfg80211tool $name set_eht_dlofdma 1
+            cfg80211tool $name set_eht_ulofdma 1
+        else
+            cfg80211tool $name he_dl_ofdma 0
+            cfg80211tool $name he_ul_ofdma 0
+            cfg80211tool $name set_eht_dlofdma 0
+            cfg80211tool $name set_eht_ulofdma 0
+        fi
+        vap_set_max_mode "$name"
     }
 }
 
@@ -206,7 +258,7 @@ unprov_wifi() {
     do
         vap=$(basename "$(dirname "$vap_path")")
         log_info "prov: $wifi: $vap: unprovisioning, mode=$mode"
-        iwpriv "$vap" dbgLVL 0xf5ffffff
+        cfg80211tool "$vap" dbgLVL 0xf5ffffff
         ifconfig "$vap" down
         iw "$vap" del
     done

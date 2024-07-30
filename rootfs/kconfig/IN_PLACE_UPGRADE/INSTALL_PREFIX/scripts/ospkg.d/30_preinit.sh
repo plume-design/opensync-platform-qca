@@ -1,4 +1,3 @@
-#!/bin/sh
 
 # Copyright (c) 2015, Plume Design Inc. All rights reserved.
 # 
@@ -25,7 +24,26 @@
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
-if test -e /proc/sys/net/ecm/udp_denied_ports
-    echo 'add 53 67 68' > /proc/sys/net/ecm/udp_denied_ports
-fi
+ospkg_preinit_mount_overlay()
+{
+    # move all mounts to /rom
+    ospkg_move_and_pivot_root /rom /rom/tmp/old_overlay
+    # remount /overlay with additional layer
+    local LAYERS=$(ospkg_mount_active_layer "/overlay/upper")
+    LAYERS=${LAYERS:-/}
+    mount -t overlay overlayfs:/overlay -o rw,noatime,lowerdir=$LAYERS,upperdir=/overlay/upper,workdir=/overlay/work /overlay
+    # move all mounts to new /overlay
+    ospkg_move_and_pivot_root /overlay /overlay/rom
+    mount --move /rom/overlay/ /overlay
+    # to unmount old_overlay we need to re-exec to release the fs
+    # since this process is running from the old_overlay
+    exec $(readlink -f "$0") call ospkg_preinit_mount_cleanup
+}
+
+ospkg_preinit_mount_cleanup()
+{
+    # unmount /tmp/old_overlay
+    umount /tmp/old_overlay
+    rmdir /tmp/old_overlay
+}
 

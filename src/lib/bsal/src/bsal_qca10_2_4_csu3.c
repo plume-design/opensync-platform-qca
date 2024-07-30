@@ -1432,6 +1432,8 @@ static bool qca_rrm_bcn_rpt_request(
     char        rrm_bcn_rpt_cmd[1024]   = { 0 };
     bool        ret                     = false;
 
+    if (!is_input_shell_safe(client_mac) || !is_input_shell_safe(interface)) return false;
+
     // Build the wifitool bcnrpt command
     snprintf(rrm_bcn_rpt_cmd, sizeof(rrm_bcn_rpt_cmd),
              "wifitool %s sendbcnrpt %s %hhu %hhu %hhu %hhu %hhu %hhu %hhu %hhu %hhu %hhu",

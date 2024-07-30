@@ -33,6 +33,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <string.h>
 
 #include "log.h"
+#include "util.h"
 
 #include "ioctl80211.h"
 #include "ioctl80211_device.h"
@@ -56,6 +57,8 @@ ioctl_status_t ioctl80211_device_temp_get(
 {
     char                            buf[128];
     int                             err;
+
+    if (!is_input_shell_safe(radio_cfg->phy_name)) return IOCTL_STATUS_ERROR;
 
     err = readcmd(buf, sizeof(buf), 0, "cat /sys/class/net/%s/thermal/temp",
                   radio_cfg->phy_name);

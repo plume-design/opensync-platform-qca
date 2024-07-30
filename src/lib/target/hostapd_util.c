@@ -45,6 +45,14 @@ bool hostapd_client_disconnect(const char *path, const char *interface,
     char hostapd_cmd[512];
     bool ret = false;
 
+    if (!is_input_shell_safe(path)
+        || !is_input_shell_safe(interface)
+        || !is_input_shell_safe(disc_type)
+        || !is_input_shell_safe(mac_str))
+    {
+        return false;
+    }
+
     snprintf(hostapd_cmd, sizeof(hostapd_cmd),
              "%s 5 hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s %s %s reason=%hhu",
              CMD_TIMEOUT, path, interface, interface, disc_type, mac_str, reason);
@@ -61,6 +69,13 @@ bool hostapd_btm_request(const char *path, const char *interface, const char *bt
 {
     char    hostapd_cmd[1024];
     bool    ret = false;
+
+    if (!is_input_shell_safe(path)
+        || !is_input_shell_safe(interface)
+        || !is_input_shell_safe(btm_req_cmd))
+    {
+        return false;
+    }
 
     snprintf(hostapd_cmd, sizeof(hostapd_cmd),
             "%s 5 hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s bss_tm_req %s",
@@ -80,6 +95,14 @@ bool hostapd_rrm_set_neighbor(const char *path, const char *interface, const cha
     char    hostapd_cmd[1024];
     bool    ret = false;
 
+    if (!is_input_shell_safe(path)
+        || !is_input_shell_safe(interface)
+        || !is_input_shell_safe(bssid)
+        || !is_input_shell_safe(nr))
+    {
+        return false;
+    }
+
     snprintf(hostapd_cmd, sizeof(hostapd_cmd),
             "%s 5 hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s "
             "set_neighbor %s nr=%s",
@@ -97,6 +120,13 @@ bool hostapd_rrm_remove_neighbor(const char *path, const char *interface, const 
 {
     char    hostapd_cmd[1024];
     bool    ret = false;
+
+    if (!is_input_shell_safe(path)
+        || !is_input_shell_safe(interface)
+        || !is_input_shell_safe(bssid))
+    {
+        return false;
+    }
 
     snprintf(hostapd_cmd, sizeof(hostapd_cmd),
             "%s 5 hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s "
@@ -116,6 +146,8 @@ bool hostapd_rrm_get_neighbors(const char *path, const char *interface, char *bu
     char    hostapd_cmd[1024];
     bool    ret = false;
 
+    if (!is_input_shell_safe(interface)) return false;
+
     snprintf(hostapd_cmd, sizeof(hostapd_cmd),
             "%s 5 hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s "
             "show_neighbor",
@@ -134,6 +166,13 @@ bool hostapd_remove_station(const char *path, const char *interface, const char 
 {
     char hostapd_cmd[512];
     bool ret = false;
+
+    if (!is_input_shell_safe(path)
+        || !is_input_shell_safe(interface)
+        || !is_input_shell_safe(mac_str))
+    {
+        return false;
+    }
 
     snprintf(hostapd_cmd, sizeof(hostapd_cmd),
              /* Send frame anyway. QCA driver won't report ATH_EVENT_BSTEERING_CLIENT_DISCONNECTED when

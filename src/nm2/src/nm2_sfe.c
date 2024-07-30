@@ -36,6 +36,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "execsh.h"
 #include "target.h"
 #include "hw_acc.h"
+#include "util.h"
 
 #define NM2_L2UF_PCAP_SNAPLEN       1024
 #define NM2_L2UF_PCAP_BUFFER_SIZE   (64*1024)
@@ -223,6 +224,14 @@ void nm2_l2uf_recv(
     (void)self;
     (void)pkt;
     char smac[32];
+    const char *output = strexa("ssdk_sh", "fdb", "entry", "flush", "1");
+    const bool success = (output != NULL);
+
+    /* FDB table should remain empty */
+    if (WARN_ON(!success))
+    {
+        LOG(ERROR, "l2uf: Cleaning FDB table failed");
+    }
 
     struct eth_hdr *eth = (void *)packet;
     snprintf(smac, sizeof(smac), "%02X:%02X:%02X:%02X:%02X:%02X",

@@ -212,6 +212,8 @@ os_nif_gretap_softwds_create(
 
     LOG(INFO, "%s: using softwds gre", ifname);
 
+    if (!is_input_shell_safe(ifname) || !is_input_shell_safe(parent)) return false;
+
     snprintf(cmd, sizeof(cmd),
              "%s %s %s "PRI(os_ipaddr_t)" " PRI(os_ipaddr_t)" 2>&1",
              os_nif_gretap_softwds_script,
@@ -309,6 +311,8 @@ bool os_nif_gretap_create(
      */
     char *br = CONFIG_TARGET_LAN_BRIDGE_NAME;
 
+    if (!is_input_shell_safe(ifname)) return false;
+
     snprintf(cmd, sizeof(cmd),
             "ovs-vsctl add-port %s %s -- set interface %s type=gre options:remote_ip=" PRI(os_ipaddr_t),
             br,
@@ -330,6 +334,8 @@ bool os_nif_gretap_create(
     if (os_nif_gretap_softwds_capable() &&
         os_nif_gretap_softwds_enabled())
         return os_nif_gretap_softwds_create(ifname, parent, local, remote);
+
+    if (!is_input_shell_safe(parent)) return false;
 
     LOG(INFO, "%s: using native linux gre", ifname);
     snprintf(cmd, sizeof(cmd),
@@ -401,6 +407,8 @@ bool os_nif_gretap_destroy(char *ifname)
      * OVS GRE tunnels
      */
     char *br = CONFIG_TARGET_LAN_BRIDGE_NAME;
+
+    if (!is_input_shell_safe(ifname)) return false;
 
     snprintf(cmd, sizeof(cmd), "ovs-vsctl del-port %s %s", br, ifname);
 

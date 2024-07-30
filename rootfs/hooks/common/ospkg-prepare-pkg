@@ -1,0 +1,23 @@
+#!/bin/sh
+
+set -e
+
+ROOTFS="$1"
+OSPKG_INFO_DIR="$ROOTFS/OSPKG_INFO"
+OSPKG_INFO="$OSPKG_INFO_DIR/ospkg.info"
+
+# create /etc/rc.d symlinks to init.d services
+# this step would normally be done by qsdk/package/Makefile
+# when a package is preinstalled directly to rootfs
+
+ETC_RC_D="/etc/rc.d"
+
+mkdir -p "$ROOTFS/$ETC_RC_D"
+for F in "$ROOTFS"/etc/init.d/*; do
+    START=$(grep '^START=[0-9]\+' "$F" | cut -d= -f2)
+    if [ -n "$START" ]; then
+        SVC=$(basename "$F")
+        ln -sf ../init.d/$SVC "$ROOTFS/$ETC_RC_D/S$START$SVC"
+    fi
+done
+

@@ -1,0 +1,15 @@
+#!/bin/sh
+
+set -e
+
+ROOTFS="$1"
+PKG_ROOTFS="$ROOTFS/ospkg/builtin/fs"
+
+mkdir -p "${ROOTFS}/root"
+
+# copy preinit hooks for preinit_mount_root
+# from package onto real rootfs
+
+mkdir -p "$ROOTFS/lib/preinit"
+cp -a "$PKG_ROOTFS/lib/preinit/." "$ROOTFS/lib/preinit/"
+

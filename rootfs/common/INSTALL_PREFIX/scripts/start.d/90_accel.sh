@@ -1,3 +1,4 @@
+#!/bin/sh
 
 # Copyright (c) 2015, Plume Design Inc. All rights reserved.
 # 
@@ -23,8 +24,61 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-# The new chips have multiple Tx MBSS groups, instead of just one.
-# The current code in OW and OSW is unable to work with that properly.
-# Disable this for the time being. It's not
-# criticalto basic operation and allows bring up.
-export OW_MBSS_PREFER_NONHIDDEN_DISABLE=1
+
+#minimum number of initial packets per flow to be force onto slow path
+NUM_DEFERRED_PACKETS=15
+
+# don't accelerate packets for these udp ports:
+UDP_SLOW_PATH_PORTS="53 67 68"
+
+configure_packet_deferral() {
+    echo $NUM_DEFERRED_PACKETS > /sys/kernel/debug/ecm/ecm_classifier_default/accel_delay_pkts
+}
+
+disable_fdb_forward() {
+    ssdk_sh fdb learnctrl set disable
+    ssdk_sh fdb entry flush 1
+}
+
+udp_deny_ports() {
+    echo "add $UDP_SLOW_PATH_PORTS" > /proc/sys/net/ecm/udp_denied_ports
+}
+
+configure_miami() {
+    udp_deny_ports
+    disable_fdb_forward
+    configure_packet_deferral
+}
+
+configure_alder() {
+    udp_deny_ports
+    disable_fdb_forward
+    configure_packet_deferral
+}
+
+configure_dakota() {
+    echo "n/a"
+}
+
+configure_hawkeye() {
+    echo "n/a"
+}
+
+configure_unsupported() {
+    echo "WARNING: Unsupported board"
+}
+
+board=$(grep -o "IPQ.*" /proc/device-tree/model | awk -F/ '{print $1}')
+echo "Configuring board: $board"
+
+case "$board" in
+    IPQ5332) configure_miami ;;
+    IPQ9574) configure_alder ;;
+    IPQ40xx) configure_dakota ;;
+    IPQ807x) configure_hawkeye ;;
+    IPQ8074) configure_hawkeye ;;
+    IPQ6018) configure_unsupported ;;
+    IPQ5018) configure_unsupported ;;
+    IPQ5332) configure_unsupported ;;
+    *) configure_unsupported ;;
+esac

@@ -42,8 +42,11 @@ AR      = $(TARGET_AR)
 LD      = $(TARGET_LD)
 STRIP   = $(TARGET_CROSS)strip -g
 
-CFLAGS  += $(TARGET_CFLAGS) $(TARGET_CPPFLAGS)
-CFLAGS  += -mno-branch-likely
-CFLAGS  += -Wno-error=cpp
-CFLAGS  += -I$(STAGING_DIR)/usr/include/protobuf-c
+SDK_MKSQUASHFS_CMD = $(STAGING_DIR)/../host/bin/mksquashfs4
+SDK_MKSQUASHFS_ARGS = -noappend -root-owned -comp xz -Xbcj arm -b 256k
+
+OS_CFLAGS += $(TARGET_CFLAGS) $(TARGET_CPPFLAGS)
+OS_CFLAGS += -mno-branch-likely
+OS_CFLAGS += -Wno-error=cpp
+OS_CFLAGS += -I$(STAGING_DIR)/usr/include/protobuf-c
 

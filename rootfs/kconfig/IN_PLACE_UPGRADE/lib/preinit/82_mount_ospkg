@@ -1,0 +1,14 @@
+#!/bin/sh
+# {# jinja-parse #}
+
+CONFIG_IN_PLACE_UPGRADE={{CONFIG_IN_PLACE_UPGRADE}}
+
+hook_mount_ospkg()
+{
+    /ospkg/tools/ospkg preinit_mount_overlay
+}
+
+if [ "$CONFIG_IN_PLACE_UPGRADE" = "y" ]; then
+    boot_hook_add preinit_mount_root hook_mount_ospkg
+fi
+

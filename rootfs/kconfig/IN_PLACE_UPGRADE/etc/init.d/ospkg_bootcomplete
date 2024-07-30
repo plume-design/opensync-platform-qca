@@ -1,0 +1,9 @@
+#!/bin/sh /etc/rc.common
+# {# jinja-parse #}
+INSTALL_PREFIX={{INSTALL_PREFIX}}
+START=99
+
+start()
+{
+    $INSTALL_PREFIX/tools/ospkg boot_complete
+}

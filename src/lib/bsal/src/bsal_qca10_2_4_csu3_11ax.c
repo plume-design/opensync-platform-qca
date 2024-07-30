@@ -1094,7 +1094,7 @@ static bool qca_rrm_bcn_rpt_request(
              rrm_params->req_ssid, rrm_params->rep_cond, rrm_params->rpt_detail,
              rrm_params->req_ie, rrm_params->chanrpt_mode);
 
-    ret = !cmd_log(rrm_bcn_rpt_cmd);
+    ret = !cmd_log_check_safe(rrm_bcn_rpt_cmd);
     if (!ret) {
         LOGE("wifitool sendbcnrpt execution failed: %s", rrm_bcn_rpt_cmd);
     }

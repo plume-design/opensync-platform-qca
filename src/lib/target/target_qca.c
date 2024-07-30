@@ -2354,6 +2354,8 @@ util_csa_is_sec_offset_supported(const char *phy,
                               int channel,
                               const char *offset_str)
 {
+    if (!is_input_shell_safe(phy) || !is_input_shell_safe(offset_str)) return -1;
+
     return 0 == runcmd("grep -l %s /sys/class/net/*/parent 2>/dev/null"
                        " | sed 1q 2>/dev/null"
                        " | xargs -n1 dirname 2>/dev/null"
@@ -2391,6 +2393,8 @@ util_csa_chan_is_supported(const char *vif, int chan)
      * No sense to make this any smarter even though HAL event delivers more
      * than channel number. This is just something that can be improved later.
      */
+    if (!is_input_shell_safe(vif)) return false;
+
     return 0 == runcmd("wlanconfig %s list freq"
                        "| grep -o 'Channel[ ]*[0-9]* ' "
                        "| awk '$2 == %d' "
@@ -2462,6 +2466,8 @@ util_csa_do_implicit_parent_switch(const char *vif,
              __func__, chan, errno, strerror(errno));
         return;
     }
+
+    if (!is_input_shell_safe(phy) || !is_input_shell_safe(bssid_arg)) return;
 
     err = runcmd("%s/parentchange.sh '%s' '%s' '%d'",
                  target_bin_dir(),
@@ -2559,6 +2565,8 @@ util_csa_war_update_rconf_channel(const char *phy, int chan)
 {
     if (getenv("TARGET_DISABLE_OVSDB_POKING"))
         return;
+
+    if (!is_input_shell_safe(phy) || !is_input_shell_safe(chan)) return;
 
     const char *get = F("%s/../tools/ovsh -r s Wifi_Radio_Config -w channel!=%d -w if_name==%s | grep .",
                         target_bin_dir(), chan, phy);
@@ -3223,6 +3231,8 @@ util_radio_channel_list_get(const char *phy, struct schema_Wifi_Radio_State *rst
 
     buffer = buf;
 
+    if (!is_input_shell_safe(phy)) return false;
+
     err = readcmd(buf, sizeof(buf), 0, "exttool --interface %s --list", phy);
     if (err) {
         LOGW("%s: readcmd() failed: %d (%s)", phy, errno, strerror(errno));
@@ -3824,6 +3834,8 @@ util_vif_ratepair_war(const char *vif)
         return;
     if (hapd && hapd->ctrl.wpa)
         return;
+
+    if (!is_input_shell_safe(vif)) return;
 
     LOGI("%s: forcing phy mode update", vif);
     p = F("i=%s ; "

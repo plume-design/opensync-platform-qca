@@ -1920,6 +1920,8 @@ util_thermal_get_temp(const char *phy, int *temp)
     char buf[128];
     int err;
 
+    if (!is_input_shell_safe(phy)) return -1;
+
     err = readcmd(buf, sizeof(buf), 0, "cat /sys/class/net/%s/thermal/temp", phy);
     if (err) {
         LOGW("%s: readcmd() failed: %d (%s)", phy, errno, strerror(errno));
@@ -2621,6 +2623,8 @@ util_csa_war_update_rconf_channel(const char *phy, int chan)
 {
     if (getenv("TARGET_DISABLE_OVSDB_POKING"))
         return;
+
+    if (!is_input_shell_safe(phy)) return;
 
     const char *get = F("%s/../tools/ovsh -r s Wifi_Radio_Config -w channel!=%d -w if_name==%s | grep .",
                         target_bin_dir(), chan, phy);
@@ -3327,6 +3331,8 @@ util_radio_channel_list_get(const char *phy, struct schema_Wifi_Radio_State *rst
 
     buf = buffer;
 
+    if (!is_input_shell_safe(phy)) return;
+
 #ifdef CONFIG_QCA_TARGET_EXTTOOL_LIST_CHAN_STATE
     err = readcmd(buffer, sizeof(buffer), 0, "exttool --list_chan_state --interface %s", phy);
 #else
@@ -3995,36 +4001,6 @@ util_radio_config_only_channel_changed(const struct schema_Wifi_Radio_Config_fla
     return !memcmp(&a, &b, sizeof(a));
 }
 
-void
-util_mode_reconfig(
-        const char *vif,
-        const char *hw_mode,
-        const char *freq_band,
-        const char *ht_mode)
-{
-    const struct util_iwpriv_mode *mode;
-    char oldmode[32];
-    char newmode[32];
-    int err;
-
-    if (WARN_ON(!qca_get_ht_mode(vif, oldmode, sizeof(oldmode))))
-        return;
-
-    mode = util_qca_lookup_mode(oldmode);
-    if (WARN_ON(!mode))
-        return;
-
-    if (!strcmp(mode->hwmode, hw_mode) && !strcmp(mode->htmode, ht_mode))
-        return;
-
-    err = util_qca_get_mode(hw_mode, ht_mode, freq_band, newmode, sizeof(newmode));
-    if (WARN_ON(err < 0))
-        return;
-
-    LOGI("%s: syncing mode %s -> %s", vif, oldmode, newmode);
-    util_qca_set_str_lazy(vif, "get_mode", "mode", newmode);
-}
-
 bool
 target_radio_config_set2(const struct schema_Wifi_Radio_Config *rconf,
                          const struct schema_Wifi_Radio_Config_flags *changed)
@@ -4050,12 +4026,6 @@ target_radio_config_set2(const struct schema_Wifi_Radio_Config *rconf,
                     LOGI("%s: background CAC active %d @ %s postpone channel change", phy, rconf->channel, rconf->ht_mode);
                 } else {
                     LOGI("%s: starting csa to %d @ %s", phy, rconf->channel, rconf->ht_mode);
-                    /*
-                     * Set mode in 2.4GHz using iwpriv before VAP is up does not work in SPF11.1 CS
-                     * Workaround is to update the mode for 2.4GHz AP vap
-                     * This can be removed if the issue is fixed in default SPF
-                     */
-                    util_mode_reconfig(vif, rconf->hw_mode, rconf->freq_band, rconf->ht_mode);
 
                     if (changed->puncture_bitmap) {
                         int punc_strict = rconf->puncture_bitmap_exists && rconf->puncture_bitmap > 0 ? 1 : 0;
@@ -4253,6 +4223,8 @@ util_vif_ratepair_war(const char *vif)
         return;
 
     LOGI("%s: forcing phy mode update", vif);
+
+    if (!is_input_shell_safe(vif)) return;
 
 #ifdef OPENSYNC_NL_SUPPORT
     util_qca_get_int(vif, "get_maccmd", &mac_cmd);
@@ -4608,6 +4580,8 @@ target_vif_config_set2(const struct schema_Wifi_VIF_Config *vconf,
                                  "g_disablecoext",
                                  "disablecoext",
                                  util_policy_get_disable_coext(vif));
+
+        if (!is_input_shell_safe(vif)) return false;
 
         /*
          * The `iwpriv' command has been replaced with `wifitool'.

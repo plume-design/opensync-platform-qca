@@ -1,2 +1,1 @@
 @include "base_qca_spf_12.x"
-# CONFIG_OSN_LINUX_PPPOE_ETC_SYMLINKS is not set

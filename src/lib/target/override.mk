@@ -41,6 +41,7 @@ else
 UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_ioctl_stats_11ax.c
 UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_qca_11ax.c
 UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/wiphy_info_11ax.c
+UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_wpa_log.c
 endif
 
 UNIT_SRC_TOP += $(UNIT_SRC_PLATFORM)/target_init.c
