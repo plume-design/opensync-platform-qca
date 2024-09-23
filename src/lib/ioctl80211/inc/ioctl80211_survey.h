@@ -104,4 +104,8 @@ ioctl_status_t ioctl80211_survey_results_convert(
         ioctl80211_survey_record_t *data_old,
         dpp_survey_record_t        *survey_record);
 
+ioctl_status_t ioctl80211_survey_noise_floor_get(
+        char                       *if_name,
+        int                        *noise_floor);
+
 #endif /* IOCTL80211_SURVEY_H_INCLUDED */
