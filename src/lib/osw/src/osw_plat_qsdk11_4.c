@@ -1160,7 +1160,7 @@ osw_plat_qsdk11_4_conf_to_mode(const struct osw_drv_vif_config *vif,
     const struct osw_channel *c = &vif->u.ap.channel;
     const enum osw_channel_width width = c->width;
     const int freq = c->control_freq_mhz;
-    const int sec_offset = osw_channel_ht40_offset(c, max_2g_chan);
+    const int sec_offset = osw_channel_ht40_offset(c);
     const enum osw_band band = osw_freq_to_band(freq);
 
     static const struct mode_map modes_eht[] = {
@@ -1299,7 +1299,7 @@ static const char *
 osw_plat_qsdk11_4_exttool_get_secoffset(const struct osw_channel *c,
                                         int max_2g_chan)
 {
-    const int offset = osw_channel_ht40_offset(c, max_2g_chan);
+    const int offset = osw_channel_ht40_offset(c);
     if (offset < 0) return "3";
     if (offset > 0) return "1";
     return "1";
