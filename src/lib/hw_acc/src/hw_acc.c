@@ -52,7 +52,7 @@ bool hw_acc_flush_flow_per_device(int devid)
 
 bool hw_acc_flush_flow_per_mac(const char *mac)
 {
-    if (file_put(CONFIG_QCA_HW_ACC_FILE_PATH, mac) == -1)
+    if (file_put(CONFIG_QCA_HW_ACC_FLUSH_MAC_FILE, mac) == -1)
     {
         return false;
     }
@@ -62,6 +62,12 @@ bool hw_acc_flush_flow_per_mac(const char *mac)
 
 bool hw_acc_flush_all_flows(void)
 {
+    if (file_put(CONFIG_QCA_HW_ACC_FLUSH_ALL_FILE, "ALL") == -1)
+    {
+        LOGE("hw_acc: failed to flush all flows");
+        return false;
+    }
+    LOGD("hw_acc: flushed all flows");
     return true;
 }
 

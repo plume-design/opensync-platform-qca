@@ -93,14 +93,15 @@ fi
 #
 # Decrypt phase; When calculating the output (unencrypted) filename, if the
 # encrypted image ends in .eim, simply remove the extension.  Otherwise
-# add ".img" to the output filename
+# add ".img" to the output filename. A package .eospkg is decrypted to .ospkg.
 #
 if [ -n "$UPG_PASSWORD" ]
 then
     UPG_EIM="$UPG_IMAGE"
-    if [ "${UPG_IMAGE##*.}" == "eim" ]
-    then
+    if [ "${UPG_EIM##*.}" == "eim" ]; then
         UPG_IMAGE="${UPG_EIM%%.eim}"
+    elif [ "${UPG_EIM##*.}" == "eospkg" ]; then
+        UPG_IMAGE="${UPG_EIM%%.eospkg}".ospkg
     else
         UPG_IMAGE="${UPG_EIM}.img"
     fi
@@ -118,13 +119,23 @@ fi
 #
 # Upgrade phase
 #
-case "$UPG_ACTION" in
-    *u*|*w*)
+do_upgrade()
+{
+    # Check if file is a package
+    if [ "${UPG_IMAGE##*.}" == "ospkg" ]; then
+        echo "Upgrading using package: $UPG_IMAGE"
+        ospkg install "$UPG_IMAGE" || exit $OSP_UPG_FL_WRITE
+    else
         echo "Upgrading using image: $UPG_IMAGE"
         upg_image_write "$UPG_IMAGE"
         upg_image_commit
+    fi
+    echo "Upgrade OK"
+}
+
+case "$UPG_ACTION" in
+    *u*|*w*) do_upgrade ;;
 esac
-echo "Upgrade OK"
 
 #
 # Reboot phase

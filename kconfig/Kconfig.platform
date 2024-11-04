@@ -135,12 +135,19 @@ config QCA_NF_NAT_HELPERS
         This will overwrite /etc/modules.d/nf-nathelper-extra
         with preferred OpenSync options.
 
-config QCA_HW_ACC_FILE_PATH
-    string "Hardware acceleration file path"
+config QCA_HW_ACC_FLUSH_MAC_FILE
+    string "Hardware acceleration per-MAC flush file path"
     default "/sys/kernel/debug/ecm/ecm_db/defunct_mac"
     help
         This is the file where MAC addresses of Openflow rules
         are stored for flushing.
+
+config QCA_HW_ACC_FLUSH_ALL_FILE
+    string "Hardware acceleration flush ALL entries file path"
+    default "/sys/kernel/debug/ecm/ecm_db/defunct_all"
+    help
+        This is the file using which ALL acceleration entries can
+        be flushed.
 
 config QCA_HW_ACC_NSS
     bool "Enable NSS acceleration support"
