@@ -58,7 +58,7 @@ struct eth_hdr
 #endif
 
 /* BPF syntax for capturing L2UF frames (LLC XID packets) */
-#define L2UF_BPF_FILTER "ether broadcast and not ip and not ip6 and not arp"
+#define L2UF_BPF_FILTER "llc xid"
 
 static pcap_t               *l2uf_pcap = NULL;
 static struct bpf_program   l2uf_bpf;
