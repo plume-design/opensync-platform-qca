@@ -229,11 +229,12 @@ static struct nl_msg *osw_plat_qsdk_nl80211_msg_exttool_csa(
                                                         : OSW_PLAT_QSDK_WIFI_SEC_CHAN_OFFSET_NA;
 
     data.cmd = EXTENDED_SUBIOCTL_CHANNEL_SWITCH;
-    data.ext_data.channel_switch_req.target_chanwidth = osw_plat_qsdk_wifi_oper_width_from_width(c->width);
+    data.ext_data.channel_switch_req.target_chanwidth =
+            (wifi_operating_chanwidth_t)osw_plat_qsdk_wifi_oper_width_from_width(c->width);
     data.ext_data.channel_switch_req.band = osw_plat_qsdk_wifi_band_from_band(band);
     data.ext_data.channel_switch_req.target_pchannel = chan;
     data.ext_data.channel_switch_req.target_cfreq2 = chan2;
-    data.ext_data.channel_switch_req.sec_chan_offset = offset;
+    data.ext_data.channel_switch_req.sec_chan_offset = (wifi_sec_chan_offset_t)offset;
     data.ext_data.channel_switch_req.num_csa = 15;
     data.ext_data.channel_switch_req.force = 0;
     /* FIXME: Ifdefs are bad because they aren't necessarily

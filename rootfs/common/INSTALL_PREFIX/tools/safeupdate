@@ -8,8 +8,12 @@ UPG_PASSWORD=""
 OSP_UPG_IMG_FAIL=7
 OSP_UPG_FL_WRITE=9
 OSP_UPG_BC_SET=11
+OSP_UPG_INTERNAL=18
+OSP_UPG_INSTANCE=19
 
 WPD=/etc/init.d/wpd
+LOCKFILE="/var/lock/safeupdate.lock"
+LOCK_FD=200
 
 function upg_image_write()
 {
@@ -55,6 +59,19 @@ EOF
     exit 1
 }
 
+# Only one instance of safeupdate is expected to be running;
+# otherwise, the results are unpredictable, and the device could be
+# 'bricked'. To avoid this, a lock mechanism is implemented.
+# When the lock is acquired, it will be automatically released
+# when the instance terminates, so no explicit unlock call is required.
+lock_instance() {
+    [ ! -d "$(dirname ${LOCKFILE})" ] && mkdir -p "$(dirname ${LOCKFILE})"
+    eval "exec ${LOCK_FD}>${LOCKFILE}" || { echo "Cannot open lock file."; exit ${OSP_UPG_INTERNAL}; }
+    flock -n ${LOCK_FD} || { echo "Another instance of $0 is already running."; exit ${OSP_UPG_INSTANCE}; }
+}
+
+
+lock_instance
 while [ -n "$1" ]
 do
     case "$1" in

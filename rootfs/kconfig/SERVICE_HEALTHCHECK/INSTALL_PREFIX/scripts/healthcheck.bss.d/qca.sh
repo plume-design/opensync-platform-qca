@@ -66,4 +66,9 @@ then
     exit 1
 fi
 
+if ! iwconfig "$vap" | grep -q 'Access Point:'; then
+    log_warn "$vap: bss is not associated: missing Access Point field"
+    exit 1
+fi
+
 exit 0

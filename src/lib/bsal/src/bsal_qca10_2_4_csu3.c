@@ -69,10 +69,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "log.h"
 #include "const.h"
 #include "os_nif.h"
-#include "evsched.h"
 #include "ioctl80211.h"
 #include "ds_tree.h"
 #include "memutil.h"
+#include "util.h"
 
 #include "target.h"
 #include "qca_bsal.h"
@@ -1399,14 +1399,14 @@ static bool qca_bss_tm_request(
         memset(&temp,    0, sizeof(temp   ));
 
         memcpy(&temp, neigh->bssid, sizeof(temp));
-        sprintf(mac_str, PRI(os_macaddr_lower_t), FMT(os_macaddr_t, temp));
+        SPRINTF(mac_str, PRI(os_macaddr_lower_t), FMT(os_macaddr_t, temp));
 
         snprintf(cmd, sizeof(cmd),
                  "neighbor=%s,%u,%hhu,%hhu,%hhu ",
                  mac_str, neigh->bssid_info, neigh->op_class,
                  neigh->channel, neigh->phy_type);
 
-        strcat(neigh_list, cmd);
+        STRSCAT(neigh_list, cmd);
     }
 
     // Build the hostapd bss_tm_req command
@@ -1487,7 +1487,7 @@ int qca_bsal_client_disconnect(
     }
 
     memcpy(&temp, mac_addr, sizeof(temp));
-    sprintf(mac_str, PRI(os_macaddr_lower_t), FMT(os_macaddr_t, temp));
+    SPRINTF(mac_str, PRI(os_macaddr_lower_t), FMT(os_macaddr_t, temp));
 
     ret = qca_client_disconnect(ifname, disc_type, mac_str, reason);
     if (!ret) {
@@ -1508,7 +1508,7 @@ int qca_bsal_bss_tm_request(
     bool                    ret             = false;
 
     memcpy(&temp, mac_addr, sizeof(temp));
-    sprintf(client_mac, PRI(os_macaddr_lower_t), FMT(os_macaddr_t, temp));
+    SPRINTF(client_mac, PRI(os_macaddr_lower_t), FMT(os_macaddr_t, temp));
 
     ret = qca_bss_tm_request(client_mac, ifname, btm_params);
     if (!ret) {
@@ -1529,7 +1529,7 @@ int qca_bsal_rrm_beacon_report_request(
     bool                    ret             = false;
 
     memcpy(&temp, mac_addr, sizeof(temp));
-    sprintf(client_mac, PRI(os_macaddr_lower_t), FMT(os_macaddr_t, temp));
+    SPRINTF(client_mac, PRI(os_macaddr_lower_t), FMT(os_macaddr_t, temp));
 
     ret = qca_rrm_bcn_rpt_request(client_mac, ifname, rrm_params);
     if (!ret) {
@@ -1550,7 +1550,7 @@ int qca_bsal_rrm_set_neighbor(
     char nr[256] = { 0 };
 
     memcpy(&temp, neigh->bssid, sizeof(temp));
-    sprintf(bssid, PRI(os_macaddr_lower_t), FMT(os_macaddr_t, temp));
+    SPRINTF(bssid, PRI(os_macaddr_lower_t), FMT(os_macaddr_t, temp));
 
     snprintf(nr, sizeof(nr),
              "%02hhx%02hhx%02hhx%02hhx%02hhx%02hhx"  // bssid
@@ -1646,7 +1646,7 @@ int qca_bsal_rrm_remove_neighbor(
     char bssid[18] = { 0 };
 
     memcpy(&temp, neigh->bssid, sizeof(temp));
-    sprintf(bssid, PRI(os_macaddr_lower_t), FMT(os_macaddr_t, temp));
+    SPRINTF(bssid, PRI(os_macaddr_lower_t), FMT(os_macaddr_t, temp));
     if (!hostapd_rrm_remove_neighbor(HOSTAPD_CONTROL_PATH_DEFAULT, ifname, bssid)) {
         return -1;
     }

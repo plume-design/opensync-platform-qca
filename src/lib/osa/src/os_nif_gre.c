@@ -262,75 +262,6 @@ bool os_nif_gretap_create(
     int  rc;
     char cmd[256];
 
-
-#if defined(USE_NSS_GRE)
-    /*
-     * NSS accelerated GRE tunnels
-     */
-    (void)tos;
-
-    if (!os_nif_nss_check())
-    {
-        LOG(CRIT, "os_nif_gretap_create: NSS is not enabled. Unable to create GRE interface: %s", ifname);
-        return false;
-    }
-
-    snprintf(cmd, sizeof(cmd),
-            "saddr="PRI(os_ipaddr_t)" daddr="PRI(os_ipaddr_t)" next_dev=%s dev=%s",
-            FMT(os_ipaddr_t, *local),
-            FMT(os_ipaddr_t, *remote),
-            parent,
-            ifname);
-
-    int fd = open("/proc/gre", O_WRONLY);
-    if (fd < 0)
-    {
-        LOG(ERR, "os_nif_gretap_create: Error opening /proc/gre for writing.");
-        return false;
-    }
-
-    rc = write(fd, cmd, strlen(cmd));
-    if (rc < 0)
-    {
-        close(fd);
-        LOG(ERR, "os_nif_gretap_create: Error writing to /proc/gre: %s (%d)", strerror(errno), errno);
-        return false;
-    }
-
-    close(fd);
-
-    /* Set default MTU -- 1500 is a safe assumption here */
-    if (!os_nif_mtu_set(ifname, 1500))
-    {
-        LOG(WARN, "os_nif_gretap_create: %s: Error setting default MTU.", ifname);
-    }
-
-#elif defined(USE_OVS_GRE)
-    /*
-     * OVS GRE tunnels
-     */
-    char *br = CONFIG_TARGET_LAN_BRIDGE_NAME;
-
-    if (!is_input_shell_safe(ifname)) return false;
-
-    snprintf(cmd, sizeof(cmd),
-            "ovs-vsctl add-port %s %s -- set interface %s type=gre options:remote_ip=" PRI(os_ipaddr_t),
-            br,
-            ifname,
-            ifname,
-            FMT(os_ipaddr_t, *remote));
-
-    rc = cmd_log(cmd);
-    if (!WIFEXITED(rc) || WEXITSTATUS(rc) != 0)
-    {
-        LOG(ERR, "os_nif_gretap_create: Error creating OVS GRE. Command failed: %s", cmd);
-        return false;
-    }
-
-#else
-    /*
-     * Linux native GRE tunnels
-     */
     if (os_nif_gretap_softwds_capable() &&
         os_nif_gretap_softwds_enabled())
         return os_nif_gretap_softwds_create(ifname, parent, local, remote);
@@ -357,7 +288,6 @@ bool os_nif_gretap_create(
         LOG(ERR, "os_nif_gretap_create: Error creating native GRE. Command failed: %s", cmd);
         return false;
     }
-#endif
 
     return true;
 }
@@ -401,23 +331,6 @@ bool os_nif_gretap_destroy(char *ifname)
     }
 
     close(fd);
-
-#elif defined(USE_OVS_GRE)
-    /*
-     * OVS GRE tunnels
-     */
-    char *br = CONFIG_TARGET_LAN_BRIDGE_NAME;
-
-    if (!is_input_shell_safe(ifname)) return false;
-
-    snprintf(cmd, sizeof(cmd), "ovs-vsctl del-port %s %s", br, ifname);
-
-    rc = cmd_log(cmd);
-    if (!WIFEXITED(rc) || WEXITSTATUS(rc) != 0)
-    {
-        LOG(ERR, "os_nif_gretap_destroy failed::cmd=%s", cmd);
-        return false;
-    }
 
 #else
     /*

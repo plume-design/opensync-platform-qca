@@ -65,6 +65,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "ieee80211_external.h"
 #include "ioctl80211_client.h"
 #include "memutil.h"
+#include "util.h"
 
 #ifndef _LITTLE_ENDIAN
 #define _LITTLE_ENDIAN  1234
@@ -1396,7 +1397,7 @@ util_qca_set_int(const char *ifname, const char *iwprivname, int v)
     char command[32] = "--";
     const char *xml_path = qca_get_xml_path(ifname);
 
-    strcat(command,iwprivname);
+    STRSCAT(command, iwprivname);
 
     const char *argv[] = { "cfg80211tool.1", "-i", ifname, "-f", xml_path, "-h", "none", "--START_CMD", command, "--value0", arg,
                            "--RESPONSE", command, "--END_CMD", NULL };
@@ -1593,7 +1594,7 @@ qca_get_int(const char *ifname, const char *iwprivname, int *v)
 
 #ifdef OPENSYNC_NL_SUPPORT
     char command[32] = "--";
-    strcat(command,iwprivname);
+    STRSCAT(command, iwprivname);
 
     const char *argv[] = { "cfg80211tool.1", "-i", ifname, "-f", xml_path, "-h", "none", "--START_CMD", command, "--RESPONSE", command,
                             "--END_CMD", NULL };
@@ -1692,7 +1693,7 @@ static void bss_info_handler(struct cfg80211_data *buffer)
     const size_t src_size = buffer->length;
 
     if (src_size == 0) {
-        LOG(ERR, "%s:  src_size is %d", __func__, src_size);
+        LOG(ERR, "%s:  src_size is %zu", __func__, src_size);
         return;
     }
 

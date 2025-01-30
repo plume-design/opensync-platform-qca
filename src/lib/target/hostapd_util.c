@@ -176,7 +176,7 @@ bool hostapd_remove_station(const char *path, const char *interface, const char 
 
     snprintf(hostapd_cmd, sizeof(hostapd_cmd),
              /* Send frame anyway. QCA driver won't report ATH_EVENT_BSTEERING_CLIENT_DISCONNECTED when
-              * tx=0. Mentioned event is handled by BM and lack of it in this scenario can cause steering problems.
+              * tx=0. Mentioned event is handled by OWM and lack of it in this scenario can cause steering problems.
               */
              "%s 5 hostapd_cli -p %s/hostapd-$(cat /sys/class/net/%s/parent) -i %s deauthenticate %s \"reason=1\"",
              CMD_TIMEOUT, path, interface, interface, mac_str);

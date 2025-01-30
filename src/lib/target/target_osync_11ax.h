@@ -43,7 +43,7 @@ static inline bool qca_get_int(const char *ifname, const char *iwprivname, int *
     char command[32] = "--";
     const char *xml_path = qca_get_xml_path(ifname);
 
-    strcat(command,iwprivname);
+    STRSCAT(command, iwprivname);
     const char *argv[] = { "cfg80211tool.1", "-i", ifname, "-f", xml_path, "-h", "none", "--START_CMD",
                             command, "--RESPONSE", command, "--END_CMD", NULL };
 #else
@@ -74,7 +74,7 @@ static inline int qca_set_int(const char *ifname, const char *iwprivname, int v)
     char arg[16];
 #ifdef OPENSYNC_NL_SUPPORT
     char command[32] = "--";
-    strcat(command,iwprivname);
+    STRSCAT(command, iwprivname);
 
     const char *xml_path = qca_get_xml_path(ifname);
 
@@ -102,7 +102,7 @@ static inline char *qca_getmac(const char *vif, char *buf, int len)
 
     memset(buf, 0, len);
 
-    /* FIXME: this avoids clash with BM which uses same driver ACL */
+    /* FIXME: this avoids clash with OWM which uses same driver ACL */
     if (masking_enabled && masking_needed)
         return buf;
 
@@ -222,9 +222,9 @@ static inline int qca_set_str_lazy(const char *device_ifname,
 
 #ifdef OPENSYNC_NL_SUPPORT
     char command_get[32] = "--";
-    strcat(command_get,iwpriv_get);
+    STRSCAT(command_get, iwpriv_get);
     char command_set[32] = "--";
-    strcat(command_set,iwpriv_set);
+    STRSCAT(command_set, iwpriv_set);
 #endif
 
     if (WARN(-1 == util_exec_read(rtrimnl, buf, sizeof(buf),

@@ -13,18 +13,12 @@ mld_base() {
 }
 
 mld_is_enabled() {
-    $osff_get prov_mld
+    $osff_get prov_mld \
+        || $osff_get prov_mld_some
 }
 
 ofdma_is_enabled() {
     $osff_get enable_ofdma
-}
-
-nl_v0() {
-    # This behaves comparably to `nl -v0`, ie. it
-    # inserts a line prefix, starting with 0, to
-    # each line.
-    awk '{printf "%d ", i; i += 1; print}'
 }
 
 mode_translate() {
@@ -60,7 +54,7 @@ vap_set_max_mode() {
     cfg80211tool "$vap" mode "$max"
 }
 
-mlds() {
+mlds_all() {
     # Each line implies a distinct MLD.
     #
     # Each line contains 3 words: the index,
@@ -70,16 +64,42 @@ mlds() {
     # as per regex match.
     #
     # Only same-type netdev can be grouped. Be careful.
-    nl_v0 <<.
-bhaul-sta-.* managed
-${OPENSYNC_OWM_BHAUL_AP_PREFIX}.* __ap
-${OPENSYNC_OWM_HOME_AP_PREFIX}.* __ap
-onboard-ap-.* __ap
-svc-d-ap-.* __ap
-svc-e-ap-.* __ap
-fh-.* __ap
-cp-.* __ap
+    cat <<.
+0 bhaul-sta-.* managed
+1 ${OPENSYNC_OWM_BHAUL_AP_PREFIX}.* __ap
+2 ${OPENSYNC_OWM_HOME_AP_PREFIX}.* __ap
+3 onboard-ap-.* __ap
+4 svc-d-ap-.* __ap
+5 svc-e-ap-.* __ap
+6 fh-.* __ap
+7 cp-.* __ap
 .
+}
+
+mlds_some() {
+    # See mlds_all() comment on format.
+    #
+    # This leaves out some interfaces out of MLDs in order
+    # to keep them (properly) interop/compat with WPA2-only
+    # and Open networks.
+    cat <<.
+1 ${OPENSYNC_OWM_BHAUL_AP_PREFIX}.* __ap
+2 ${OPENSYNC_OWM_HOME_AP_PREFIX}.* __ap
+3 onboard-ap-.* __ap
+6 fh-.* __ap
+.
+}
+
+mlds() {
+    if $osff_get prov_mld
+    then
+        mlds_all
+    fi
+
+    if $osff_get prov_mld_some
+    then
+        mlds_some
+    fi
 }
 
 mld_addr_gen() {
@@ -131,6 +151,7 @@ prov_mld() {
         # Create it only if it doesn't exist yet
         test -e /sys/class/net/$mld_ifname || {
             iw mld-wifi0 interface add $mld_ifname type $mld_type mld_addr $mld_addr
+            ip link set dev $mld_ifname up
         }
     done
 }

@@ -310,29 +310,6 @@ bool target_stats_device_temp_get(radio_entry_t *radio_cfg,
     return true;
 }
 
-bool target_stats_device_txchainmask_get(
-        radio_entry_t              *radio_cfg,
-        dpp_device_txchainmask_t   *txchainmask_entry)
-{
-    ioctl_status_t                  rc;
-
-    rc =
-        ioctl80211_device_txchainmask_results_get(
-                radio_cfg,
-                txchainmask_entry);
-    if (IOCTL_STATUS_OK != rc)
-    {
-        LOG(ERR,
-            "Sending device %s txchainmask report "
-            "(failed to retrieve device status",
-            radio_get_name_from_cfg(radio_cfg));
-        return false;
-    }
-
-    return true;
-}
-
-
 /******************************************************************************
  *  CAPACITY definitions
  *****************************************************************************/

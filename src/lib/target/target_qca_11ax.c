@@ -33,13 +33,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *      b. implement wpa ctrl socket commands
  *         internally
  *
- *  - BM accesses driver ACLs directly and effectively
- *    races with WM's VIF_Config vs VIF_State re-syncs. BM
- *    must start using VIF_Config mac_list entries (i.e. go
- *    through WM). Arguably BM should become part of WM
- *    because it's way too coupled tightly with the driver
- *    to let it work in parallel.
- *
  * TODOs:
  *  - use STRLCPY instead of snprintf() etc where possible
  *  - automate errno+strerror() error printing, and handling of if (err) LOGW+return
@@ -913,7 +906,8 @@ util_iwconfig_get_chan(const char *phy,
          * Need to make sure there are tailing
          * zeros to handle, e.g. 5.18, 5.2
          */
-        strcat(p, "000");
+        int p_size = sizeof(buf) - (p - buf);
+        strscat(p, "000", p_size);
         p[5] = 0;
         p[1] = p[0];
         p++;
@@ -2191,7 +2185,7 @@ util_thermal_config_set(const struct schema_Wifi_Radio_Config *rconf)
 }
 
 /******************************************************************************
- * BM and BSAL
+ * BSAL
  *****************************************************************************/
 
 int
@@ -3364,7 +3358,7 @@ util_radio_channel_list_get(const char *phy, struct schema_Wifi_Radio_State *rst
      * when channels back to CAC ready (nop_finished)
      * after NOP period finished.
      * This is also called when we update Config::zero_wait_dfs
-     * from upper layer (WM2). So, use this place as a single
+     * from upper layer. So, use this place as a single
      * recalculation point.
      */
     util_radio_bgcac_recalc(phy, rstate);

@@ -80,15 +80,6 @@ ioctl_status_t ioctl80211_device_temp_get(
     return IOCTL_STATUS_OK;
 }
 
-static
-ioctl_status_t ioctl80211_device_txchainmask_get(
-        radio_entry_t              *radio_cfg,
-        dpp_device_txchainmask_t   *txchainmask)
-{
-	return nl80211_device_txchainmask_get(radio_cfg, txchainmask);
-}
-
-
 /******************************************************************************
  *  PUBLIC definitions
  *****************************************************************************/
@@ -103,24 +94,6 @@ ioctl_status_t ioctl80211_device_temp_results_get(
         ioctl80211_device_temp_get(
                 radio_cfg,
                 temp);
-    if (IOCTL_STATUS_OK != status)
-    {
-        return IOCTL_STATUS_ERROR;
-    }
-
-    return IOCTL_STATUS_OK;
-}
-
-ioctl_status_t ioctl80211_device_txchainmask_results_get(
-        radio_entry_t              *radio_cfg,
-        dpp_device_txchainmask_t   *txchainmask)
-{
-    ioctl_status_t                  status;
-
-    status =
-        ioctl80211_device_txchainmask_get(
-                radio_cfg,
-                txchainmask);
     if (IOCTL_STATUS_OK != status)
     {
         return IOCTL_STATUS_ERROR;
