@@ -24,7 +24,7 @@
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 vaps() {
-    iwconfig 2>/dev/null | awk '/^[^ \t]/{print $1}'
+    iw dev | grep Interface | awk '{print $2}' | tr '\n' ' '
 }
 
 destroy_all() {

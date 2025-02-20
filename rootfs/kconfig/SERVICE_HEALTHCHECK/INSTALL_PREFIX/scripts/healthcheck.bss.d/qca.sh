@@ -26,7 +26,7 @@
 
 vap=$1
 
-if ! iwconfig $vap >/dev/null 2>/dev/null
+if ! iw $vap info >/dev/null 2>/dev/null
 then
     # Possibly handled by a different driver.
     exit 0
@@ -54,19 +54,19 @@ then
     exit 0
 fi
 
-if ! iwconfig "$vap" | grep -q 'Access Point: ..:..:..:..:..:..'
+if ! iw "$vap" info | grep -q 'addr ..:..:..:..:..:..'
 then
     log_warn "$vap: bss is not associated: no ap"
     exit 1
 fi
 
-if iwconfig "$vap" | grep -q 'Access Point: 00:00:00:00:00:00'
+if iw "$vap" info | grep -q 'addr 00:00:00:00:00:00'
 then
     log_warn "$vap: bss is not associated: null ap"
     exit 1
 fi
 
-if ! iwconfig "$vap" | grep -q 'Access Point:'; then
+if ! iw "$vap" info | grep -q 'addr'; then
     log_warn "$vap: bss is not associated: missing Access Point field"
     exit 1
 fi

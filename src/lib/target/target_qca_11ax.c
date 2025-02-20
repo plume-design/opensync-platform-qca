@@ -866,11 +866,8 @@ util_iwconfig_get_chan(const char *phy,
                        int *chan)
 {
     char vifs[1024];
-    char buf[256];
     char *vifr;
-    char *p;
     int mhz_last;
-    int mhz = 0;
     int err;
     int num;
 
@@ -885,6 +882,30 @@ util_iwconfig_get_chan(const char *phy,
     num = 0;
     mhz_last = 0;
 
+#ifdef OPENSYNC_NL_SUPPORT
+    const char *buff;
+    for (vif = strtok_r(vifs, " ", &vifr); vif; vif = strtok_r(NULL, " ", &vifr)) {
+	buff = strexa("iw", vif, "info");
+	if (WARN_ON(!buff))
+	   continue;
+
+	buff = strstr(buff, "channel");
+	if (WARN_ON(!buff))
+	   continue;
+
+	buff = strpbrk(buff, ":= ");
+	if (WARN_ON(!buff))
+	   continue;
+	buff += 1; /* skip the : or = */
+
+	if (atoi(buff))
+	 *chan = atoi(buff);
+     }
+     return true;
+#else
+    int mhz = 0;
+    char buf[256];
+    char *p;
     for (vif = strtok_r(vifs, " ", &vifr); vif; vif = strtok_r(NULL, " ", &vifr)) {
         if (util_exec_read(NULL, buf, sizeof(buf), "iwconfig", vif) < 0)
             continue;
@@ -942,11 +963,47 @@ util_iwconfig_get_chan(const char *phy,
 
     *chan = util_iwconfig_freq_to_chan(mhz);
     return true;
+#endif
 }
 
 static int
 util_iwconfig_get_opmode(const char *vif, char *opmode, int len)
 {
+
+#ifdef OPENSYNC_NL_SUPPORT
+       const char *buff;
+       buff = strexa("iw", vif, "info");
+       if (WARN_ON(!buff)) {
+	 LOGW("%s: failed to get opmode",vif);
+	 return 0;
+       }
+
+       buff = strstr(buff, "type");
+       if (WARN_ON(!buff)) {
+	 LOGW("%s: failed to get opmode",vif);
+	 return 0;
+       }
+
+       buff = strpbrk(buff, ":= ");
+       if (WARN_ON(!buff)) {
+	 LOGW("%s: failed to get opmode",vif);
+	 return 0;
+       }
+
+       buff += 1; /* skip the : or = */
+
+       if (strstr(buff, "AP")) {
+               strscpy(opmode, "ap", len);
+               LOGW("%s:opmode",opmode);
+               return 1;
+       }
+
+       if (strstr(buff, "managed")) {
+               strscpy(opmode, "sta", len);
+               LOGW("%s:opmode",opmode);
+               return 1;
+       }
+#else
     char buf[256];
     char *p;
     int err;
@@ -972,7 +1029,7 @@ util_iwconfig_get_opmode(const char *vif, char *opmode, int len)
         strscpy(opmode, "sta", len);
         return 1;
     }
-
+#endif
     return 0;
 }
 
@@ -1003,7 +1060,11 @@ util_iwconfig_set_tx_power(const char *phy, const int tx_power_dbm)
         return;
     while ((vif = strsep(&vifs, " ")) != NULL)
         if (strlen(vif) > 0)
+#ifdef OPENSYNC_NL_SUPPORT
+            WARN_ON(!strexa("iw", vif, "set", "txpower", "fixed", txpwr));
+#else
             WARN_ON(!strexa("iwconfig", vif, "txpower", txpwr));
+#endif
 }
 
 static int
@@ -1021,6 +1082,18 @@ util_iwconfig_get_tx_power(const char *phy)
         if (strlen(vif) == 0)
             continue;
 
+#ifdef OPENSYNC_NL_SUPPORT
+        buf = strexa("iw", vif, "info");
+        if (WARN_ON(!buf))
+            continue;
+
+        buf = strstr(buf, "txpower");
+        if (WARN_ON(!buf))
+            continue;
+        buf = strpbrk(buf, ":= ");
+        if (WARN_ON(!buf))
+            continue;
+#else
         buf = strexa("iwconfig", vif);
         if (WARN_ON(!buf))
             continue;
@@ -1035,6 +1108,7 @@ util_iwconfig_get_tx_power(const char *phy)
         buf = strpbrk(buf, ":=");
         if (WARN_ON(!buf))
             continue;
+#endif
 
         buf += 1; /* skip the : or = */
 
@@ -4555,7 +4629,11 @@ target_vif_config_set2(const struct schema_Wifi_VIF_Config *vconf,
 
         if (util_policy_get_rts(phy, rconf->freq_band)) {
             LOGI("%s: setting rts = %d", vif, POLICY_RTS_THR);
+#ifdef OPENSYNC_NL_SUPPORT
+            if (E("iw", vif, "set", "rts", F("%d", POLICY_RTS_THR)))
+#else
             if (E("iwconfig", vif, "rts", F("%d", POLICY_RTS_THR)))
+#endif
                 LOGW("%s: failed to set rts %d: %d (%s)",
                      vif, POLICY_RTS_THR, errno, strerror(errno));
         }

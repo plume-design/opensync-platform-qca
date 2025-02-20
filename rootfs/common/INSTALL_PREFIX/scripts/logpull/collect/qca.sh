@@ -31,12 +31,12 @@
 
 collect_qcawl()
 {
-    collect_cmd iwconfig
+    collect_cmd iw dev
 
     # Collect list of STA clients
     for IF in $(cat /proc/net/wireless | sed 1,2d | grep -v wifi | cut -d : -f 1); do
         collect_cmd wlanconfig $IF list sta
-        collect_cmd iwlist $IF scan last
+        collect_cmd iw dev $IF scan
     done
 
     # Collect radio dumps
@@ -81,8 +81,8 @@ collect_qcawl()
                 collect_cmd plume $PHY peer_tx_stats $STA
                 collect_cmd plume $PHY peer_rx_stats $STA
             done
-            if iwconfig $IF | grep -q Mode:Managed; then
-                BSSID=$(iwconfig $IF | awk '/Access Point/{print $NF}')
+            if iw $IF info | grep -q managed; then
+		BSSID=$(iw $IF info | awk '/addr/{print $NF}')
                 collect_cmd plume $PHY peer_tx_stats $BSSID
                 collect_cmd plume $PHY peer_rx_stats $BSSID
             fi
@@ -95,7 +95,7 @@ collect_qcawl()
 
 collect_acceleration()
 {
-    [ -e /sys/kernel/debug/ecm/ecm_nss_ipv4 ] && collect_cmd ecm_dump.sh
+    [ -e /sys/kernel/debug/ecm/ecm_nss_ipv4 -o -e /sys/kernel/debug/ecm/ecm_ppe_ipv4 ] && collect_cmd ecm_dump.sh
     [ -e /sys/kernel/debug/ecm/ecm_sfe_ipv4 ] && collect_cmd sfe_dump
 }
 
