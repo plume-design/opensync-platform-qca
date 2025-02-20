@@ -84,6 +84,7 @@ static const struct {
     { 0, 0, "qcom,cnss-qcn6122", "qcn6122", "Spruce" },
     { 0, 0, "qcom,cnss-qca5332", "qca5332", "Miami" },
     { 0, 0, "qcom,cnss-qcn6432", "qcn6432", "Pebble" },
+    { 0, 0, "qcom,cnss-qca5424", "qca5424", "ipq5424" },
 };
 
 /* runtime data */
@@ -431,7 +432,8 @@ wiphy_info_init_ifname(const char *ifname)
         info->mode = "11ax";
     } else if (!strcmp(info->chip, "qcn9224") ||
                !strcmp(info->chip, "qca5332") ||
-               !strcmp(info->chip, "qcn6432")) {
+               !strcmp(info->chip, "qca6432") ||
+               !strcmp(info->chip, "qcn5424")) {
         info->mode = "11be";
     }
     else {
