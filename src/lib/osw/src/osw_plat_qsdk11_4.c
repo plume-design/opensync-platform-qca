@@ -3761,6 +3761,114 @@ osw_plat_qsdk11_4_vif_tx_power_changed_cb(struct osw_timer *t)
     osw_drv_report_vif_changed(drv, phy_name, vif_name);
 }
 
+static bool
+osw_plat_qsdk11_4_vif_get_dcs_sync(const int family_id,
+                                   const int ifindex,
+                                   uint32_t *value)
+{
+    struct nl_msg *msg = nlmsg_alloc();
+    osw_plat_qsdk11_4_put_qca_vendor_getparam(
+            msg,
+            family_id,
+            ifindex,
+            QCA_NL80211_VENDOR_SUBCMD_GET_WIFI_CONFIGURATION,
+            QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS,
+            OL_ATH_PARAM_DCS | OL_ATH_PARAM_SHIFT);
+    cr_nl_cmd_t *cmd = cr_nl_cmd(NULL, NETLINK_GENERIC, msg);
+    while (cr_nl_cmd_run(cmd) == false) {}
+    struct nl_msg **msgs = cr_nl_cmd_resps(cmd);
+    const uint32_t *data = osw_plat_qsdk11_4_param_get_u32(msgs ? *msgs : NULL);
+    const bool ok = (data != NULL);
+    if (ok) *value = *data;
+    cr_nl_cmd_drop(&cmd);
+    return ok;
+}
+
+static void
+osw_plat_qsdk11_4_vif_set_dcs_sync(const int family_id,
+                                   const int ifindex,
+                                   const uint32_t value)
+{
+    struct nl_msg *msg = nlmsg_alloc();
+    osw_plat_qsdk11_4_put_qca_vendor_setparam(
+            msg,
+            family_id,
+            ifindex,
+            QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION,
+            QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS,
+            OL_ATH_PARAM_DCS | OL_ATH_PARAM_SHIFT,
+            &value,
+            sizeof(value));
+    cr_nl_cmd_t *cmd = cr_nl_cmd(NULL, NETLINK_GENERIC, msg);
+    while (cr_nl_cmd_run(cmd) == false) {}
+    cr_nl_cmd_drop(&cmd);
+}
+
+static struct nl_msg *
+osw_plat_qsdk_msg_genl_get_family(const char *name)
+{
+    struct nl_msg *msg = nlmsg_alloc();
+    if (WARN_ON(genlmsg_put(msg, NL_AUTO_PORT, NL_AUTO_SEQ, GENL_ID_CTRL, 0, 0, CTRL_CMD_GETFAMILY, 1) == NULL)) {
+        goto free;
+    }
+    if (WARN_ON(nla_put_string(msg, CTRL_ATTR_FAMILY_NAME, name) < 0)) {
+        goto free;
+    }
+    return msg;
+free:
+    nlmsg_free(msg);
+    return NULL;
+}
+
+static int
+osw_plat_qsdk_parse_genl_family_id(struct nl_msg *msg)
+{
+    static struct nla_policy policy[CTRL_ATTR_MAX + 1] = {
+        [CTRL_ATTR_FAMILY_ID] = { .type = NLA_U16 },
+    };
+    struct nlattr *tb[CTRL_ATTR_MAX + 1];
+    struct nlmsghdr *nlh = nlmsg_hdr(msg);
+    const int parse_err = genlmsg_parse(nlh, 0, tb, CTRL_ATTR_MAX, policy);
+    if (parse_err) return -1;
+    struct nlattr *id = tb[CTRL_ATTR_FAMILY_ID];
+    if (id != NULL) return nla_get_u16(id);
+    return -1;
+}
+
+static int
+osw_plat_qsdk_get_nl80211_family_id(void)
+{
+    struct nl_msg *msg = osw_plat_qsdk_msg_genl_get_family("nl80211");
+    cr_nl_cmd_t *cmd = cr_nl_cmd(NULL, NETLINK_GENERIC, msg);
+    while (cr_nl_cmd_run(cmd) == false) {}
+    struct nl_msg *resp = cr_nl_cmd_resp(cmd);
+    const int family_id = osw_plat_qsdk_parse_genl_family_id(resp);
+    cr_nl_cmd_drop(&cmd);
+    return family_id;
+}
+
+static void
+osw_plat_qsdk11_4_vif_fix_dcs_sync(const char *phy_name,
+                                   const char *vif_name,
+                                   const int ifindex)
+{
+    if (!osw_plat_qsdk11_4_is_vif_name_qcawifi_phy(vif_name)) return;
+
+    const int family_id = osw_plat_qsdk_get_nl80211_family_id();
+    if (WARN_ON(family_id < 0)) return;
+
+    uint32_t orig = 0;
+    const bool ok = osw_plat_qsdk11_4_vif_get_dcs_sync(family_id, ifindex, &orig);
+    if (WARN_ON(!ok)) return;
+
+    const uint32_t awgnim = 0x4;
+    const uint32_t fixed = orig & ~awgnim;
+    if (orig == fixed) return;
+
+    LOGI(LOG_PREFIX_VIF(phy_name, vif_name, "dcs: 0x%02x -> 0x%02x", orig, fixed));
+    osw_plat_qsdk11_4_vif_set_dcs_sync(family_id, ifindex, fixed);
+}
+
 static void
 osw_plat_qsdk11_4_vif_added_cb(const struct nl_80211_vif *info,
                                void *priv)
@@ -3792,6 +3900,8 @@ osw_plat_qsdk11_4_vif_added_cb(const struct nl_80211_vif *info,
     nl_cmd_set_response_fn(cmd, osw_plat_qsdk11_4_get_survey_stats_resp_cb, vif);
     nl_cmd_set_name(cmd, strfmta(LOG_PREFIX_VIF(phy_name ?: "", vif_name, "survey stats")));
     nl_cmd_task_init(&vif->task_survey, cmd, msg);
+
+    osw_plat_qsdk11_4_vif_fix_dcs_sync(phy_name, vif_name, ifindex);
 
     osw_plat_qsdk11_4_task_init_auto(&vif->param_set_dbdc_enable);
     osw_plat_qsdk11_4_task_init_auto(&vif->param_set_dbdc_samessiddisable);
@@ -5211,49 +5321,6 @@ osw_plat_qsdk_find_if_name_by_mac(struct nl_msg **msgs,
     }
 
     return NULL;
-}
-
-static struct nl_msg *
-osw_plat_qsdk_msg_genl_get_family(const char *name)
-{
-    struct nl_msg *msg = nlmsg_alloc();
-    if (WARN_ON(genlmsg_put(msg, NL_AUTO_PORT, NL_AUTO_SEQ, GENL_ID_CTRL, 0, 0, CTRL_CMD_GETFAMILY, 1) == NULL)) {
-        goto free;
-    }
-    if (WARN_ON(nla_put_string(msg, CTRL_ATTR_FAMILY_NAME, name) < 0)) {
-        goto free;
-    }
-    return msg;
-free:
-    nlmsg_free(msg);
-    return NULL;
-}
-
-static int
-osw_plat_qsdk_parse_genl_family_id(struct nl_msg *msg)
-{
-    static struct nla_policy policy[CTRL_ATTR_MAX + 1] = {
-        [CTRL_ATTR_FAMILY_ID] = { .type = NLA_U16 },
-    };
-    struct nlattr *tb[CTRL_ATTR_MAX + 1];
-    struct nlmsghdr *nlh = nlmsg_hdr(msg);
-    const int parse_err = genlmsg_parse(nlh, 0, tb, CTRL_ATTR_MAX, policy);
-    if (parse_err) return -1;
-    struct nlattr *id = tb[CTRL_ATTR_FAMILY_ID];
-    if (id != NULL) return nla_get_u16(id);
-    return -1;
-}
-
-static int
-osw_plat_qsdk_get_nl80211_family_id(void)
-{
-    struct nl_msg *msg = osw_plat_qsdk_msg_genl_get_family("nl80211");
-    cr_nl_cmd_t *cmd = cr_nl_cmd(NULL, NETLINK_GENERIC, msg);
-    while (cr_nl_cmd_run(cmd) == false) {}
-    struct nl_msg *resp = cr_nl_cmd_resp(cmd);
-    const int family_id = osw_plat_qsdk_parse_genl_family_id(resp);
-    cr_nl_cmd_drop(&cmd);
-    return family_id;
 }
 
 static struct nl_msg *
