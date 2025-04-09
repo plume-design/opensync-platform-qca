@@ -768,6 +768,17 @@ osync_nl80211_init(struct ev_loop *loop, bool init_callback)
            return -EIO;
         }
 
+        const int sk_buf_bytes = 2 * 1024 * 1024; /* 2 mega bytes */
+        const int sk_rxbuf_bytes = sk_buf_bytes;
+        const int sk_txbuf_bytes = sk_buf_bytes;
+        const int sk_buf_err = nl_socket_set_buffer_size(sock_ctx.cfg80211_ctxt.event_sock, sk_rxbuf_bytes, sk_txbuf_bytes);
+        if (sk_buf_err < 0) {
+            LOGN("ioctl80211: failed to set netlink socket buffer size, "
+                 "expect overrun issues: nl_error=%d errno=%d",
+                 sk_buf_err,
+                 errno);
+        }
+
         nl_socket_set_nonblocking(sock_ctx.cfg80211_ctxt.event_sock);
         ev_io_init(&g_nl_io, nl_io_read_cb, fd, EV_READ);
         ev_io_start(loop, &g_nl_io);

@@ -700,8 +700,8 @@ struct osw_plat_qsdk11_4_task {
 static void
 osw_plat_qsdk11_4_task_drop(struct osw_plat_qsdk11_4_task *task)
 {
-    ev_async_start(task->loop, &task->ev_async);
     osw_plat_qsdk11_4_async_drop(task->async);
+    ev_async_stop(task->loop, &task->ev_async);
     task->async = NULL;
 }
 
