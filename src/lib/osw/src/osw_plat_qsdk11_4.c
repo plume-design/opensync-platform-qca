@@ -2187,6 +2187,18 @@ osw_plat_qsdk11_4_ap_conf_mutate_cb(struct osw_hostap_hook *hook,
                                     struct osw_hostap_conf_ap_config *hapd_conf,
                                     void *priv)
 {
+    /* hostapd will end up wasting 5s timing out
+     * waiting for COUNTRY_UPDATE timeout before
+     * moving to ENABLED state if these are set.
+     * The driver doesn't really require 11d and
+     * 11h options to operate on DFS, and
+     * regulatory is set separately through
+     * provisioning, so remove these knobs.
+     */
+    OSW_HOSTAP_CONF_UNSET(hapd_conf->country_code);
+    OSW_HOSTAP_CONF_UNSET(hapd_conf->ieee80211d);
+    OSW_HOSTAP_CONF_UNSET(hapd_conf->ieee80211h);
+
     /* The driver is generating Probe Responses internally */
     OSW_HOSTAP_CONF_SET_VAL(hapd_conf->send_probe_response, 0);
 
@@ -4363,13 +4375,27 @@ osw_plat_qsdk11_4_fix_puncture_bitmap(struct osw_plat_qsdk11_4_vif *vif,
                                       struct osw_drv_vif_state *state)
 {
     if (vif == NULL) return;
-    if (state->vif_type != OSW_VIF_AP) return;
 
-    struct osw_drv_vif_state_ap *ap = &state->u.ap;
     const uint32_t puncture_bitmap = osw_plat_qsdk11_4_puncture_bitmap_from_raw_u32(phy_name, vif_name, vif->puncture_bitmap_prev);
-
     LOGT(LOG_PREFIX_VIF(phy_name, vif_name, "puncture_bitmap: %"PRIx32, puncture_bitmap));
-    ap->channel.puncture_bitmap = (puncture_bitmap & 0xffff);
+
+    switch (state->vif_type) {
+        case OSW_VIF_AP:
+            {
+                struct osw_drv_vif_state_ap *ap = &state->u.ap;
+                ap->channel.puncture_bitmap = (puncture_bitmap & 0xffff);
+                break;
+            }
+        case OSW_VIF_STA:
+            {
+                struct osw_drv_vif_state_sta *sta = &state->u.sta;
+                sta->link.channel.puncture_bitmap = (puncture_bitmap & 0xffff);
+                break;
+            }
+        case OSW_VIF_AP_VLAN:
+        case OSW_VIF_UNDEFINED:
+            break;
+    }
 }
 
 static void
