@@ -1,3 +1,5 @@
+#!/bin/sh
+
 # Copyright (c) 2015, Plume Design Inc. All rights reserved.
 # 
 # Redistribution and use in source and binary forms, with or without
@@ -22,34 +24,22 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-##############################################################################
-#
-# Band Steering Abstraction Library
-#
-##############################################################################
+# {# jinja-parse #}
 
-UNIT_NAME := qca_bsal
-UNIT_TYPE := LIB
+# Subset of OSP error codes, see core/src/lib/osp/inc/osp_upg.h for more info
+OSP_UPG_FL_WRITE=9
 
-ifeq ($(CONFIG_PLATFORM_QCA_QSDK53),y)
-UNIT_SRC += src/bsal_qca10_2_4_csu3.c
-else
-UNIT_SRC += src/bsal_qca10_2_4_csu3_11ax.c
-endif
+upg_image_write()
+{
+    {% if CONFIG_WPD_ENABLED %}
+    # Before upgrade disable WPD if it exists.
+    WPD=/etc/init.d/wpd
+    [ -x ${WPD} ] && ${WPD} stop
+    {% endif %}
+    sysupgrade -n "$1" || exit $OSP_UPG_FL_WRITE
+}
 
-UNIT_SRC += src/bsal_qca_assoc_req_ies.c
-
-UNIT_CFLAGS := -I$(UNIT_PATH)/inc
-
-ifneq ($(CONFIG_PLATFORM_QCA_QSDK53),y)
-UNIT_CFLAGS += -I$(STAGING_DIR)/usr/include/libnl3/
-endif
-
-UNIT_EXPORT_CFLAGS := $(UNIT_CFLAGS)
-
-UNIT_DEPS_CFLAGS := src/lib/target
-
-UNIT_DEPS += src/lib/common
-UNIT_DEPS += src/lib/ds
-UNIT_DEPS += src/lib/const
-UNIT_DEPS += $(PLATFORM_DIR)/src/lib/ioctl80211
+upg_image_commit()
+{
+    return 0
+}

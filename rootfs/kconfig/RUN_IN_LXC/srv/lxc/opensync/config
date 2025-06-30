@@ -1,0 +1,32 @@
+# OpenSync LXC config
+# {# jinja-parse #}
+# INSTALL_PREFIX={{INSTALL_PREFIX}}
+lxc.uts.name = opensync
+
+# Keep host namespaces
+lxc.namespace.keep = user net ipc pid
+
+# Use host root filesystem
+lxc.rootfs.path = dir:/
+#lxc.mount.auto = proc:rw
+lxc.mount.entry = /dev /dev none rbind 0 0
+
+# Use host Network
+lxc.net.0.type = none
+
+# Disable security restrictions
+#lxc.apparmor.profile =
+#lxc.seccomp.profile =
+lxc.cap.drop =
+
+# Run as privileged
+lxc.idmap =
+
+# Console and Logging
+lxc.console.path = none
+lxc.log.file = {{INSTALL_PREFIX}}/log_archive/lxc.log
+lxc.log.level = INFO
+
+# Startup Command
+lxc.init.cmd = {{INSTALL_PREFIX}}/scripts/lxc_opensync_svc
+

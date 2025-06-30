@@ -58,8 +58,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 void osn_igmp_apply_fn(struct ev_loop *loop, ev_debounce *w, int revent);
 static bool osn_igmp_write_config(osn_igmp_t *self);
 
-osn_igmp_t *osn_igmp_new()
+osn_igmp_t *osn_igmp_new(const char *ifname)
 {
+    (void)ifname;
+
     osn_igmp_t *self = osn_mcast_bridge_igmp_init();
 
     if (self->initialized)

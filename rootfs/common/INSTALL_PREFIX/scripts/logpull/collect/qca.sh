@@ -95,8 +95,10 @@ collect_qcawl()
 
 collect_acceleration()
 {
-    [ -e /sys/kernel/debug/ecm/ecm_nss_ipv4 ] && collect_cmd ecm_dump.sh
-    [ -e /sys/kernel/debug/ecm/ecm_sfe_ipv4 ] && collect_cmd sfe_dump
+    which ecm_dump.sh >/dev/null 2>&1 && collect_cmd ecm_dump.sh
+    which sfe_dump >/dev/null 2>&1 && collect_cmd sfe_dump
+    which ppe_dump >/dev/null 2>&1 && collect_cmd ppe_dump
+    which ppe_if_map >/dev/null 2>&1 && collect_cmd ppe_if_map
 }
 
 collect_switch()
@@ -106,11 +108,17 @@ collect_switch()
     done
 }
 
+collect_wifi_fw_ramdump_flag_file()
+{
+    collect_file /tmp/wifi-fw-ramdump.txt
+}
+
 collect_platform_qca()
 {
     collect_qcawl
     collect_acceleration
     collect_switch
+    collect_wifi_fw_ramdump_flag_file
 }
 
 collect_platform_qca

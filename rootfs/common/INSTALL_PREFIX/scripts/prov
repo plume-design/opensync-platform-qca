@@ -14,6 +14,7 @@ mld_base() {
 
 mld_is_enabled() {
     $osff_get prov_mld \
+        || $osff_get prov_mld_some_bhsta \
         || $osff_get prov_mld_some
 }
 
@@ -90,6 +91,21 @@ mlds_some() {
 .
 }
 
+mlds_some_bhsta() {
+    # See mlds_all() comment on format.
+    #
+    # This leaves out some interfaces out of MLDs in order
+    # to keep them (properly) interop/compat with WPA2-only
+    # and Open networks.
+    cat <<.
+0 bhaul-sta-.* managed
+1 ${OPENSYNC_OWM_BHAUL_AP_PREFIX}.* __ap
+2 ${OPENSYNC_OWM_HOME_AP_PREFIX}.* __ap
+3 onboard-ap-.* __ap
+6 fh-.* __ap
+.
+}
+
 mlds() {
     if $osff_get prov_mld
     then
@@ -99,6 +115,11 @@ mlds() {
     if $osff_get prov_mld_some
     then
         mlds_some
+    fi
+
+    if $osff_get prov_mld_some_bhsta
+    then
+        mlds_some_bhsta
     fi
 }
 

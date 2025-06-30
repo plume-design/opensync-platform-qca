@@ -133,6 +133,7 @@ enum qca_wlan_get_params {
 };
 
 #define OSW_PLAT_QSDK11_4_DRV_NAME "qsdk11_4_drv"
+#define OSW_PLAT_QSDK11_4_VIF_NETIF_UP_TIMEOUT_MSEC 3000
 
 #define LOG_PREFIX(fmt, ...) \
     "osw: plat: qsdk11_4: " fmt, \
@@ -625,7 +626,9 @@ struct osw_plat_qsdk11_4_mbss_tx_vdev {
     struct osw_plat_qsdk11_4_async *job_param;
     struct osw_drv_nl80211_ops *nl_ops;
     char *phy_name;
-    char *vif_name;
+    char *vif_name; /* tx vap */
+    char **vif_names; /* all vaps within a group, and mlo when applicable */
+    size_t n_vif_names;
     uint32_t ifindex;
     bool pulled_down;
     bool pulled_up;
@@ -637,17 +640,36 @@ struct osw_plat_qsdk11_4_mbss_tx_vdev {
                (ctx)->vif_name, \
                ## __VA_ARGS__)
 
+static void
+osw_plat_qsdk11_4_mbss_tx_vdev_toggle_vifs(struct osw_plat_qsdk11_4_mbss_tx_vdev *ctx,
+                                           const bool up)
+{
+    size_t i;
+    for (i = 0; i < ctx->n_vif_names; i++) {
+        const char *vif_name = ctx->vif_names[i];
+        LOGI(LOG_PREFIX_MBSS_TX_VDEV(ctx, "group: bringing %s: %s", up ? "up" : "down", vif_name));
+        const bool failed = (os_nif_up(vif_name, up) == false);
+        WARN_ON(failed);
+    }
+}
+
 static enum osw_plat_qsdk11_4_async_result
 osw_plat_qsdk11_4_mbss_tx_vdev_poll_cb(void *priv,
                                        struct osw_plat_qsdk11_4_cb *waker)
 {
     struct osw_plat_qsdk11_4_mbss_tx_vdev *ctx = priv;
-    char *phy_name = ctx->phy_name;
 
     if (ctx->pulled_down == false) {
-        LOGT(LOG_PREFIX_MBSS_TX_VDEV(ctx, "phy: bringing down"));
-        const bool down_failed = (os_nif_up(phy_name, false) == false);
-        WARN_ON(down_failed);
+        /* This needs to stop all vaps within the same MBSS
+         * group. However, when MLO is involved, pulling any
+         * Affiliated AP down implicitly downs all other
+         * Affiliated APs within the same MLD. The
+         * expectation is that the caller that prepared the
+         * request provided all ifnames so they can be
+         * pulled down, and later up, in tandem. Failing to
+         * do so may result in perpetual reconfigurations.
+         */
+        osw_plat_qsdk11_4_mbss_tx_vdev_toggle_vifs(ctx, false);
         ctx->pulled_down = true;
     }
 
@@ -687,9 +709,7 @@ osw_plat_qsdk11_4_mbss_tx_vdev_poll_cb(void *priv,
     }
 
     if (ctx->pulled_up == false) {
-        LOGT(LOG_PREFIX_MBSS_TX_VDEV(ctx, "phy: bringing up"));
-        const bool up_failed = (os_nif_up(phy_name, true) == false);
-        WARN_ON(up_failed);
+        osw_plat_qsdk11_4_mbss_tx_vdev_toggle_vifs(ctx, true);
         ctx->pulled_up = true;
     }
 
@@ -704,6 +724,13 @@ osw_plat_qsdk11_4_mbss_tx_vdev_drop_cb(void *priv)
 
     LOGT(LOG_PREFIX_MBSS_TX_VDEV(ctx, "dropping"));
     osw_plat_qsdk11_4_async_drop(ctx->job_param);
+    {
+        size_t i;
+        for (i = 0; i < ctx->n_vif_names; i++) {
+            FREE(ctx->vif_names[i]);
+        }
+        FREE(ctx->vif_names);
+    }
     FREE(ctx->phy_name);
     FREE(ctx->vif_name);
     FREE(ctx);
@@ -713,7 +740,9 @@ static struct osw_plat_qsdk11_4_async *
 osw_plat_qsdk11_4_mbss_tx_vdev_alloc(struct osw_drv_nl80211_ops *nl_ops,
                                      const char *phy_name,
                                      const char *vif_name,
-                                     uint32_t ifindex)
+                                     uint32_t ifindex,
+                                     char **vif_names,
+                                     size_t n_vif_names)
 {
     struct osw_plat_qsdk11_4_mbss_tx_vdev *ctx = CALLOC(1, sizeof(*ctx));
     static const struct osw_plat_qsdk11_4_async_ops ops = {
@@ -724,6 +753,8 @@ osw_plat_qsdk11_4_mbss_tx_vdev_alloc(struct osw_drv_nl80211_ops *nl_ops,
     ctx->phy_name = STRDUP(phy_name);
     ctx->vif_name = STRDUP(vif_name);
     ctx->ifindex = ifindex;
+    ctx->vif_names = vif_names;
+    ctx->n_vif_names = n_vif_names;
     LOGT(LOG_PREFIX_MBSS_TX_VDEV(ctx, "allocated"));
     return osw_plat_qsdk11_4_async_impl(&ops, ctx);
 }
@@ -989,7 +1020,14 @@ struct osw_plat_qsdk11_4_vif {
     struct nl_cmd_task task_get_country;
     struct nl_cmd_task task_get_wds;
     struct nl_cmd_task task_get_mbss_group;
+    struct nl_cmd_task task_get_mbo;
+    struct nl_cmd_task task_get_oce;
+    struct nl_cmd_task task_get_oce_min_rssi_dbm;
+    struct nl_cmd_task task_get_oce_min_rssi_enable;
+    struct nl_cmd_task task_get_oce_retry_delay_sec;
+    struct nl_cmd_task task_get_max_sta;
     struct nl_cmd_task task_survey;
+    struct rq_task task_netif_up;
     struct osw_plat_qsdk11_4_task param_set_dbdc_enable;
     struct osw_plat_qsdk11_4_task param_set_dbdc_samessiddisable;
     struct osw_plat_qsdk11_4_task param_set_min_rssi_min;
@@ -1005,6 +1043,12 @@ struct osw_plat_qsdk11_4_vif {
     struct osw_plat_qsdk11_4_task param_set_bcast_rate;
     struct osw_plat_qsdk11_4_task param_set_beacon_rate;
     struct osw_plat_qsdk11_4_task param_set_wds;
+    struct osw_plat_qsdk11_4_task param_set_mbo;
+    struct osw_plat_qsdk11_4_task param_set_oce;
+    struct osw_plat_qsdk11_4_task param_set_oce_min_rssi_dbm;
+    struct osw_plat_qsdk11_4_task param_set_oce_min_rssi_enable;
+    struct osw_plat_qsdk11_4_task param_set_oce_retry_delay_sec;
+    struct osw_plat_qsdk11_4_task param_set_max_sta;
     struct osw_plat_qsdk11_4_task task_set_acl;
     struct osw_plat_qsdk11_4_task task_set_acl_policy;
     struct osw_plat_qsdk11_4_task task_set_mode;
@@ -1035,6 +1079,12 @@ struct osw_plat_qsdk11_4_vif {
     struct osw_plat_qsdk11_4_get_param_arg country_id_arg;
     struct osw_plat_qsdk11_4_get_param_arg wds_arg;
     struct osw_plat_qsdk11_4_get_param_arg mbss_group_arg;
+    struct osw_plat_qsdk11_4_get_param_arg mbo_arg;
+    struct osw_plat_qsdk11_4_get_param_arg oce_arg;
+    struct osw_plat_qsdk11_4_get_param_arg oce_min_rssi_dbm_arg;
+    struct osw_plat_qsdk11_4_get_param_arg oce_min_rssi_enable_arg;
+    struct osw_plat_qsdk11_4_get_param_arg oce_retry_delay_sec_arg;
+    struct osw_plat_qsdk11_4_get_param_arg max_sta_arg;
     uint32_t mcast2ucast_next;
     uint32_t mcast2ucast_prev;
     uint32_t mgmt_rate_next;
@@ -1072,6 +1122,18 @@ struct osw_plat_qsdk11_4_vif {
     uint32_t last_maccmd;
     uint32_t mbss_group_next;
     uint32_t mbss_group_prev;
+    uint32_t mbo_next;
+    uint32_t mbo_prev;
+    uint32_t oce_next;
+    uint32_t oce_prev;
+    uint32_t oce_min_rssi_dbm_next;
+    uint32_t oce_min_rssi_dbm_prev;
+    uint32_t oce_min_rssi_enable_next;
+    uint32_t oce_min_rssi_enable_prev;
+    uint32_t oce_retry_delay_sec_next;
+    uint32_t oce_retry_delay_sec_prev;
+    uint32_t max_sta_next;
+    uint32_t max_sta_prev;
     struct osw_hwaddr *last_getmac;
     size_t last_getmac_count;
     char country_next[3];
@@ -1535,6 +1597,115 @@ osw_plat_qsdk11_4_phy_max_mode(const char *phy_name,
     }
 }
 
+static struct nl_msg *
+osw_plat_qsdk_msg_genl_get_family(const char *name)
+{
+    struct nl_msg *msg = nlmsg_alloc();
+    if (WARN_ON(genlmsg_put(msg, NL_AUTO_PORT, NL_AUTO_SEQ, GENL_ID_CTRL, 0, 0, CTRL_CMD_GETFAMILY, 1) == NULL)) {
+        goto free;
+    }
+    if (WARN_ON(nla_put_string(msg, CTRL_ATTR_FAMILY_NAME, name) < 0)) {
+        goto free;
+    }
+    return msg;
+free:
+    nlmsg_free(msg);
+    return NULL;
+}
+
+static int
+osw_plat_qsdk_parse_genl_family_id(struct nl_msg *msg)
+{
+    static struct nla_policy policy[CTRL_ATTR_MAX + 1] = {
+        [CTRL_ATTR_FAMILY_ID] = { .type = NLA_U16 },
+    };
+    struct nlattr *tb[CTRL_ATTR_MAX + 1];
+    struct nlmsghdr *nlh = nlmsg_hdr(msg);
+    const int parse_err = genlmsg_parse(nlh, 0, tb, CTRL_ATTR_MAX, policy);
+    if (parse_err) return -1;
+    struct nlattr *id = tb[CTRL_ATTR_FAMILY_ID];
+    if (id != NULL) return nla_get_u16(id);
+    return -1;
+}
+
+static int
+osw_plat_qsdk_get_nl80211_family_id(void)
+{
+    struct nl_msg *msg = osw_plat_qsdk_msg_genl_get_family("nl80211");
+    cr_nl_cmd_t *cmd = cr_nl_cmd(NULL, NETLINK_GENERIC, msg);
+    while (cr_nl_cmd_run(cmd) == false) {}
+    struct nl_msg *resp = cr_nl_cmd_resp(cmd);
+    const int family_id = osw_plat_qsdk_parse_genl_family_id(resp);
+    cr_nl_cmd_drop(&cmd);
+    return family_id;
+}
+
+static struct nl_msg *
+osw_plat_qsdk_msg_dump_interfaces(void)
+{
+    const int family_id = osw_plat_qsdk_get_nl80211_family_id();
+    if (WARN_ON(family_id < 0)) return NULL;
+
+    struct nl_msg *msg = nlmsg_alloc();
+    const uint8_t cmd = NL80211_CMD_GET_INTERFACE;
+    const int flags = NLM_F_DUMP;
+    assert(genlmsg_put(msg, NL_AUTO_PORT, NL_AUTO_SEQ, family_id, 0, flags, cmd, 0) != NULL);
+
+    return msg;
+}
+
+/* This returns the MLD Address for a given Affiliated netdev ifindex */
+static const struct osw_hwaddr *
+osw_plat_qsdk_find_mld_mac_by_ifindex(struct nl_msg **msgs,
+                                      uint32_t ifindex)
+{
+    if (msgs == NULL) return NULL;
+
+    while (*msgs != NULL) {
+        struct nlattr *tb[NL80211_ATTR_MAX + 1];
+        const int err = genlmsg_parse(nlmsg_hdr(*msgs), 0, tb, NL80211_ATTR_MAX, NULL);
+        const bool parsed = (err == 0);
+        if (parsed) {
+            struct nlattr *index = tb[NL80211_ATTR_IFINDEX];
+            struct nlattr *mld_addr = osw_plat_qsdk_attr_mld_mac(tb);
+            const bool index_matches = (index != NULL)
+                                    && (nla_get_u32(index) == ifindex);
+            const bool mld_defined = (mld_addr != NULL);
+
+            if (index_matches && mld_defined) {
+                return osw_hwaddr_from_cptr(nla_data(mld_addr),
+                                            nla_len(mld_addr));
+            }
+        }
+        msgs++;
+    }
+
+    return NULL;
+}
+
+static void
+osw_plat_qsdk_fix_state_mld_with_resp(struct osw_drv_mld_state *mld,
+                                      const char *vif_name,
+                                      uint32_t ifindex,
+                                      struct nl_msg **msgs)
+{
+    const struct osw_hwaddr *mld_addr = osw_plat_qsdk_find_mld_mac_by_ifindex(msgs, ifindex);
+    if (mld_addr == NULL) return;
+    if (osw_hwaddr_is_zero(mld_addr)) return;
+    mld->addr = *mld_addr;
+
+    if (access(strfmta("/sys/class/net/%s/bonding_slave", vif_name), X_OK) == 0) {
+        char buf[256];
+        size_t len = os_readlink(strfmta("/sys/class/net/%s/master", vif_name), buf, sizeof(buf));
+        if (len > 0) {
+            char *mld_if_name = basename(buf);
+            if (mld_if_name != NULL) {
+                STRSCPY_WARN(mld->if_name.buf, mld_if_name);
+            }
+        }
+    }
+}
+
 static void
 osw_plat_qsdk11_4_exttool_csa_start(struct osw_plat_qsdk11_4 *m,
                                     const char *phy_name,
@@ -1638,11 +1809,76 @@ osw_plat_qsdk11_4_apply_rfkill(struct osw_plat_qsdk11_4 *m,
     }
 }
 
+static char **
+osw_plat_qsdk11_4_append_ifname(char **if_names,
+                                size_t *n_if_names,
+                                const char *if_name)
+{
+    const size_t cnt = ++(*n_if_names);
+    const size_t sz = cnt * sizeof(if_names[0]);
+    if_names = REALLOC(if_names, sz);
+    if_names[cnt - 1] = STRDUP(if_name);
+    return if_names;
+}
+
+static char **
+osw_plat_qsdk11_4_append_mlo_ifnames(char **if_names,
+                                     size_t *n_if_names,
+                                     const char *if_name)
+{
+    const char *slaves_path = strfmta("/sys/class/net/%s/master/bonding/slaves", if_name);
+    char *slaves = file_geta(slaves_path);
+    char *slave;
+    while ((slave = strsep(&slaves, " \r\n")) != NULL) {
+        if (strlen(slave) == 0) continue;
+        if (strcmp(slave, if_name) == 0) continue;
+
+        if_names = osw_plat_qsdk11_4_append_ifname(if_names, n_if_names, slave);
+    }
+    return if_names;
+}
+
+static char **
+osw_plat_qsdk11_4_append_mbss_ifnames(char **if_names,
+                                      size_t *n_if_names,
+                                      const struct osw_drv_phy_config *phy_conf,
+                                      const int mbss_group)
+{
+    size_t i;
+    for (i = 0; i < phy_conf->vif_list.count; i++) {
+        const struct osw_drv_vif_config *vif_conf = &phy_conf->vif_list.list[i];
+        const char *vif_name = vif_conf->vif_name;
+        switch (vif_conf->vif_type) {
+            case OSW_VIF_UNDEFINED:
+                break;
+            case OSW_VIF_STA:
+                break;
+            case OSW_VIF_AP_VLAN:
+                break;
+            case OSW_VIF_AP:
+                if (vif_conf->u.ap.mbss_group == mbss_group) {
+                    switch (vif_conf->u.ap.mbss_mode) {
+                        case OSW_MBSS_NONE:
+                            break;
+                        case OSW_MBSS_TX_VAP: /* fall through */
+                        case OSW_MBSS_NON_TX_VAP:
+                            if_names = osw_plat_qsdk11_4_append_ifname(if_names, n_if_names, vif_name);
+                            if_names = osw_plat_qsdk11_4_append_mlo_ifnames(if_names, n_if_names, vif_name);
+                            break;
+                    }
+                }
+                break;
+        }
+    }
+    return if_names;
+}
+
 static void
 osw_plat_qsdk11_4_phy_apply_mbss_tx_vif_name(struct osw_plat_qsdk11_4 *m,
                                              struct osw_drv_phy_config *phy_conf,
                                              struct osw_plat_qsdk11_4_vif *vif,
-                                             const char *vif_name)
+                                             const char *vif_name,
+                                             const int mbss_group)
 {
     if (phy_conf->enabled == false) return;
 
@@ -1677,11 +1913,18 @@ osw_plat_qsdk11_4_phy_apply_mbss_tx_vif_name(struct osw_plat_qsdk11_4 *m,
 
     osw_plat_qsdk11_4_task_drop(&phy->task_mbss_tx_vdev);
 
+    char **vif_names = NULL;
+    size_t n_vif_names = 0;
+
+    vif_names = osw_plat_qsdk11_4_append_mbss_ifnames(vif_names, &n_vif_names, phy_conf, mbss_group);
+
     const uint32_t ifindex = vif_info->ifindex;
     struct osw_plat_qsdk11_4_async *async = osw_plat_qsdk11_4_mbss_tx_vdev_alloc(m->nl_ops,
                                                                                  phy_name,
                                                                                  vif_name,
-                                                                                 ifindex);
+                                                                                 ifindex,
+                                                                                 vif_names,
+                                                                                 n_vif_names);
     osw_plat_qsdk11_4_task_start(&phy->task_mbss_tx_vdev, async);
 }
 
@@ -1851,7 +2094,95 @@ osw_plat_qsdk11_4_pre_request_config_vif_ap(struct osw_plat_qsdk11_4 *m,
     }
 
     if (mbss_mode_changed && ap_conf->mbss_mode == OSW_MBSS_TX_VAP) {
-        osw_plat_qsdk11_4_phy_apply_mbss_tx_vif_name(m, phy_conf, vif, vif_name);
+        osw_plat_qsdk11_4_phy_apply_mbss_tx_vif_name(m, phy_conf, vif, vif_name, ap_conf->mbss_group);
+    }
+
+    if (ap_conf->mbo_changed) {
+        const uint32_t value = ap_conf->mbo ? 1 : 0;
+        const struct osw_plat_qsdk11_4_param_u32_arg arg = {
+            .nl = nl,
+            .ifindex = info->ifindex,
+            .cmd_id = QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS,
+            .param_id = IEEE80211_PARAM_MBO,
+            .policy = OSW_PLAT_QSDK11_4_PARAM_SET_ALWAYS,
+            .desired_value = value,
+            .vif_name = info->name,
+            .param_name = "mbo",
+        };
+        PARAM_U32_TASK_START(&vif->param_set_mbo, &arg);
+    }
+
+    if (ap_conf->oce_changed) {
+        const uint32_t value = ap_conf->oce ? 1 : 0;
+        const struct osw_plat_qsdk11_4_param_u32_arg arg = {
+            .nl = nl,
+            .ifindex = info->ifindex,
+            .cmd_id = QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS,
+            .param_id = IEEE80211_PARAM_OCE,
+            .policy = OSW_PLAT_QSDK11_4_PARAM_SET_ALWAYS,
+            .desired_value = value,
+            .vif_name = info->name,
+            .param_name = "oce",
+        };
+        PARAM_U32_TASK_START(&vif->param_set_oce, &arg);
+    }
+
+    if (ap_conf->oce_min_rssi_dbm_changed) {
+        const struct osw_plat_qsdk11_4_param_u32_arg arg = {
+            .nl = nl,
+            .ifindex = info->ifindex,
+            .cmd_id = QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS,
+            .param_id = IEEE80211_PARAM_OCE_ASSOC_MIN_RSSI,
+            .policy = OSW_PLAT_QSDK11_4_PARAM_SET_ALWAYS,
+            /* WARNING: casting to uint32_t for a parameter of type int */
+            .desired_value = (uint32_t) ap_conf->oce_min_rssi_dbm,
+            .vif_name = info->name,
+            .param_name = "oce assoc min rssi",
+        };
+        PARAM_U32_TASK_START(&vif->param_set_oce_min_rssi_dbm, &arg);
+    }
+
+    if (ap_conf->oce_min_rssi_enable_changed) {
+        const uint32_t value = ap_conf->oce_min_rssi_enable ? 1 : 0;
+        const struct osw_plat_qsdk11_4_param_u32_arg arg = {
+            .nl = nl,
+            .ifindex = info->ifindex,
+            .cmd_id = QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS,
+            .param_id = IEEE80211_PARAM_OCE_ASSOC_REJECT,
+            .policy = OSW_PLAT_QSDK11_4_PARAM_SET_ALWAYS,
+            .desired_value = value,
+            .vif_name = info->name,
+            .param_name = "oce assoc rej",
+        };
+        PARAM_U32_TASK_START(&vif->param_set_oce_min_rssi_enable, &arg);
+    }
+
+    if (ap_conf->oce_retry_delay_sec_changed) {
+        const struct osw_plat_qsdk11_4_param_u32_arg arg = {
+            .nl = nl,
+            .ifindex = info->ifindex,
+            .cmd_id = QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS,
+            .param_id = IEEE80211_PARAM_OCE_ASSOC_RETRY_DELAY,
+            .policy = OSW_PLAT_QSDK11_4_PARAM_SET_ALWAYS,
+            .desired_value = ap_conf->oce_retry_delay_sec,
+            .vif_name = info->name,
+            .param_name = "oce assoc retry delay",
+        };
+        PARAM_U32_TASK_START(&vif->param_set_oce_retry_delay_sec, &arg);
+    }
+
+    if (ap_conf->max_sta_changed) {
+        const struct osw_plat_qsdk11_4_param_u32_arg arg = {
+            .nl = nl,
+            .ifindex = info->ifindex,
+            .cmd_id = QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS,
+            .param_id = IEEE80211_PARAM_MAXSTA,
+            .policy = OSW_PLAT_QSDK11_4_PARAM_SET_ALWAYS,
+            .desired_value = ap_conf->max_sta,
+            .vif_name = info->name,
+            .param_name = "maximum stations",
+        };
+        PARAM_U32_TASK_START(&vif->param_set_max_sta, &arg);
     }
 }
 
@@ -2158,6 +2489,69 @@ osw_plat_qsdk11_4_pre_request_config_cb(struct osw_drv_nl80211_hook *hook,
             osw_plat_qsdk11_4_pre_request_config_vif(m, vif, drv_conf, phy_conf, vif_conf);
         }
     }
+}
+
+static void
+osw_plat_qsdk11_4_post_request_config_cb(struct osw_drv_nl80211_hook *hook,
+                                         struct osw_drv_conf *drv_conf,
+                                         struct rq *q,
+                                         void *priv)
+{
+    struct osw_plat_qsdk11_4 *m = priv;
+    struct osw_drv_nl80211_ops *nl_ops = m->nl_ops;
+    struct nl_80211_sub *sub = m->nl_sub;
+    struct nl_80211 *nl = nl_ops->get_nl_80211_fn(nl_ops);
+
+    size_t i;
+    for (i = 0; i < drv_conf->n_phy_list; i++) {
+        struct osw_drv_phy_config *phy_conf = &drv_conf->phy_list[i];
+        size_t j;
+        for (j = 0; j < phy_conf->vif_list.count; j++) {
+            struct osw_drv_vif_config *vif_conf = &phy_conf->vif_list.list[j];
+
+            if (vif_conf->enabled == false) continue;
+            if (vif_conf->vif_type != OSW_VIF_AP) continue;
+
+            const char *vif_name = vif_conf->vif_name;
+            const struct nl_80211_vif *vif_info = nl_80211_vif_by_name(nl, vif_name);
+            if (vif_info == NULL) continue;
+
+            struct osw_plat_qsdk11_4_vif *vif = nl_80211_sub_vif_get_priv(sub, vif_info);
+            if (vif == NULL) continue;
+
+            rq_task_kill(&vif->task_netif_up);
+            rq_add_task(q, &vif->task_netif_up);
+        }
+    }
+}
+
+static enum osw_drv_nl80211_hook_result
+osw_plat_qsdk11_4_delete_sta_cb(struct osw_drv_nl80211_hook *hook,
+                                const char *phy_name,
+                                const char *vif_name,
+                                const struct osw_hwaddr *sta_addr,
+                                void *priv)
+{
+    if (!kconfig_enabled(CONFIG_PLATFORM_QCA_QSDK120)) return OSW_DRV_NL80211_HOOK_CONTINUE;
+
+    struct osw_plat_qsdk11_4 *m = priv;
+    struct osw_drv_nl80211_ops *nl_ops = m->nl_ops;
+    if (nl_ops == NULL) return OSW_DRV_NL80211_HOOK_CONTINUE;
+
+    struct nl_80211 *nl = nl_ops->get_nl_80211_fn(nl_ops);
+    if (nl == NULL) return OSW_DRV_NL80211_HOOK_CONTINUE;
+
+    const char *name = strfmta(LOG_PREFIX_VIF(phy_name, vif_name, "kickmac"));
+    const uint32_t ifindex = if_nametoindex(vif_name);
+    const int family_id = nl_80211_get_family_id(nl);
+    struct nl_msg *msg = osw_plat_qsdk_nl80211_msg_x_mac(family_id, ifindex, sta_addr, QCA_NL80211_VENDORSUBCMD_KICKMAC);
+    if (msg == NULL) return OSW_DRV_NL80211_HOOK_CONTINUE;
+
+    cr_nl_cmd_t *cmd = cr_nl_cmd(NULL, NETLINK_GENERIC, msg);
+    cr_nl_cmd_set_name(cmd, name);
+    while (cr_nl_cmd_run(cmd) == false) {}
+    cr_nl_cmd_drop(&cmd);
+    return OSW_DRV_NL80211_HOOK_BREAK;
 }
 
 static void
@@ -2585,7 +2979,29 @@ osw_plat_qsdk11_4_ap_conf_mutate_cb(struct osw_hostap_hook *hook,
         STRSCAT(hapd_conf->extra_buf, strfmta("mld_link_ids=%s\n", mld_link_ids));
         STRSCAT(hapd_conf->extra_buf, strfmta("mld_mac_addr=%s\n", mld_mac_addr));
 
-        osw_plat_qsdk_mld_start_in_tandem(drv_conf, phy_name, vif_name);
+        struct osw_drv_vif_config *vif = osw_drv_conf_lookup_vif(drv_conf, phy_name, vif_name);
+        WARN_ON(vif == NULL);
+        if (vif != NULL) {
+            char *lines = strdupa(hapd_conf->prev_conf);
+            char *line;
+            while ((line = strsep(&lines, "\n")) != NULL) {
+                const char *key = strsep(&line, "=");
+                const char *value = strsep(&line, "\n");
+                if (key == NULL) continue;
+                if (value == NULL) continue;
+                const bool matching_key = (strcmp(key, "mld_link_macs") == 0);
+                if (!matching_key) continue;
+                const bool same_macs = (strcmp(value, mld_link_macs) == 0);
+                if (same_macs) continue;
+
+                if (vif->enabled) {
+                    if (vif->enabled_changed == false) {
+                        LOGI(LOG_PREFIX_VIF(phy_name, vif_name, "reloading due to mld reconfig"));
+                        vif->enabled_changed = true;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2639,6 +3055,48 @@ osw_plat_qsdk_sta_conf_get_mld_links(struct osw_drv_conf *drv_conf,
 }
 
 static void
+osw_plat_qsdk11_4_sta_conf_mutate_mld(struct osw_hostap_hook *hook,
+                                      const char *phy_name,
+                                      const char *vif_name,
+                                      struct osw_drv_conf *drv_conf,
+                                      struct osw_hostap_conf_sta_config *wpas_conf,
+                                      void *priv)
+{
+    const uint32_t ifindex = if_nametoindex(vif_name);
+    if (ifindex == 0) return;
+
+    struct nl_msg *msg = osw_plat_qsdk_msg_dump_interfaces();
+    cr_nl_cmd_t *cmd = cr_nl_cmd(NULL, NETLINK_GENERIC, msg);
+    while (cr_nl_cmd_run(cmd) == false) {}
+    struct nl_msg **msgs = cr_nl_cmd_resps(cmd);
+    struct osw_drv_mld_state mld;
+    MEMZERO(mld);
+    osw_plat_qsdk_fix_state_mld_with_resp(&mld, vif_name, ifindex, msgs);
+    cr_nl_cmd_drop(&cmd);
+
+    if (osw_hwaddr_is_zero(&mld.addr) == false) {
+        struct osw_hwaddr_str buf;
+        const char *mld_mac_addr = osw_hwaddr2str(&mld.addr, &buf);
+        const int num_mld_links = osw_plat_qsdk_sta_conf_get_mld_links(drv_conf, vif_name);
+        /* For SPF 12.x non-MLO association require
+         * additional datapath redirection in order to work.
+         * That is taken care of by a higher-level
+         * component. If that component is not enabled then
+         * wpa_s must be told to not even attempt it,
+         * because that is doomed to fail.
+         */
+        const int non_ml_assoc = atoi(osw_etc_get("OW_MLD_REDIR_ENABLE") ?: "0") ? 1 : 0;
+        STRSCAT(wpas_conf->extra_buf, strfmta("sta_mld_addr=%s\n", mld_mac_addr));
+        STRSCAT(wpas_conf->extra_buf, strfmta("num_mlo_links=%d\n", num_mld_links));
+        STRSCAT(wpas_conf->extra_buf, "preferred_assoc_link=0\n");
+        STRSCAT(wpas_conf->extra_buf, strfmta("allow_non_ml_assoc=%d\n", non_ml_assoc));
+        STRSCAT(wpas_conf->extra_buf, "mlo_skip_link_time=20\n"); /* seconds */
+
+        osw_plat_qsdk_mld_start_in_tandem(drv_conf, phy_name, vif_name);
+    }
+}
+
+static void
 osw_plat_qsdk11_4_sta_conf_mutate_cb(struct osw_hostap_hook *hook,
                                      const char *phy_name,
                                      const char *vif_name,
@@ -2646,19 +3104,7 @@ osw_plat_qsdk11_4_sta_conf_mutate_cb(struct osw_hostap_hook *hook,
                                      struct osw_hostap_conf_sta_config *wpas_conf,
                                      void *priv)
 {
-    const char *mld_mac_path = strfmta("/sys/class/net/%s/master/bonding/../address", vif_name);
-    char *mld_mac_addr = file_geta(mld_mac_path);
-    if (mld_mac_addr != NULL) {
-        strchomp(mld_mac_addr, " \r\n");
-        const int num_mld_links = osw_plat_qsdk_sta_conf_get_mld_links(drv_conf, vif_name);
-        STRSCAT(wpas_conf->extra_buf, strfmta("sta_mld_addr=%s\n", mld_mac_addr));
-        STRSCAT(wpas_conf->extra_buf, strfmta("num_mlo_links=%d\n", num_mld_links));
-        STRSCAT(wpas_conf->extra_buf, "preferred_assoc_link=0\n");
-        STRSCAT(wpas_conf->extra_buf, "allow_non_ml_assoc=0\n");
-        STRSCAT(wpas_conf->extra_buf, "mlo_skip_link_time=20\n"); /* seconds */
-
-        osw_plat_qsdk_mld_start_in_tandem(drv_conf, phy_name, vif_name);
-    }
+    osw_plat_qsdk11_4_sta_conf_mutate_mld(hook, phy_name, vif_name, drv_conf, wpas_conf, priv);
 }
 
 static void
@@ -3201,6 +3647,102 @@ osw_plat_qsdk11_4_vif_get_wds(struct osw_plat_qsdk11_4_vif *vif)
 }
 
 static void
+osw_plat_qsdk11_4_vif_get_mbo(struct osw_plat_qsdk11_4_vif *vif)
+{
+    struct rq *q = &vif->q_state;
+    rq_resume(q);
+
+    const struct nl_80211_vif *info = vif->info;
+    const char *vif_name = info->name;
+
+    if (osw_plat_qsdk11_4_is_vif_name_qcawifi_phy(vif_name)) return;
+
+    struct rq_task *t = &vif->task_get_mbo.task;
+    rq_task_kill(t);
+    rq_add_task(q, t);
+}
+
+static void
+osw_plat_qsdk11_4_vif_get_oce(struct osw_plat_qsdk11_4_vif *vif)
+{
+    struct rq *q = &vif->q_state;
+    rq_resume(q);
+
+    const struct nl_80211_vif *info = vif->info;
+    const char *vif_name = info->name;
+
+    if (osw_plat_qsdk11_4_is_vif_name_qcawifi_phy(vif_name)) return;
+
+    struct rq_task *t = &vif->task_get_oce.task;
+    rq_task_kill(t);
+    rq_add_task(q, t);
+}
+
+static void
+osw_plat_qsdk11_4_vif_get_oce_min_rssi_dbm(struct osw_plat_qsdk11_4_vif *vif)
+{
+    struct rq *q = &vif->q_state;
+    rq_resume(q);
+
+    const struct nl_80211_vif *info = vif->info;
+    const char *vif_name = info->name;
+
+    if (osw_plat_qsdk11_4_is_vif_name_qcawifi_phy(vif_name)) return;
+
+    struct rq_task *t = &vif->task_get_oce_min_rssi_dbm.task;
+    rq_task_kill(t);
+    rq_add_task(q, t);
+}
+
+static void
+osw_plat_qsdk11_4_vif_get_oce_min_rssi_enable(struct osw_plat_qsdk11_4_vif *vif)
+{
+    struct rq *q = &vif->q_state;
+    rq_resume(q);
+
+    const struct nl_80211_vif *info = vif->info;
+    const char *vif_name = info->name;
+
+    if (osw_plat_qsdk11_4_is_vif_name_qcawifi_phy(vif_name)) return;
+
+    struct rq_task *t = &vif->task_get_oce_min_rssi_enable.task;
+    rq_task_kill(t);
+    rq_add_task(q, t);
+}
+
+static void
+osw_plat_qsdk11_4_vif_get_oce_retry_delay_sec(struct osw_plat_qsdk11_4_vif *vif)
+{
+    struct rq *q = &vif->q_state;
+    rq_resume(q);
+
+    const struct nl_80211_vif *info = vif->info;
+    const char *vif_name = info->name;
+
+    if (osw_plat_qsdk11_4_is_vif_name_qcawifi_phy(vif_name)) return;
+
+    struct rq_task *t = &vif->task_get_oce_retry_delay_sec.task;
+    rq_task_kill(t);
+    rq_add_task(q, t);
+}
+
+static void
+osw_plat_qsdk11_4_vif_get_max_sta(struct osw_plat_qsdk11_4_vif *vif)
+{
+    struct rq *q = &vif->q_state;
+    rq_resume(q);
+
+    const struct nl_80211_vif *info = vif->info;
+    const char *vif_name = info->name;
+
+    if (osw_plat_qsdk11_4_is_vif_name_qcawifi_phy(vif_name)) return;
+
+    struct rq_task *t = &vif->task_get_max_sta.task;
+    rq_task_kill(t);
+    rq_add_task(q, t);
+}
+
+static void
 osw_plat_qsdk11_4_vif_get_mgmt_rate(struct osw_plat_qsdk11_4_vif *vif)
 {
     struct rq *q = &vif->q_state;
@@ -3604,7 +4146,10 @@ osw_plat_qsdk11_4_vif_get_mbss_tx_vdev_done_cb(struct rq_task *task,
 {
     struct osw_plat_qsdk11_4_vif *vif = priv;
     const bool changed = OSW_PLAT_QSDK11_4_VIF_ATTR_SET(vif, vif->mbss_tx_vdev_prev, vif->mbss_tx_vdev_next);
-    if (changed) osw_plat_qsdk11_4_phy_report_changed(vif);
+    if (changed) {
+        osw_plat_qsdk11_4_phy_report_changed(vif);
+        osw_plat_qsdk11_4_vif_report_changed(vif);
+    }
 }
 
 static void
@@ -3698,6 +4243,60 @@ osw_plat_qsdk11_4_vif_task_get_mbss_group_done_cb(struct rq_task *task,
 {
     struct osw_plat_qsdk11_4_vif *vif = priv;
     const bool changed = OSW_PLAT_QSDK11_4_VIF_ATTR_SET(vif, vif->mbss_group_prev, vif->mbss_group_next);
+    if (changed) osw_plat_qsdk11_4_vif_report_changed(vif);
+}
+
+static void
+osw_plat_qsdk11_4_vif_task_get_mbo_done_cb(struct rq_task *task,
+                                           void *priv)
+{
+    struct osw_plat_qsdk11_4_vif *vif = priv;
+    const bool changed = OSW_PLAT_QSDK11_4_VIF_ATTR_SET(vif, vif->mbo_prev, vif->mbo_next);
+    if (changed) osw_plat_qsdk11_4_vif_report_changed(vif);
+}
+
+static void
+osw_plat_qsdk11_4_vif_task_get_oce_done_cb(struct rq_task *task,
+                                           void *priv)
+{
+    struct osw_plat_qsdk11_4_vif *vif = priv;
+    const bool changed = OSW_PLAT_QSDK11_4_VIF_ATTR_SET(vif, vif->oce_prev, vif->oce_next);
+    if (changed) osw_plat_qsdk11_4_vif_report_changed(vif);
+}
+
+static void
+osw_plat_qsdk11_4_vif_task_get_oce_min_rssi_dbm_done_cb(struct rq_task *task,
+                                                        void *priv)
+{
+    struct osw_plat_qsdk11_4_vif *vif = priv;
+    const bool changed = OSW_PLAT_QSDK11_4_VIF_ATTR_SET(vif, vif->oce_min_rssi_dbm_prev, vif->oce_min_rssi_dbm_next);
+    if (changed) osw_plat_qsdk11_4_vif_report_changed(vif);
+}
+
+static void
+osw_plat_qsdk11_4_vif_task_get_oce_min_rssi_enable_done_cb(struct rq_task *task,
+                                                        void *priv)
+{
+    struct osw_plat_qsdk11_4_vif *vif = priv;
+    const bool changed = OSW_PLAT_QSDK11_4_VIF_ATTR_SET(vif, vif->oce_min_rssi_enable_prev, vif->oce_min_rssi_enable_next);
+    if (changed) osw_plat_qsdk11_4_vif_report_changed(vif);
+}
+
+static void
+osw_plat_qsdk11_4_vif_task_get_oce_retry_delay_sec_done_cb(struct rq_task *task,
+                                                           void *priv)
+{
+    struct osw_plat_qsdk11_4_vif *vif = priv;
+    const bool changed = OSW_PLAT_QSDK11_4_VIF_ATTR_SET(vif, vif->oce_retry_delay_sec_prev, vif->oce_retry_delay_sec_next);
+    if (changed) osw_plat_qsdk11_4_vif_report_changed(vif);
+}
+
+static void
+osw_plat_qsdk11_4_vif_task_get_max_sta_done_cb(struct rq_task *task,
+                                               void *priv)
+{
+    struct osw_plat_qsdk11_4_vif *vif = priv;
+    const bool changed = OSW_PLAT_QSDK11_4_VIF_ATTR_SET(vif, vif->max_sta_prev, vif->max_sta_next);
     if (changed) osw_plat_qsdk11_4_vif_report_changed(vif);
 }
 
@@ -3804,49 +4403,6 @@ osw_plat_qsdk11_4_vif_set_dcs_sync(const int family_id,
     cr_nl_cmd_drop(&cmd);
 }
 
-static struct nl_msg *
-osw_plat_qsdk_msg_genl_get_family(const char *name)
-{
-    struct nl_msg *msg = nlmsg_alloc();
-    if (WARN_ON(genlmsg_put(msg, NL_AUTO_PORT, NL_AUTO_SEQ, GENL_ID_CTRL, 0, 0, CTRL_CMD_GETFAMILY, 1) == NULL)) {
-        goto free;
-    }
-    if (WARN_ON(nla_put_string(msg, CTRL_ATTR_FAMILY_NAME, name) < 0)) {
-        goto free;
-    }
-    return msg;
-free:
-    nlmsg_free(msg);
-    return NULL;
-}
-
-static int
-osw_plat_qsdk_parse_genl_family_id(struct nl_msg *msg)
-{
-    static struct nla_policy policy[CTRL_ATTR_MAX + 1] = {
-        [CTRL_ATTR_FAMILY_ID] = { .type = NLA_U16 },
-    };
-    struct nlattr *tb[CTRL_ATTR_MAX + 1];
-    struct nlmsghdr *nlh = nlmsg_hdr(msg);
-    const int parse_err = genlmsg_parse(nlh, 0, tb, CTRL_ATTR_MAX, policy);
-    if (parse_err) return -1;
-    struct nlattr *id = tb[CTRL_ATTR_FAMILY_ID];
-    if (id != NULL) return nla_get_u16(id);
-    return -1;
-}
-
-static int
-osw_plat_qsdk_get_nl80211_family_id(void)
-{
-    struct nl_msg *msg = osw_plat_qsdk_msg_genl_get_family("nl80211");
-    cr_nl_cmd_t *cmd = cr_nl_cmd(NULL, NETLINK_GENERIC, msg);
-    while (cr_nl_cmd_run(cmd) == false) {}
-    struct nl_msg *resp = cr_nl_cmd_resp(cmd);
-    const int family_id = osw_plat_qsdk_parse_genl_family_id(resp);
-    cr_nl_cmd_drop(&cmd);
-    return family_id;
-}
-
 static void
 osw_plat_qsdk11_4_vif_fix_dcs_sync(const char *phy_name,
                                    const char *vif_name,
@@ -3870,6 +4426,21 @@ osw_plat_qsdk11_4_vif_fix_dcs_sync(const char *phy_name,
 }
 
 static void
+osw_drv_nl80211_vif_netif_up_run_cb(struct rq_task *t)
+{
+    struct osw_plat_qsdk11_4_vif *vif = container_of(t, typeof(*vif), task_netif_up);
+    const char *phy_name = osw_plat_qsdk11_4_vif_into_phy_name(vif) ?: "";
+    const char *vif_name = vif->info ? vif->info->name : NULL;
+    WARN_ON(vif_name == NULL);
+    if (vif_name != NULL) {
+        LOGD(LOG_PREFIX_VIF(phy_name, vif_name, "netif: up"));
+        const bool up_failed = (os_nif_up(vif_name, true) == false);
+        WARN_ON(up_failed);
+    }
+    rq_task_complete(t);
+}
+
+static void
 osw_plat_qsdk11_4_vif_added_cb(const struct nl_80211_vif *info,
                                void *priv)
 {
@@ -3885,6 +4456,14 @@ osw_plat_qsdk11_4_vif_added_cb(const struct nl_80211_vif *info,
 
     rq_init(&vif->q_stats, EV_DEFAULT);
     vif->q_stats.max_running = 1;
+
+    {
+        static const struct rq_task_ops ops = {
+            .run_fn = osw_drv_nl80211_vif_netif_up_run_cb,
+        };
+        vif->task_netif_up.ops = &ops;
+        vif->task_netif_up.run_timeout_msec = OSW_PLAT_QSDK11_4_VIF_NETIF_UP_TIMEOUT_MSEC;
+    }
 
     const char *vif_name = info->name;
     const uint32_t ifindex = info->ifindex;
@@ -3921,6 +4500,12 @@ osw_plat_qsdk11_4_vif_added_cb(const struct nl_80211_vif *info,
     osw_plat_qsdk11_4_task_init_auto(&vif->task_set_acl_policy);
     osw_plat_qsdk11_4_task_init_auto(&vif->task_set_mode);
     osw_plat_qsdk11_4_task_init_auto(&vif->param_set_wds);
+    osw_plat_qsdk11_4_task_init_auto(&vif->param_set_mbo);
+    osw_plat_qsdk11_4_task_init_auto(&vif->param_set_oce);
+    osw_plat_qsdk11_4_task_init_auto(&vif->param_set_oce_min_rssi_dbm);
+    osw_plat_qsdk11_4_task_init_auto(&vif->param_set_oce_min_rssi_enable);
+    osw_plat_qsdk11_4_task_init_auto(&vif->param_set_oce_retry_delay_sec);
+    osw_plat_qsdk11_4_task_init_auto(&vif->param_set_max_sta);
     osw_plat_qsdk11_4_task_init_auto(&vif->task_exttool_csa);
     osw_plat_qsdk11_4_task_init_auto(&vif->task_upgrade_mode);
     osw_plat_qsdk11_4_task_init(&vif->task_get_acl,
@@ -4337,6 +4922,90 @@ osw_plat_qsdk11_4_vif_added_cb(const struct nl_80211_vif *info,
         vif->task_get_mbss_group.task.priv = vif;
     }
 
+    {
+        struct osw_plat_qsdk11_4_get_param_arg *arg = &vif->mbo_arg;
+        arg->out = &vif->mbo_next;
+        arg->out_size = sizeof(vif->mbo_next);
+
+        struct nl_msg *msg = osw_plat_qsdk_nl80211_msg_get_mbo(family_id, ifindex);
+        struct nl_cmd *cmd = nl_conn_alloc_cmd(conn);
+        nl_cmd_set_response_fn(cmd, osw_plat_qsdk11_4_get_param_resp_cb, arg);
+        nl_cmd_set_name(cmd, strfmta(LOG_PREFIX_VIF(phy_name ?: "", vif_name, "get mbo")));
+        nl_cmd_task_init(&vif->task_get_mbo, cmd, msg);
+        vif->task_get_mbo.task.completed_fn = osw_plat_qsdk11_4_vif_task_get_mbo_done_cb;
+        vif->task_get_mbo.task.priv = vif;
+    }
+
+    {
+        struct osw_plat_qsdk11_4_get_param_arg *arg = &vif->oce_arg;
+        arg->out = &vif->oce_next;
+        arg->out_size = sizeof(vif->oce_next);
+
+        struct nl_msg *msg = osw_plat_qsdk_nl80211_msg_get_oce(family_id, ifindex);
+        struct nl_cmd *cmd = nl_conn_alloc_cmd(conn);
+        nl_cmd_set_response_fn(cmd, osw_plat_qsdk11_4_get_param_resp_cb, arg);
+        nl_cmd_set_name(cmd, strfmta(LOG_PREFIX_VIF(phy_name ?: "", vif_name, "get oce")));
+        nl_cmd_task_init(&vif->task_get_oce, cmd, msg);
+        vif->task_get_oce.task.completed_fn = osw_plat_qsdk11_4_vif_task_get_oce_done_cb;
+        vif->task_get_oce.task.priv = vif;
+    }
+
+    {
+        struct osw_plat_qsdk11_4_get_param_arg *arg = &vif->oce_min_rssi_dbm_arg;
+        arg->out = &vif->oce_min_rssi_dbm_next;
+        arg->out_size = sizeof(vif->oce_min_rssi_dbm_next);
+
+        struct nl_msg *msg = osw_plat_qsdk_nl80211_msg_get_oce_min_rssi_dbm(family_id, ifindex);
+        struct nl_cmd *cmd = nl_conn_alloc_cmd(conn);
+        nl_cmd_set_response_fn(cmd, osw_plat_qsdk11_4_get_param_resp_cb, arg);
+        nl_cmd_set_name(cmd, strfmta(LOG_PREFIX_VIF(phy_name ?: "", vif_name, "get oce_min_rssi_dbm")));
+        nl_cmd_task_init(&vif->task_get_oce_min_rssi_dbm, cmd, msg);
+        vif->task_get_oce_min_rssi_dbm.task.completed_fn = osw_plat_qsdk11_4_vif_task_get_oce_min_rssi_dbm_done_cb;
+        vif->task_get_oce_min_rssi_dbm.task.priv = vif;
+    }
+
+    {
+        struct osw_plat_qsdk11_4_get_param_arg *arg = &vif->oce_min_rssi_enable_arg;
+        arg->out = &vif->oce_min_rssi_enable_next;
+        arg->out_size = sizeof(vif->oce_min_rssi_enable_next);
+
+        struct nl_msg *msg = osw_plat_qsdk_nl80211_msg_get_oce_min_rssi_enable(family_id, ifindex);
+        struct nl_cmd *cmd = nl_conn_alloc_cmd(conn);
+        nl_cmd_set_response_fn(cmd, osw_plat_qsdk11_4_get_param_resp_cb, arg);
+        nl_cmd_set_name(cmd, strfmta(LOG_PREFIX_VIF(phy_name ?: "", vif_name, "get oce_min_rssi_enable")));
+        nl_cmd_task_init(&vif->task_get_oce_min_rssi_enable, cmd, msg);
+        vif->task_get_oce_min_rssi_enable.task.completed_fn = osw_plat_qsdk11_4_vif_task_get_oce_min_rssi_enable_done_cb;
+        vif->task_get_oce_min_rssi_enable.task.priv = vif;
+    }
+
+    {
+        struct osw_plat_qsdk11_4_get_param_arg *arg = &vif->oce_retry_delay_sec_arg;
+        arg->out = &vif->oce_retry_delay_sec_next;
+        arg->out_size = sizeof(vif->oce_retry_delay_sec_next);
+
+        struct nl_msg *msg = osw_plat_qsdk_nl80211_msg_get_oce_retry_delay_sec(family_id, ifindex);
+        struct nl_cmd *cmd = nl_conn_alloc_cmd(conn);
+        nl_cmd_set_response_fn(cmd, osw_plat_qsdk11_4_get_param_resp_cb, arg);
+        nl_cmd_set_name(cmd, strfmta(LOG_PREFIX_VIF(phy_name ?: "", vif_name, "get oce_retry_delay_sec")));
+        nl_cmd_task_init(&vif->task_get_oce_retry_delay_sec, cmd, msg);
+        vif->task_get_oce_retry_delay_sec.task.completed_fn = osw_plat_qsdk11_4_vif_task_get_oce_retry_delay_sec_done_cb;
+        vif->task_get_oce_retry_delay_sec.task.priv = vif;
+    }
+
+    {
+        struct osw_plat_qsdk11_4_get_param_arg *arg = &vif->max_sta_arg;
+        arg->out = &vif->max_sta_next;
+        arg->out_size = sizeof(vif->max_sta_next);
+
+        struct nl_msg *msg = osw_plat_qsdk_nl80211_msg_get_max_sta(family_id, ifindex);
+        struct nl_cmd *cmd = nl_conn_alloc_cmd(conn);
+        nl_cmd_set_response_fn(cmd, osw_plat_qsdk11_4_get_param_resp_cb, arg);
+        nl_cmd_set_name(cmd, strfmta(LOG_PREFIX_VIF(phy_name ?: "", vif_name, "get max_sta")));
+        nl_cmd_task_init(&vif->task_get_max_sta, cmd, msg);
+        vif->task_get_max_sta.task.completed_fn = osw_plat_qsdk11_4_vif_task_get_max_sta_done_cb;
+        vif->task_get_max_sta.task.priv = vif;
+    }
+
     if (osw_plat_qsdk11_4_is_mld_phy(phy_name)) return;
     osw_plat_qsdk11_4_vif_get_chanlist(vif);
     osw_plat_qsdk11_4_vif_get_mcast2ucast(vif);
@@ -4360,6 +5029,12 @@ osw_plat_qsdk11_4_vif_added_cb(const struct nl_80211_vif *info,
     osw_plat_qsdk11_4_vif_get_country(vif);
     osw_plat_qsdk11_4_vif_get_wds(vif);
     osw_plat_qsdk11_4_vif_get_mbss_group(vif);
+    osw_plat_qsdk11_4_vif_get_mbo(vif);
+    osw_plat_qsdk11_4_vif_get_oce(vif);
+    osw_plat_qsdk11_4_vif_get_oce_min_rssi_dbm(vif);
+    osw_plat_qsdk11_4_vif_get_oce_min_rssi_enable(vif);
+    osw_plat_qsdk11_4_vif_get_oce_retry_delay_sec(vif);
+    osw_plat_qsdk11_4_vif_get_max_sta(vif);
 
     /* FIXME: There's no easy way to apply sta-only async
      * mode fix here. Some corner cases might not get
@@ -4394,11 +5069,18 @@ osw_plat_qsdk11_4_vif_removed_cb(const struct nl_80211_vif *info,
     osw_plat_qsdk11_4_task_drop(&vif->task_set_acl_policy);
     osw_plat_qsdk11_4_task_drop(&vif->task_set_mode);
     osw_plat_qsdk11_4_task_drop(&vif->param_set_wds);
+    osw_plat_qsdk11_4_task_drop(&vif->param_set_mbo);
+    osw_plat_qsdk11_4_task_drop(&vif->param_set_oce);
+    osw_plat_qsdk11_4_task_drop(&vif->param_set_oce_min_rssi_dbm);
+    osw_plat_qsdk11_4_task_drop(&vif->param_set_oce_min_rssi_enable);
+    osw_plat_qsdk11_4_task_drop(&vif->param_set_oce_retry_delay_sec);
+    osw_plat_qsdk11_4_task_drop(&vif->param_set_max_sta);
     osw_plat_qsdk11_4_task_drop(&vif->task_exttool_csa);
     osw_plat_qsdk11_4_task_drop(&vif->task_upgrade_mode);
     osw_plat_qsdk11_4_task_drop(&vif->task_get_acl);
     osw_plat_qsdk11_4_task_drop(&vif->task_get_acl_policy);
     osw_plat_qsdk_vif_sta_set_mld(vif, NULL);
+    rq_task_kill(&vif->task_netif_up);
 
     FREE(vif->last_getmac);
     vif->last_getmac = NULL;
@@ -4430,6 +5112,12 @@ osw_plat_qsdk11_4_vif_removed_cb(const struct nl_80211_vif *info,
     nl_cmd_task_fini(&vif->task_get_country);
     nl_cmd_task_fini(&vif->task_get_wds);
     nl_cmd_task_fini(&vif->task_get_mbss_group);
+    nl_cmd_task_fini(&vif->task_get_mbo);
+    nl_cmd_task_fini(&vif->task_get_oce);
+    nl_cmd_task_fini(&vif->task_get_oce_min_rssi_dbm);
+    nl_cmd_task_fini(&vif->task_get_oce_min_rssi_enable);
+    nl_cmd_task_fini(&vif->task_get_oce_retry_delay_sec);
+    nl_cmd_task_fini(&vif->task_get_max_sta);
 
     vif->info = NULL;
     vif->m = NULL;
@@ -5260,96 +5948,115 @@ osw_plat_qsdk11_4_fix_vif_mbss_tx_vif_group(struct osw_plat_qsdk11_4_vif *vif,
     ap->mbss_group = mbss_group;
 }
 
-/* This returns the MLD Address for a given Affiliated netdev ifindex */
+#define OSW_PLAT_QSDK11_4_FIX_PARAM(param) \
+static void osw_plat_qsdk11_4_fix_vif_ ## param(struct osw_plat_qsdk11_4_vif *vif, \
+                              const char *phy_name, \
+                              const char *vif_name, \
+                              struct osw_drv_vif_state *state) \
+{ \
+    if (vif == NULL) return; \
+    if (state->vif_type != OSW_VIF_AP) return; \
+    struct osw_drv_vif_state_ap *ap = &state->u.ap; \
+    if (ap == NULL) return; \
+    const uint32_t x = vif->param##_prev; \
+    LOGT(LOG_PREFIX_VIF(phy_name, vif_name, "param: %d", \
+                        x)); \
+    ap->param = x; \
+}
+
+OSW_PLAT_QSDK11_4_FIX_PARAM(mbo);
+OSW_PLAT_QSDK11_4_FIX_PARAM(oce);
+OSW_PLAT_QSDK11_4_FIX_PARAM(oce_min_rssi_enable);
+OSW_PLAT_QSDK11_4_FIX_PARAM(oce_retry_delay_sec);
+OSW_PLAT_QSDK11_4_FIX_PARAM(max_sta);
+
+#define OSW_PLAT_QSDK11_4_FIX_PARAM_I32(param) \
+static void osw_plat_qsdk11_4_fix_vif_ ## param(struct osw_plat_qsdk11_4_vif *vif, \
+                              const char *phy_name, \
+                              const char *vif_name, \
+                              struct osw_drv_vif_state *state) \
+{ \
+    if (vif == NULL) return; \
+    if (state->vif_type != OSW_VIF_AP) return; \
+    struct osw_drv_vif_state_ap *ap = &state->u.ap; \
+    if (ap == NULL) return; \
+    /* explicit casting to int32_t from uint32_t */ \
+    const int32_t x = (int32_t) vif->param##_prev; \
+    LOGT(LOG_PREFIX_VIF(phy_name, vif_name, "param: %d", \
+                        x)); \
+    ap->param = x; \
+}
+
+OSW_PLAT_QSDK11_4_FIX_PARAM_I32(oce_min_rssi_dbm);
+
 static const struct osw_hwaddr *
-osw_plat_qsdk_find_mld_mac_by_ifindex(struct nl_msg **msgs,
-                                      uint32_t ifindex)
+osw_plat_qsdk_list_sta_find_mld_addr(struct nl_msg **msgs,
+                                     const struct osw_hwaddr *sta_addr)
 {
-    if (msgs == NULL) return NULL;
+    while (msgs != NULL && *msgs != NULL) {
+        int len;
+        const void *ptr = osw_plat_qsdk11_4_param_get_data(*msgs, &len);
+        for (;;) {
+            const struct ieee80211req_sta_info *sta = ptr;
+            if (sta == NULL) break;
+            if (len < (int)sizeof(*sta)) break;
 
-    while (*msgs != NULL) {
-        struct nlattr *tb[NL80211_ATTR_MAX + 1];
-        const int err = genlmsg_parse(nlmsg_hdr(*msgs), 0, tb, NL80211_ATTR_MAX, NULL);
-        const bool parsed = (err == 0);
-        if (parsed) {
-            struct nlattr *index = tb[NL80211_ATTR_IFINDEX];
-            struct nlattr *mld_addr = osw_plat_qsdk_attr_mld_mac(tb);
-            const bool index_matches = (index != NULL)
-                                    && (nla_get_u32(index) == ifindex);
-            const bool mld_defined = (mld_addr != NULL);
-
-            if (index_matches && mld_defined) {
-                return osw_hwaddr_from_cptr(nla_data(mld_addr),
-                                            nla_len(mld_addr));
+            const struct osw_hwaddr *iter_addr = osw_hwaddr_from_cptr_unchecked(sta->isi_macaddr);
+            if (sta_addr == NULL || osw_hwaddr_is_equal(sta_addr, iter_addr)) {
+                const struct osw_hwaddr *mld_addr = osw_plat_qsdk_isi_mld_addr(sta);
+                if (mld_addr != NULL) {
+                    return mld_addr;
+                }
             }
+
+            ptr += sta->isi_len;
+            len -= sta->isi_len;
         }
         msgs++;
     }
-
     return NULL;
-}
-
-/* This is akin to if_nametoindex, except it deals
- * with MAC Addresses and netdev names.
- */
-static const char *
-osw_plat_qsdk_find_if_name_by_mac(struct nl_msg **msgs,
-                                  const struct osw_hwaddr *addr)
-{
-    if (msgs == NULL) return NULL;
-
-    while (*msgs != NULL) {
-        struct nlattr *tb[NL80211_ATTR_MAX + 1];
-        const int err = genlmsg_parse(nlmsg_hdr(*msgs), 0, tb, NL80211_ATTR_MAX, NULL);
-        const bool parsed = (err == 0);
-        if (parsed) {
-            struct nlattr *if_name = tb[NL80211_ATTR_IFNAME];
-            struct nlattr *mac = tb[NL80211_ATTR_MAC];
-            const bool if_name_exists = (if_name != NULL);
-            const struct osw_hwaddr *vif_addr = (mac != NULL)
-                                              ? osw_hwaddr_from_cptr(nla_data(mac),
-                                                                      nla_len(mac))
-                                              : NULL;
-            const bool mac_matches = (vif_addr != NULL)
-                                   ? osw_hwaddr_is_equal(vif_addr, addr)
-                                   : false;
-            if (mac_matches && if_name_exists) {
-                return nla_data(if_name);
-            }
-        }
-        msgs++;
-    }
-
-    return NULL;
-}
-
-static struct nl_msg *
-osw_plat_qsdk_msg_dump_interfaces(void)
-{
-    const int family_id = osw_plat_qsdk_get_nl80211_family_id();
-    if (WARN_ON(family_id < 0)) return NULL;
-
-    struct nl_msg *msg = nlmsg_alloc();
-    const uint8_t cmd = NL80211_CMD_GET_INTERFACE;
-    const int flags = NLM_F_DUMP;
-    assert(genlmsg_put(msg, NL_AUTO_PORT, NL_AUTO_SEQ, family_id, 0, flags, cmd, 0) != NULL);
-
-    return msg;
 }
 
 static void
-osw_plat_qsdk_fix_state_mld_with_resp(struct osw_drv_mld_state *mld,
-                                      uint32_t ifindex,
-                                      struct nl_msg **msgs)
+osw_plat_qsdk_log_nl_cmd_failure(cr_nl_cmd_t *cmd)
 {
-    const struct osw_hwaddr *mld_addr = osw_plat_qsdk_find_mld_mac_by_ifindex(msgs, ifindex);
-    if (mld_addr == NULL) return;
-    if (osw_hwaddr_is_zero(mld_addr)) return;
-    mld->addr = *mld_addr;
+    char buf[1024];
+    cr_nl_cmd_log(cmd, buf, sizeof(buf));
+    if (cr_nl_cmd_is_ok(cmd)) {
+        LOGT("%s", buf);
+    }
+    else {
+        LOGI("%s", buf);
+    }
+}
 
-    const char *mld_if_name = osw_plat_qsdk_find_if_name_by_mac(msgs, mld_addr);
-    if (mld_if_name == NULL) return;
-    STRSCPY_WARN(mld->if_name.buf, mld_if_name);
+static void
+osw_plat_qsdk_vif_get_sta_ap_mld_addr(struct osw_plat_qsdk11_4 *m,
+                                      const char *vif_name,
+                                      struct osw_hwaddr *ap_mld_addr)
+{
+    const char *phy_name = "";
+    const char *name = strfmta(LOG_PREFIX_VIF(phy_name, vif_name, "get bss peer"));
+    struct osw_drv_nl80211_ops *nl_ops = m->nl_ops;
+    if (nl_ops == NULL) return;
+    struct nl_80211 *nl = nl_ops->get_nl_80211_fn(nl_ops);
+    if (nl == NULL) return;
+    const uint32_t ifindex = if_nametoindex(vif_name);
+    const int family_id = nl_80211_get_family_id(nl);
+    struct nl_msg *msg = osw_plat_qsdk_nl80211_msg_get_bss_peer(family_id, ifindex);
+
+    cr_nl_cmd_t *cmd = cr_nl_cmd(NULL, NETLINK_GENERIC, msg);
+    cr_nl_cmd_set_name(cmd, name);
+    while (cr_nl_cmd_run(cmd) == false) {}
+    osw_plat_qsdk_log_nl_cmd_failure(cmd);
+
+    struct nl_msg **msgs = cr_nl_cmd_resps(cmd);
+    const struct osw_hwaddr *mld_addr = osw_plat_qsdk_list_sta_find_mld_addr(msgs, NULL);
+    if (ap_mld_addr != NULL && mld_addr != NULL) {
+        *ap_mld_addr = *mld_addr;
+    }
+
+    cr_nl_cmd_drop(&cmd);
 }
 
 static void
@@ -5367,14 +6074,14 @@ osw_plat_qsdk_fix_state_mld(struct osw_plat_qsdk11_4 *m,
     struct nl_msg **msgs = cr_nl_cmd_resps(cmd);
     switch (state->vif_type) {
         case OSW_VIF_AP:
-            osw_plat_qsdk_fix_state_mld_with_resp(&state->u.ap.mld, ifindex, msgs);
+            osw_plat_qsdk_fix_state_mld_with_resp(&state->u.ap.mld, vif_name, ifindex, msgs);
             break;
         case OSW_VIF_UNDEFINED:
             break;
         case OSW_VIF_AP_VLAN:
             break;
         case OSW_VIF_STA:
-            osw_plat_qsdk_fix_state_mld_with_resp(&state->u.sta.mld, ifindex, msgs);
+            osw_plat_qsdk_fix_state_mld_with_resp(&state->u.sta.mld, vif_name, ifindex, msgs);
             break;
     }
 
@@ -5394,6 +6101,8 @@ osw_plat_qsdk_fix_state_mld_sta(struct osw_plat_qsdk11_4 *m,
 
     const struct osw_hwaddr bssid = state->u.sta.link.bssid;
     const struct osw_channel channel = state->u.sta.link.channel;
+
+    if (osw_hwaddr_is_zero(&bssid)) return;
 
     /* Inherit everything except the BSSID. The BSSID is
      * expected to be correct and is specific per link.
@@ -5588,6 +6297,12 @@ osw_plat_qsdk11_4_fix_vif_state_cb(struct osw_drv_nl80211_hook *hook,
     osw_plat_qsdk11_4_fix_status(vif, phy_name, vif_name, state);
     osw_plat_qsdk11_4_fix_vif_mbss_tx_vif_state(vif, phy_name, vif_name, state, m);
     osw_plat_qsdk11_4_fix_vif_mbss_tx_vif_group(vif, phy_name, vif_name, state);
+    osw_plat_qsdk11_4_fix_vif_mbo(vif, phy_name, vif_name, state);
+    osw_plat_qsdk11_4_fix_vif_oce(vif, phy_name, vif_name, state);
+    osw_plat_qsdk11_4_fix_vif_oce_min_rssi_dbm(vif, phy_name, vif_name, state);
+    osw_plat_qsdk11_4_fix_vif_oce_min_rssi_enable(vif, phy_name, vif_name, state);
+    osw_plat_qsdk11_4_fix_vif_oce_retry_delay_sec(vif, phy_name, vif_name, state);
+    osw_plat_qsdk11_4_fix_vif_max_sta(vif, phy_name, vif_name, state);
 
     if (osw_plat_qsdk11_4_is_mld_phy(phy_name)) return;
 
@@ -5608,6 +6323,7 @@ osw_plat_qsdk11_4_fix_vif_state_cb(struct osw_drv_nl80211_hook *hook,
     osw_plat_qsdk11_4_vif_get_wds(vif);
     osw_plat_qsdk_fix_state_mld(m, vif_name, state);
     if (state->vif_type == OSW_VIF_STA) {
+        osw_plat_qsdk_vif_get_sta_ap_mld_addr(m, vif_name, &state->u.sta.link.mld_addr);
         osw_plat_qsdk_vif_sta_set_mld(vif, state->u.sta.mld.if_name.buf);
         osw_plat_qsdk_vif_sta_set_link(vif, &state->u.sta.link);
         osw_plat_qsdk_fix_state_mld_sta(m, vif_name, state);
@@ -5615,34 +6331,12 @@ osw_plat_qsdk11_4_fix_vif_state_cb(struct osw_drv_nl80211_hook *hook,
     osw_plat_qsdk_fix_vif_sta_multi_ap(vif, phy_name, vif_name, state);
     osw_plat_qsdk_fix_vif_ap_multi_ap(vif, phy_name, vif_name, state);
     osw_plat_qsdk11_4_vif_get_mbss_group(vif);
-}
-
-static const struct osw_hwaddr *
-osw_plat_qsdk_list_sta_find_mld_addr(struct nl_msg **msgs,
-                                     const struct osw_hwaddr *sta_addr)
-{
-    while (msgs != NULL && *msgs != NULL) {
-        int len;
-        const void *ptr = osw_plat_qsdk11_4_param_get_data(*msgs, &len);
-        for (;;) {
-            const struct ieee80211req_sta_info *sta = ptr;
-            if (sta == NULL) break;
-            if (len < (int)sizeof(*sta)) break;
-
-            const struct osw_hwaddr *iter_addr = osw_hwaddr_from_cptr_unchecked(sta->isi_macaddr);
-            if (osw_hwaddr_is_equal(sta_addr, iter_addr)) {
-                const struct osw_hwaddr *mld_addr = osw_plat_qsdk_isi_mld_addr(sta);
-                if (mld_addr != NULL) {
-                    return mld_addr;
-                }
-            }
-
-            ptr += sta->isi_len;
-            len -= sta->isi_len;
-        }
-        msgs++;
-    }
-    return NULL;
+    osw_plat_qsdk11_4_vif_get_mbo(vif);
+    osw_plat_qsdk11_4_vif_get_oce(vif);
+    osw_plat_qsdk11_4_vif_get_oce_min_rssi_dbm(vif);
+    osw_plat_qsdk11_4_vif_get_oce_min_rssi_enable(vif);
+    osw_plat_qsdk11_4_vif_get_oce_retry_delay_sec(vif);
+    osw_plat_qsdk11_4_vif_get_max_sta(vif);
 }
 
 static struct nl_msg *
@@ -5657,19 +6351,6 @@ osw_plat_qsdk_msg_list_sta(struct osw_plat_qsdk11_4 *m,
     const int family_id = nl_80211_get_family_id(nl);
     struct nl_msg *msg = osw_plat_qsdk_nl80211_msg_list_sta(family_id, ifindex);
     return msg;
-}
-
-static void
-osw_plat_qsdk_log_nl_cmd_failure(cr_nl_cmd_t *cmd)
-{
-    char buf[1024];
-    cr_nl_cmd_log(cmd, buf, sizeof(buf));
-    if (cr_nl_cmd_is_ok(cmd)) {
-        LOGT("%s", buf);
-    }
-    else {
-        LOGI("%s", buf);
-    }
 }
 
 static bool
@@ -5897,6 +6578,8 @@ osw_plat_qsdk11_4_start(struct osw_plat_qsdk11_4 *m)
         .fix_sta_state_fn = osw_plat_qsdk11_4_fix_sta_state_cb,
         .pre_request_config_fn = osw_plat_qsdk11_4_pre_request_config_cb,
         .pre_request_stats_fn = osw_plat_qsdk11_4_pre_request_stats_cb,
+        .post_request_config_fn = osw_plat_qsdk11_4_post_request_config_cb,
+        .delete_sta_fn = osw_plat_qsdk11_4_delete_sta_cb,
     };
 
     static const struct nl_80211_sub_ops nl_sub_ops = {

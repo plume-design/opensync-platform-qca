@@ -40,6 +40,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #define MODULE_ID LOG_MODULE_ID_TARGET
 
+#define ECM_FRONT_END_SELECT "/sys/module/ecm/parameters/front_end_selection"
+
 bool hw_acc_flush(struct hw_acc_flush_flow_t *flow)
 {
     return true;
@@ -71,12 +73,48 @@ bool hw_acc_flush_all_flows(void)
     return true;
 }
 
-void hw_acc_enable()
+/* This is taken from 'ecm_front_end_type' enum.
+ * Fields that are actively used were translated to a more user-friendly manner.
+ */
+enum ecm_test_mode {
+    ECM_FRONT_END_AUTO,
+    ECM_FRONT_END_NSS_ONLY,
+    ECM_FRONT_END_SFE_ONLY,
+    ECM_FRONT_END_PPE_ONLY,
+    ECM_FRONT_END_NSS_SFE,
+    ECM_FRONT_END_PPE_SFE,
+    ECM_FRONT_END_DISABLE,
+};
+
+static bool ecm_test_select_available(void)
 {
-    return;
+    return (access(ECM_FRONT_END_SELECT, W_OK) == 0);
 }
 
-void hw_acc_disable()
+static void ecm_test_select_set(enum ecm_test_mode mode)
 {
-    return;
+    WARN_ON(file_put(ECM_FRONT_END_SELECT, strfmta("%d", mode)) != 0);
 }
+
+static enum ecm_test_mode hw_acc_get_mode_from_flags(hw_acc_ctrl_flags_t flags)
+{
+    if (flags & HW_ACC_F_DISABLE_ACCEL) return ECM_FRONT_END_DISABLE;
+    if (flags & HW_ACC_F_PASS_XDP) return ECM_FRONT_END_SFE_ONLY;
+    return ECM_FRONT_END_AUTO;
+}
+
+bool hw_acc_mode_set(hw_acc_ctrl_flags_t flags)
+{
+    const enum ecm_test_mode emode = hw_acc_get_mode_from_flags(flags);
+
+    if (ecm_test_select_available())
+    {
+        ecm_test_select_set(emode);
+        hw_acc_flush_all_flows();
+        return true;
+    }
+    return false;
+}
+
+void hw_acc_enable(void) { hw_acc_mode_set(0); }
+void hw_acc_disable(void) { hw_acc_mode_set(HW_ACC_F_DISABLE_ACCEL); }

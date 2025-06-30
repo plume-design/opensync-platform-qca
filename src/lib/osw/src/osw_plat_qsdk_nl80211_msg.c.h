@@ -168,6 +168,27 @@ static struct nl_msg *osw_plat_qsdk_nl80211_msg_get_mbss_group(int family_id, ui
 #endif
 }
 
+#define OSW_PLAT_QSDK11_4_NL_MSG_GET(param, arg)                                                 \
+    static struct nl_msg *osw_plat_qsdk_nl80211_msg_get_##param(int family_id, uint32_t ifindex) \
+    {                                                                                            \
+        struct nl_msg *msg = nlmsg_alloc();                                                      \
+        osw_plat_qsdk11_4_put_qca_vendor_getparam(                                               \
+                msg,                                                                             \
+                family_id,                                                                       \
+                ifindex,                                                                         \
+                QCA_NL80211_VENDOR_SUBCMD_GET_WIFI_CONFIGURATION,                                \
+                QCA_NL80211_VENDOR_SUBCMD_WIFI_PARAMS,                                           \
+                arg);                                                                            \
+        return msg;                                                                              \
+    }
+
+OSW_PLAT_QSDK11_4_NL_MSG_GET(mbo, IEEE80211_PARAM_MBO);
+OSW_PLAT_QSDK11_4_NL_MSG_GET(oce, IEEE80211_PARAM_OCE);
+OSW_PLAT_QSDK11_4_NL_MSG_GET(oce_min_rssi_enable, IEEE80211_PARAM_OCE_ASSOC_REJECT);
+OSW_PLAT_QSDK11_4_NL_MSG_GET(oce_min_rssi_dbm, IEEE80211_PARAM_OCE_ASSOC_MIN_RSSI);
+OSW_PLAT_QSDK11_4_NL_MSG_GET(oce_retry_delay_sec, IEEE80211_PARAM_OCE_ASSOC_RETRY_DELAY);
+OSW_PLAT_QSDK11_4_NL_MSG_GET(max_sta, IEEE80211_PARAM_MAXSTA);
+
 static struct nl_msg *osw_plat_qsdk_nl80211_msg_mode(int family_id, uint32_t ifindex, const char *mode)
 {
     struct nl_msg *msg = nlmsg_alloc();
@@ -224,9 +245,9 @@ static struct nl_msg *osw_plat_qsdk_nl80211_msg_exttool_csa(
     memcpy(&ht40c, &c, sizeof(c));
     osw_channel_downgrade_to(&ht40c, OSW_CHANNEL_40MHZ);
     const enum osw_plat_qsdk_wifi_sec_chan_offset offset =
-            c->control_freq_mhz < c->center_freq0_mhz   ? OSW_PLAT_QSDK_WIFI_SEC_CHAN_OFFSET_IS_PLUS
-            : c->control_freq_mhz > c->center_freq0_mhz ? OSW_PLAT_QSDK_WIFI_SEC_CHAN_OFFSET_IS_MINUS
-                                                        : OSW_PLAT_QSDK_WIFI_SEC_CHAN_OFFSET_NA;
+            ht40c.control_freq_mhz < ht40c.center_freq0_mhz   ? OSW_PLAT_QSDK_WIFI_SEC_CHAN_OFFSET_IS_PLUS
+            : ht40c.control_freq_mhz > ht40c.center_freq0_mhz ? OSW_PLAT_QSDK_WIFI_SEC_CHAN_OFFSET_IS_MINUS
+                                                              : OSW_PLAT_QSDK_WIFI_SEC_CHAN_OFFSET_NA;
 
     data.cmd = EXTENDED_SUBIOCTL_CHANNEL_SWITCH;
     data.ext_data.channel_switch_req.target_chanwidth =
@@ -285,4 +306,23 @@ static struct nl_msg *osw_plat_qsdk_nl80211_msg_list_sta(int family_id, uint32_t
             NULL,
             0);
     return msg;
+}
+
+static struct nl_msg *osw_plat_qsdk_nl80211_msg_get_bss_peer(int family_id, uint32_t ifindex)
+{
+#ifdef CONFIG_PLATFORM_QCA_QSDK120
+    struct nl_msg *msg = nlmsg_alloc();
+    osw_plat_qsdk11_4_put_qca_vendor_setparam(
+            msg,
+            family_id,
+            ifindex,
+            QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION,
+            QCA_NL80211_VENDOR_SUBCMD_GET_BSS_PEER,
+            0,
+            NULL,
+            0);
+    return msg;
+#else
+    return NULL;
+#endif
 }
