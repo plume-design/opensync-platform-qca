@@ -133,6 +133,7 @@ enum qca_wlan_get_params {
 };
 
 #define OSW_PLAT_QSDK11_4_DRV_NAME "qsdk11_4_drv"
+#define OSW_PLAT_QSDK11_4_VIF_NETIF_UP_TIMEOUT_MSEC 3000
 
 #define LOG_PREFIX(fmt, ...) \
     "osw: plat: qsdk11_4: " fmt, \
@@ -625,7 +626,9 @@ struct osw_plat_qsdk11_4_mbss_tx_vdev {
     struct osw_plat_qsdk11_4_async *job_param;
     struct osw_drv_nl80211_ops *nl_ops;
     char *phy_name;
-    char *vif_name;
+    char *vif_name; /* tx vap */
+    char **vif_names; /* all vaps within a group, and mlo when applicable */
+    size_t n_vif_names;
     uint32_t ifindex;
     bool pulled_down;
     bool pulled_up;
@@ -637,17 +640,36 @@ struct osw_plat_qsdk11_4_mbss_tx_vdev {
                (ctx)->vif_name, \
                ## __VA_ARGS__)
 
+static void
+osw_plat_qsdk11_4_mbss_tx_vdev_toggle_vifs(struct osw_plat_qsdk11_4_mbss_tx_vdev *ctx,
+                                           const bool up)
+{
+    size_t i;
+    for (i = 0; i < ctx->n_vif_names; i++) {
+        const char *vif_name = ctx->vif_names[i];
+        LOGI(LOG_PREFIX_MBSS_TX_VDEV(ctx, "group: bringing %s: %s", up ? "up" : "down", vif_name));
+        const bool failed = (os_nif_up(vif_name, up) == false);
+        WARN_ON(failed);
+    }
+}
+
 static enum osw_plat_qsdk11_4_async_result
 osw_plat_qsdk11_4_mbss_tx_vdev_poll_cb(void *priv,
                                        struct osw_plat_qsdk11_4_cb *waker)
 {
     struct osw_plat_qsdk11_4_mbss_tx_vdev *ctx = priv;
-    char *phy_name = ctx->phy_name;
 
     if (ctx->pulled_down == false) {
-        LOGT(LOG_PREFIX_MBSS_TX_VDEV(ctx, "phy: bringing down"));
-        const bool down_failed = (os_nif_up(phy_name, false) == false);
-        WARN_ON(down_failed);
+        /* This needs to stop all vaps within the same MBSS
+         * group. However, when MLO is involved, pulling any
+         * Affiliated AP down implicitly downs all other
+         * Affiliated APs within the same MLD. The
+         * expectation is that the caller that prepared the
+         * request provided all ifnames so they can be
+         * pulled down, and later up, in tandem. Failing to
+         * do so may result in perpetual reconfigurations.
+         */
+        osw_plat_qsdk11_4_mbss_tx_vdev_toggle_vifs(ctx, false);
         ctx->pulled_down = true;
     }
 
@@ -687,9 +709,7 @@ osw_plat_qsdk11_4_mbss_tx_vdev_poll_cb(void *priv,
     }
 
     if (ctx->pulled_up == false) {
-        LOGT(LOG_PREFIX_MBSS_TX_VDEV(ctx, "phy: bringing up"));
-        const bool up_failed = (os_nif_up(phy_name, true) == false);
-        WARN_ON(up_failed);
+        osw_plat_qsdk11_4_mbss_tx_vdev_toggle_vifs(ctx, true);
         ctx->pulled_up = true;
     }
 
@@ -704,6 +724,13 @@ osw_plat_qsdk11_4_mbss_tx_vdev_drop_cb(void *priv)
 
     LOGT(LOG_PREFIX_MBSS_TX_VDEV(ctx, "dropping"));
     osw_plat_qsdk11_4_async_drop(ctx->job_param);
+    {
+        size_t i;
+        for (i = 0; i < ctx->n_vif_names; i++) {
+            FREE(ctx->vif_names[i]);
+        }
+        FREE(ctx->vif_names);
+    }
     FREE(ctx->phy_name);
     FREE(ctx->vif_name);
     FREE(ctx);
@@ -713,7 +740,9 @@ static struct osw_plat_qsdk11_4_async *
 osw_plat_qsdk11_4_mbss_tx_vdev_alloc(struct osw_drv_nl80211_ops *nl_ops,
                                      const char *phy_name,
                                      const char *vif_name,
-                                     uint32_t ifindex)
+                                     uint32_t ifindex,
+                                     char **vif_names,
+                                     size_t n_vif_names)
 {
     struct osw_plat_qsdk11_4_mbss_tx_vdev *ctx = CALLOC(1, sizeof(*ctx));
     static const struct osw_plat_qsdk11_4_async_ops ops = {
@@ -724,6 +753,8 @@ osw_plat_qsdk11_4_mbss_tx_vdev_alloc(struct osw_drv_nl80211_ops *nl_ops,
     ctx->phy_name = STRDUP(phy_name);
     ctx->vif_name = STRDUP(vif_name);
     ctx->ifindex = ifindex;
+    ctx->vif_names = vif_names;
+    ctx->n_vif_names = n_vif_names;
     LOGT(LOG_PREFIX_MBSS_TX_VDEV(ctx, "allocated"));
     return osw_plat_qsdk11_4_async_impl(&ops, ctx);
 }
@@ -990,6 +1021,7 @@ struct osw_plat_qsdk11_4_vif {
     struct nl_cmd_task task_get_wds;
     struct nl_cmd_task task_get_mbss_group;
     struct nl_cmd_task task_survey;
+    struct rq_task task_netif_up;
     struct osw_plat_qsdk11_4_task param_set_dbdc_enable;
     struct osw_plat_qsdk11_4_task param_set_dbdc_samessiddisable;
     struct osw_plat_qsdk11_4_task param_set_min_rssi_min;
@@ -1638,11 +1670,76 @@ osw_plat_qsdk11_4_apply_rfkill(struct osw_plat_qsdk11_4 *m,
     }
 }
 
+static char **
+osw_plat_qsdk11_4_append_ifname(char **if_names,
+                                size_t *n_if_names,
+                                const char *if_name)
+{
+    const size_t cnt = ++(*n_if_names);
+    const size_t sz = cnt * sizeof(if_names[0]);
+    if_names = REALLOC(if_names, sz);
+    if_names[cnt - 1] = STRDUP(if_name);
+    return if_names;
+}
+
+static char **
+osw_plat_qsdk11_4_append_mlo_ifnames(char **if_names,
+                                     size_t *n_if_names,
+                                     const char *if_name)
+{
+    const char *slaves_path = strfmta("/sys/class/net/%s/master/bonding/slaves", if_name);
+    char *slaves = file_geta(slaves_path);
+    char *slave;
+    while ((slave = strsep(&slaves, " \r\n")) != NULL) {
+        if (strlen(slave) == 0) continue;
+        if (strcmp(slave, if_name) == 0) continue;
+
+        if_names = osw_plat_qsdk11_4_append_ifname(if_names, n_if_names, slave);
+    }
+    return if_names;
+}
+
+static char **
+osw_plat_qsdk11_4_append_mbss_ifnames(char **if_names,
+                                      size_t *n_if_names,
+                                      const struct osw_drv_phy_config *phy_conf,
+                                      const int mbss_group)
+{
+    size_t i;
+    for (i = 0; i < phy_conf->vif_list.count; i++) {
+        const struct osw_drv_vif_config *vif_conf = &phy_conf->vif_list.list[i];
+        const char *vif_name = vif_conf->vif_name;
+        switch (vif_conf->vif_type) {
+            case OSW_VIF_UNDEFINED:
+                break;
+            case OSW_VIF_STA:
+                break;
+            case OSW_VIF_AP_VLAN:
+                break;
+            case OSW_VIF_AP:
+                if (vif_conf->u.ap.mbss_group == mbss_group) {
+                    switch (vif_conf->u.ap.mbss_mode) {
+                        case OSW_MBSS_NONE:
+                            break;
+                        case OSW_MBSS_TX_VAP: /* fall through */
+                        case OSW_MBSS_NON_TX_VAP:
+                            if_names = osw_plat_qsdk11_4_append_ifname(if_names, n_if_names, vif_name);
+                            if_names = osw_plat_qsdk11_4_append_mlo_ifnames(if_names, n_if_names, vif_name);
+                            break;
+                    }
+                }
+                break;
+        }
+    }
+    return if_names;
+}
+
 static void
 osw_plat_qsdk11_4_phy_apply_mbss_tx_vif_name(struct osw_plat_qsdk11_4 *m,
                                              struct osw_drv_phy_config *phy_conf,
                                              struct osw_plat_qsdk11_4_vif *vif,
-                                             const char *vif_name)
+                                             const char *vif_name,
+                                             const int mbss_group)
 {
     if (phy_conf->enabled == false) return;
 
@@ -1677,11 +1774,18 @@ osw_plat_qsdk11_4_phy_apply_mbss_tx_vif_name(struct osw_plat_qsdk11_4 *m,
 
     osw_plat_qsdk11_4_task_drop(&phy->task_mbss_tx_vdev);
 
+    char **vif_names = NULL;
+    size_t n_vif_names = 0;
+
+    vif_names = osw_plat_qsdk11_4_append_mbss_ifnames(vif_names, &n_vif_names, phy_conf, mbss_group);
+
     const uint32_t ifindex = vif_info->ifindex;
     struct osw_plat_qsdk11_4_async *async = osw_plat_qsdk11_4_mbss_tx_vdev_alloc(m->nl_ops,
                                                                                  phy_name,
                                                                                  vif_name,
-                                                                                 ifindex);
+                                                                                 ifindex,
+                                                                                 vif_names,
+                                                                                 n_vif_names);
     osw_plat_qsdk11_4_task_start(&phy->task_mbss_tx_vdev, async);
 }
 
@@ -1851,7 +1955,7 @@ osw_plat_qsdk11_4_pre_request_config_vif_ap(struct osw_plat_qsdk11_4 *m,
     }
 
     if (mbss_mode_changed && ap_conf->mbss_mode == OSW_MBSS_TX_VAP) {
-        osw_plat_qsdk11_4_phy_apply_mbss_tx_vif_name(m, phy_conf, vif, vif_name);
+        osw_plat_qsdk11_4_phy_apply_mbss_tx_vif_name(m, phy_conf, vif, vif_name, ap_conf->mbss_group);
     }
 }
 
@@ -2158,6 +2262,69 @@ osw_plat_qsdk11_4_pre_request_config_cb(struct osw_drv_nl80211_hook *hook,
             osw_plat_qsdk11_4_pre_request_config_vif(m, vif, drv_conf, phy_conf, vif_conf);
         }
     }
+}
+
+static void
+osw_plat_qsdk11_4_post_request_config_cb(struct osw_drv_nl80211_hook *hook,
+                                         struct osw_drv_conf *drv_conf,
+                                         struct rq *q,
+                                         void *priv)
+{
+    struct osw_plat_qsdk11_4 *m = priv;
+    struct osw_drv_nl80211_ops *nl_ops = m->nl_ops;
+    struct nl_80211_sub *sub = m->nl_sub;
+    struct nl_80211 *nl = nl_ops->get_nl_80211_fn(nl_ops);
+
+    size_t i;
+    for (i = 0; i < drv_conf->n_phy_list; i++) {
+        struct osw_drv_phy_config *phy_conf = &drv_conf->phy_list[i];
+        size_t j;
+        for (j = 0; j < phy_conf->vif_list.count; j++) {
+            struct osw_drv_vif_config *vif_conf = &phy_conf->vif_list.list[j];
+
+            if (vif_conf->enabled == false) continue;
+            if (vif_conf->vif_type != OSW_VIF_AP) continue;
+
+            const char *vif_name = vif_conf->vif_name;
+            const struct nl_80211_vif *vif_info = nl_80211_vif_by_name(nl, vif_name);
+            if (vif_info == NULL) continue;
+
+            struct osw_plat_qsdk11_4_vif *vif = nl_80211_sub_vif_get_priv(sub, vif_info);
+            if (vif == NULL) continue;
+
+            rq_task_kill(&vif->task_netif_up);
+            rq_add_task(q, &vif->task_netif_up);
+        }
+    }
+}
+
+static enum osw_drv_nl80211_hook_result
+osw_plat_qsdk11_4_delete_sta_cb(struct osw_drv_nl80211_hook *hook,
+                                const char *phy_name,
+                                const char *vif_name,
+                                const struct osw_hwaddr *sta_addr,
+                                void *priv)
+{
+    if (!kconfig_enabled(CONFIG_PLATFORM_QCA_QSDK120)) return OSW_DRV_NL80211_HOOK_CONTINUE;
+
+    struct osw_plat_qsdk11_4 *m = priv;
+    struct osw_drv_nl80211_ops *nl_ops = m->nl_ops;
+    if (nl_ops == NULL) return OSW_DRV_NL80211_HOOK_CONTINUE;
+
+    struct nl_80211 *nl = nl_ops->get_nl_80211_fn(nl_ops);
+    if (nl == NULL) return OSW_DRV_NL80211_HOOK_CONTINUE;
+
+    const char *name = strfmta(LOG_PREFIX_VIF(phy_name, vif_name, "kickmac"));
+    const uint32_t ifindex = if_nametoindex(vif_name);
+    const int family_id = nl_80211_get_family_id(nl);
+    struct nl_msg *msg = osw_plat_qsdk_nl80211_msg_x_mac(family_id, ifindex, sta_addr, QCA_NL80211_VENDORSUBCMD_KICKMAC);
+    if (msg == NULL) return OSW_DRV_NL80211_HOOK_CONTINUE;
+
+    cr_nl_cmd_t *cmd = cr_nl_cmd(NULL, NETLINK_GENERIC, msg);
+    cr_nl_cmd_set_name(cmd, name);
+    while (cr_nl_cmd_run(cmd) == false) {}
+    cr_nl_cmd_drop(&cmd);
+    return OSW_DRV_NL80211_HOOK_BREAK;
 }
 
 static void
@@ -2584,8 +2751,6 @@ osw_plat_qsdk11_4_ap_conf_mutate_cb(struct osw_hostap_hook *hook,
         STRSCAT(hapd_conf->extra_buf, strfmta("mld_link_macs=%s\n", mld_link_macs));
         STRSCAT(hapd_conf->extra_buf, strfmta("mld_link_ids=%s\n", mld_link_ids));
         STRSCAT(hapd_conf->extra_buf, strfmta("mld_mac_addr=%s\n", mld_mac_addr));
-
-        osw_plat_qsdk_mld_start_in_tandem(drv_conf, phy_name, vif_name);
     }
 }
 
@@ -3604,7 +3769,10 @@ osw_plat_qsdk11_4_vif_get_mbss_tx_vdev_done_cb(struct rq_task *task,
 {
     struct osw_plat_qsdk11_4_vif *vif = priv;
     const bool changed = OSW_PLAT_QSDK11_4_VIF_ATTR_SET(vif, vif->mbss_tx_vdev_prev, vif->mbss_tx_vdev_next);
-    if (changed) osw_plat_qsdk11_4_phy_report_changed(vif);
+    if (changed) {
+        osw_plat_qsdk11_4_phy_report_changed(vif);
+        osw_plat_qsdk11_4_vif_report_changed(vif);
+    }
 }
 
 static void
@@ -3870,6 +4038,21 @@ osw_plat_qsdk11_4_vif_fix_dcs_sync(const char *phy_name,
 }
 
 static void
+osw_drv_nl80211_vif_netif_up_run_cb(struct rq_task *t)
+{
+    struct osw_plat_qsdk11_4_vif *vif = container_of(t, typeof(*vif), task_netif_up);
+    const char *phy_name = osw_plat_qsdk11_4_vif_into_phy_name(vif) ?: "";
+    const char *vif_name = vif->info ? vif->info->name : NULL;
+    WARN_ON(vif_name == NULL);
+    if (vif_name != NULL) {
+        LOGD(LOG_PREFIX_VIF(phy_name, vif_name, "netif: up"));
+        const bool up_failed = (os_nif_up(vif_name, true) == false);
+        WARN_ON(up_failed);
+    }
+    rq_task_complete(t);
+}
+
+static void
 osw_plat_qsdk11_4_vif_added_cb(const struct nl_80211_vif *info,
                                void *priv)
 {
@@ -3885,6 +4068,14 @@ osw_plat_qsdk11_4_vif_added_cb(const struct nl_80211_vif *info,
 
     rq_init(&vif->q_stats, EV_DEFAULT);
     vif->q_stats.max_running = 1;
+
+    {
+        static const struct rq_task_ops ops = {
+            .run_fn = osw_drv_nl80211_vif_netif_up_run_cb,
+        };
+        vif->task_netif_up.ops = &ops;
+        vif->task_netif_up.run_timeout_msec = OSW_PLAT_QSDK11_4_VIF_NETIF_UP_TIMEOUT_MSEC;
+    }
 
     const char *vif_name = info->name;
     const uint32_t ifindex = info->ifindex;
@@ -4399,6 +4590,7 @@ osw_plat_qsdk11_4_vif_removed_cb(const struct nl_80211_vif *info,
     osw_plat_qsdk11_4_task_drop(&vif->task_get_acl);
     osw_plat_qsdk11_4_task_drop(&vif->task_get_acl_policy);
     osw_plat_qsdk_vif_sta_set_mld(vif, NULL);
+    rq_task_kill(&vif->task_netif_up);
 
     FREE(vif->last_getmac);
     vif->last_getmac = NULL;
@@ -5897,6 +6089,8 @@ osw_plat_qsdk11_4_start(struct osw_plat_qsdk11_4 *m)
         .fix_sta_state_fn = osw_plat_qsdk11_4_fix_sta_state_cb,
         .pre_request_config_fn = osw_plat_qsdk11_4_pre_request_config_cb,
         .pre_request_stats_fn = osw_plat_qsdk11_4_pre_request_stats_cb,
+        .post_request_config_fn = osw_plat_qsdk11_4_post_request_config_cb,
+        .delete_sta_fn = osw_plat_qsdk11_4_delete_sta_cb,
     };
 
     static const struct nl_80211_sub_ops nl_sub_ops = {
