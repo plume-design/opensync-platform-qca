@@ -43,6 +43,26 @@ static struct nl_msg *osw_plat_qsdk_nl80211_msg_x_mac(
     return msg;
 }
 
+static struct nl_msg *osw_plat_qsdk_nl80211_msg_x_mac_with_value(
+        int family_id,
+        uint32_t ifindex,
+        const struct osw_hwaddr *mac,
+        uint32_t generic_cmd,
+        uint32_t value)
+{
+    struct nl_msg *msg = nlmsg_alloc();
+    osw_plat_qsdk11_4_put_qca_vendor_setparam(
+            msg,
+            family_id,
+            ifindex,
+            QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION,
+            generic_cmd,
+            value,
+            mac,
+            sizeof(*mac));
+    return msg;
+}
+
 static struct nl_msg *osw_plat_qsdk_nl80211_msg_delmac(int family_id, uint32_t ifindex, const struct osw_hwaddr *mac)
 {
     return osw_plat_qsdk_nl80211_msg_x_mac(family_id, ifindex, mac, QCA_NL80211_VENDORSUBCMD_DELMAC);

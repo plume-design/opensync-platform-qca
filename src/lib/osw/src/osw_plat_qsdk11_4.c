@@ -927,6 +927,7 @@ struct osw_plat_qsdk11_4 {
     struct nl_80211_sub *nl_sub;
     struct ev_io wext_io;
     struct ds_tree mld_stas;
+    bool rsno_supported;
 
     /* FIXME: This should open up its own personal
      * netlink socket to handle vendor specific
@@ -2532,8 +2533,6 @@ osw_plat_qsdk11_4_delete_sta_cb(struct osw_drv_nl80211_hook *hook,
                                 const struct osw_hwaddr *sta_addr,
                                 void *priv)
 {
-    if (!kconfig_enabled(CONFIG_PLATFORM_QCA_QSDK120)) return OSW_DRV_NL80211_HOOK_CONTINUE;
-
     struct osw_plat_qsdk11_4 *m = priv;
     struct osw_drv_nl80211_ops *nl_ops = m->nl_ops;
     if (nl_ops == NULL) return OSW_DRV_NL80211_HOOK_CONTINUE;
@@ -2544,7 +2543,8 @@ osw_plat_qsdk11_4_delete_sta_cb(struct osw_drv_nl80211_hook *hook,
     const char *name = strfmta(LOG_PREFIX_VIF(phy_name, vif_name, "kickmac"));
     const uint32_t ifindex = if_nametoindex(vif_name);
     const int family_id = nl_80211_get_family_id(nl);
-    struct nl_msg *msg = osw_plat_qsdk_nl80211_msg_x_mac(family_id, ifindex, sta_addr, QCA_NL80211_VENDORSUBCMD_KICKMAC);
+    const uint32_t no_disassoc = 1; /* simply remove the STA entry, do not generate any Tx */
+    struct nl_msg *msg = osw_plat_qsdk_nl80211_msg_x_mac_with_value(family_id, ifindex, sta_addr, QCA_NL80211_VENDORSUBCMD_KICKMAC, no_disassoc);
     if (msg == NULL) return OSW_DRV_NL80211_HOOK_CONTINUE;
 
     cr_nl_cmd_t *cmd = cr_nl_cmd(NULL, NETLINK_GENERIC, msg);
@@ -5151,7 +5151,7 @@ osw_plat_qsdk11_4_event_stats_rx(struct osw_plat_qsdk11_4 *m,
     WARN_ON(left != 0);
     WARN_ON(stats_len != 0);
 
-    osw_tlv_put_u32_delta(t, OSW_STATS_STA_RX_BYTES, bytes);
+    osw_tlv_put_u64_delta(t, OSW_STATS_STA_RX_BYTES_64, bytes);
     osw_tlv_put_u32_delta(t, OSW_STATS_STA_RX_FRAMES, mpdu);
     osw_tlv_put_u32_delta(t, OSW_STATS_STA_RX_RETRIES, retry);
 
@@ -5164,7 +5164,7 @@ osw_plat_qsdk11_4_event_stats_rx(struct osw_plat_qsdk11_4 *m,
                         retry,
                         bytes));
 
-    WARN_ON(bytes >= UINT32_MAX);
+    WARN_ON(bytes >= UINT64_MAX);
     WARN_ON(mpdu >= UINT32_MAX);
     WARN_ON(retry >= UINT32_MAX);
 }
@@ -5189,7 +5189,7 @@ osw_plat_qsdk11_4_event_stats_tx(struct osw_plat_qsdk11_4 *m,
             LOGW(LOG_PREFIX_STA(phy_name, vif_name, sta_addr,
                                 "stats: tx:"
                                 " mpdu_attempts=%"PRIu32
-                                " mpdu_auccess=%"PRIu32
+                                " mpdu_success=%"PRIu32
                                 " num_bytes=%"PRIu32,
                                 stats->mpdu_attempts,
                                 stats->mpdu_success,
@@ -5214,7 +5214,7 @@ osw_plat_qsdk11_4_event_stats_tx(struct osw_plat_qsdk11_4 *m,
     const struct wlan_tx_sojourn_stats *sojourn = (const void *)stats;
     if (WARN_ON(stats_len < sizeof(*sojourn))) return;
 
-    osw_tlv_put_u32_delta(t, OSW_STATS_STA_TX_BYTES, bytes);
+    osw_tlv_put_u64_delta(t, OSW_STATS_STA_TX_BYTES_64, bytes);
     osw_tlv_put_u32_delta(t, OSW_STATS_STA_TX_FRAMES, mpdu);
     osw_tlv_put_u32_delta(t, OSW_STATS_STA_TX_RETRIES, retry);
 
@@ -5227,7 +5227,7 @@ osw_plat_qsdk11_4_event_stats_tx(struct osw_plat_qsdk11_4 *m,
                         retry,
                         bytes));
 
-    WARN_ON(bytes >= UINT32_MAX);
+    WARN_ON(bytes >= UINT64_MAX);
     WARN_ON(mpdu >= UINT32_MAX);
     WARN_ON(retry >= UINT32_MAX);
 }
@@ -5722,6 +5722,8 @@ osw_plat_qsdk11_4_fix_phy_state_cb(struct osw_drv_nl80211_hook *hook,
     osw_plat_qsdk11_4_fix_phy_country_id(m, phy_name, state);
     osw_plat_qsdk11_4_fix_phy_country(m, phy_name, state);
     osw_plat_qsdk11_4_fix_phy_puncture(m, state);
+
+    state->rsno_supported = m->rsno_supported;
 }
 
 static void
@@ -6020,6 +6022,7 @@ osw_plat_qsdk_list_sta_find_mld_addr(struct nl_msg **msgs,
 static void
 osw_plat_qsdk_log_nl_cmd_failure(cr_nl_cmd_t *cmd)
 {
+    if (cmd == NULL) return;
     char buf[1024];
     cr_nl_cmd_log(cmd, buf, sizeof(buf));
     if (cr_nl_cmd_is_ok(cmd)) {
@@ -6563,6 +6566,37 @@ osw_plat_qsdk11_4_wext_start(EV_P_ struct osw_plat_qsdk11_4 *m)
     m->wext_io.data = m;
 }
 
+static bool
+osw_plat_qsdk11_4_guess_rsno_supported(void)
+{
+    /* There's no dedicated interface to interrogate the
+     * wireless stack if RSNO is supported.
+     *
+     * The best that can be done is to check if hostapd
+     * binary contains the keyword that is strictly tied to
+     * RSNO.
+     *
+     * The driver itself still may need _some_ changes to
+     * have this work though. That can't be checked
+     * reliably. Checking for internal symbol names is
+     * probably not a good idea.
+     */
+    const char *hostapd_binary_path = strexa("/usr/bin/env", "which", "hostapd", NULL);
+    if (WARN_ON(hostapd_binary_path == NULL)) return false;
+
+    /* One of the key configuration knobs hostapd
+     * understands is this:
+     */
+    const char *keyword = "rsn_override_key_mgmt_2";
+    const char *keyword_found = strexa("/usr/bin/env", "grep", "-qF", keyword, hostapd_binary_path, NULL);
+    if (keyword_found == NULL) return false;
+
+    /* When found, grep returns 0 bytes, but exit code is 0,
+     * so it won't be NULL.
+     */
+    return true;
+}
+
 static void
 osw_plat_qsdk11_4_start(struct osw_plat_qsdk11_4 *m)
 {
@@ -6595,6 +6629,9 @@ osw_plat_qsdk11_4_start(struct osw_plat_qsdk11_4 *m)
         .ap_conf_mutate_fn = osw_plat_qsdk11_4_ap_conf_mutate_cb,
         .sta_conf_mutate_fn = osw_plat_qsdk11_4_sta_conf_mutate_cb,
     };
+
+    m->rsno_supported = osw_plat_qsdk11_4_guess_rsno_supported();
+    LOGI(LOG_PREFIX("rsno_supported: %d", m->rsno_supported));
 
     struct ev_loop *loop = OSW_MODULE_LOAD(osw_ev);
     if (loop == NULL) return;

@@ -35,24 +35,17 @@ configure_packet_deferral() {
     echo $NUM_DEFERRED_PACKETS > /sys/kernel/debug/ecm/ecm_classifier_default/accel_delay_pkts
 }
 
-disable_fdb_forward() {
-    ssdk_sh fdb learnctrl set disable
-    ssdk_sh fdb entry flush 1
-}
-
 udp_deny_ports() {
     echo "add $UDP_SLOW_PATH_PORTS" > /proc/sys/net/ecm/udp_denied_ports
 }
 
 configure_miami() {
     udp_deny_ports
-    disable_fdb_forward
     configure_packet_deferral
 }
 
 configure_alder() {
     udp_deny_ports
-    disable_fdb_forward
     configure_packet_deferral
 }
 
