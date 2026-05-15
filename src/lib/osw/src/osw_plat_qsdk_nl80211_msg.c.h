@@ -173,7 +173,7 @@ static struct nl_msg *osw_plat_qsdk_nl80211_msg_get_puncture_bitmap(int family_i
 
 static struct nl_msg *osw_plat_qsdk_nl80211_msg_get_mbss_group(int family_id, uint32_t ifindex)
 {
-#ifdef CONFIG_PLATFORM_QCA_QSDK120
+#if defined(CONFIG_PLATFORM_QCA_QSDK120) || defined(CONFIG_PLATFORM_QCA_QSDK130)
     struct nl_msg *msg = nlmsg_alloc();
     osw_plat_qsdk11_4_put_qca_vendor_getparam(
             msg,

@@ -1,0 +1,284 @@
+#!/bin/sh
+. /lib/opensync_functions.sh
+
+##
+#
+# TODO
+#  - mac addr generation? maybe not needed. maybe only for STA?
+#  - max mode setup for sta iftype? maybe not needed
+#
+
+include log
+
+OPENSYNC_OWM_BHAUL_AP_PREFIX=${OPENSYNC_OWM_BHAUL_AP_PREFIX:-b}
+OPENSYNC_OWM_HOME_AP_PREFIX=${OPENSYNC_OWM_HOME_AP_PREFIX:-h}
+USE_SHORT_SUFFIX_V1=${USE_SHORT_SUFFIX_V1:-1}
+osff_get=${INSTALL_PREFIX}/tools/osff_get
+
+mld_base() {
+    cat /sys/class/net/wifi0/address
+}
+
+mode_translate() {
+    # The sysfs hwmodes are slightly different
+    # than the one cfg80211tool expects. It's
+    # pretty close and requires minor adjustments
+    # though.
+    sed '
+        s/AXA_/A/;
+        s/AXG_/G/;
+        s/BEG_/G/;
+        s/BEA_/A/;'
+}
+
+wifi_max_mode() {
+    wifi=$1
+    # Last mode is assumed to be the highest/best.
+    # Hopefully this won't ever change. The file
+    # is space-separated list of words. Does not
+    # have a newline.
+    awk '{print $NF}' /sys/class/net/"$wifi"/hwmodes | mode_translate
+}
+
+vap_max_mode() {
+    vap=$1
+    wifi=$(cat /sys/class/net/"$vap"/parent)
+    wifi_max_mode "$wifi"
+}
+
+vap_set_max_mode() {
+    vap=$1
+    max=$(vap_max_mode "$vap")
+    cfg80211tool "$vap" mode "$max"
+}
+
+vaps() {
+# Each line implies a distinct VAP.
+#
+# The first column is the index of the VAP.
+#
+# The second column is the type of the VAP: mld or legacy.
+#
+# The third column is the nl80211 iftype of the VAP. Used by iw to create the VAP.
+#
+# The fourth column is the band suffix type of the VAP: short or long. "short"
+# is really applied when USE_SHORT_SUFFIX_V1 is 1.
+#
+# The fifth column is the prefix of the VAP. Used to create the VAP name
+# (legacy) or alias (mld). It does not include trailing "-" that separates the
+# prefix from band suffix.
+    cat <<.
+0  mld     managed  long   bhaul-sta
+1  mld     __ap     short  ${OPENSYNC_OWM_BHAUL_AP_PREFIX}
+2  mld     __ap     short  ${OPENSYNC_OWM_HOME_AP_PREFIX}
+3  mld     __ap     long   onboard-ap
+4  legacy  __ap     long   svc-d-ap
+5  legacy  __ap     long   svc-e-ap
+6  mld     __ap     long   fh
+7  legacy  __ap     long   cp
+.
+}
+
+mld_addr_gen() {
+    tr ':' '\n' \
+        | sed 's/^/0x/' \
+        | xargs -n1 printf ":%d" \
+        | cut -b2- \
+        | awk -v "idx=${1:-0}" '
+                BEGIN{FS=":"}
+                {
+                    $1 = ($1 + 2) % 256;
+                    $2 = ($2 + 1 + idx) % 256;
+
+                    printf("%02x:%02x:%02x:%02x:%02x:%02x", $1, $2, $3, $4, $5, $6);
+                }
+                '
+}
+
+vap_mld_addr() {
+    if_name=$1
+    set -- $(mlds)
+    while test "$#" -ge 3
+    do
+        mld=$1
+        mld_ifname=mld$mld
+        filter=$2
+        mld_type=$3
+        shift 3
+
+        if echo "$if_name" | grep -q "^$filter"
+        then
+            cat /sys/class/net/$mld_ifname/address
+            shift $#
+        fi
+    done
+}
+
+radio_suffix() {
+    wifi_netdev=$1
+    #| sed -n 's/* \([[:digit:]]\+\)\(.0\)\? MHz \[[[:digit:]]\+\]\( \[[[:digit:]]\+\]\)* ([[:digit:]]\+.[[:digit:]]\+ dBm)/\1/p' 
+    cat "/sys/class/net/$wifi_netdev/supported_freq_list" \
+    | xargs -n1 \
+    | awk '
+        $1 >= 2412 && $1 <= 2600 { band_2g=1; }
+        $1 >= 5180 && $1 <= 5320 { band_5gl=1; }
+        $1 >= 5500 && $1 <= 5825 { band_5gu=1; }
+        $1 >= 5935 && $1 <= 7115 { band_6g=1; }
+        END {
+            if (band_5gl && band_5gu) {
+                band_5gl=0;
+                band_5gu=0;
+                band_5g=1;
+            }
+            if (band_5gl) { print "l50"; }
+            if (band_5gu) { print "u50"; }
+            if (band_2g) { print "24"; }
+            if (band_5g) { print "50"; }
+            if (band_6g) { print "60"; }
+        }
+    '
+}
+
+short_radio_suffix() {
+    wifi_netdev=$1
+    # | sed -n 's/* \([[:digit:]]\+\)\(.0\)\? MHz \[[[:digit:]]\+\]\( \[[[:digit:]]\+\]\)* ([[:digit:]]\+.[[:digit:]]\+ dBm)/\1/p' 
+    cat "/sys/class/net/$wifi_netdev/supported_freq_list" \
+    | xargs -n1 \
+    | awk '
+        $1 >= 2412 && $1 <= 2600 { band_2g=1; }
+        $1 >= 5180 && $1 <= 5320 { band_5gl=1; }
+        $1 >= 5500 && $1 <= 5825 { band_5gu=1; }
+        $1 >= 5935 && $1 <= 7115 { band_6g=1; }
+        END {
+            if (band_5gl && band_5gu) {
+                band_5gl=0;
+                band_5gu=0;
+                band_5g=1;
+            }
+            if (band_5gl) { print "l5"; }
+            if (band_5gu) { print "u5"; }
+            if (band_2g) { print "24"; }
+            if (band_5g) { print "50"; }
+            if (band_6g) { print "60"; }
+        }
+    '
+}
+
+short_radio_suffix_try() {
+    netdev_name=$1
+    if test "$USE_SHORT_SUFFIX_V1" -eq 1
+    then
+        short_radio_suffix "$netdev_name"
+    else
+        radio_suffix "$netdev_name"
+    fi
+}
+
+unprov_wifi() {
+    wifi=$1
+    reason=$2
+
+    log_info "prov: $wifi: unprovisioning, NOT SUPPORTED reason=$reason"
+
+    # It's unclear how to even respect unprovisioning of a single constituent
+    # radio that is part of a unified wiphy.
+}
+
+prov_mld() {
+    nl80211_phy_name=$1
+    vap_index=$2
+    vap_nl80211_iftype=$3
+    vap_suffix=$4
+    vap_prefix=$5
+    reason=$6
+
+    mld_vap_name=mld$vap_index
+    dot_prefix=$(test "$USE_SHORT_SUFFIX_V1" -eq 1 && test "$vap_suffix" = "short" && echo "." || echo "")
+    vap_alias=$(printf "%s%s" "$dot_prefix" "$vap_prefix")
+
+    log_info "prov_mld: $nl80211_phy_name: mld_vap_name=$mld_vap_name, vap_index=$vap_index, vap_nl80211_iftype=$vap_nl80211_iftype, vap_alias=$vap_alias, reason=$reason"
+    if ! test -e "/sys/class/net/$mld_vap_name"
+    then
+        iw "$nl80211_phy_name" interface add "$mld_vap_name" type "$vap_nl80211_iftype"
+        ip link set "$mld_vap_name" up
+
+        # Alias is used to synthesize backwards compatible Opensync vif names
+        ip link set "$mld_vap_name" alias "$vap_alias"
+    fi
+}
+
+prov_legacy() {
+    nl80211_phy_name=$1
+    vap_index=$2
+    vap_nl80211_iftype=$3
+    vap_suffix=$4
+    vap_prefix=$5
+    reason=$6
+
+    for i in /sys/class/net/wifi*
+    do
+        wifi_netdev=$(basename "$i")
+        suffix_long=$(radio_suffix "$wifi_netdev" | grep .) || continue
+        suffix_short_maybe=$(short_radio_suffix_try "$wifi_netdev" || grep .) || continue
+        suffix=$(
+            case "$vap_suffix" in
+                long) echo "$suffix_long" ;;
+                short) echo "$suffix_short_maybe" ;;
+            esac
+        )
+        legacy_vap_name=$vap_prefix-$suffix
+
+        log_info "prov_legacy: $nl80211_phy_name: legacy_vap_name=$legacy_vap_name, vap_index=$vap_index, vap_nl80211_iftype=$vap_nl80211_iftype, reason=$reason"
+        if ! test -e "/sys/class/net/$legacy_vap_name"
+        then
+            iw "$nl80211_phy_name" interface add "$legacy_vap_name" type "$vap_nl80211_iftype" radio_iface "$wifi_netdev"
+            ip link set "$legacy_vap_name" up
+        fi
+    done
+}
+
+prov() {
+    # eg. "lpm", "boot"
+    reason=$1
+
+    nl80211_phy_name=$(grep -h . /sys/class/net/wifi*/phy80211/name | sort -u | xargs)
+    if test "$(echo "$nl80211_phy_name" | wc -w)" -ne 1
+    then
+        log_err "prov_mld: expected exactly one phy, got: '$nl80211_phy_name'"
+        return 1
+    fi
+
+    set -- $(vaps)
+    while test "$#" -ge 5
+    do
+        vap_index=$1
+        vap_type=$2
+        vap_nl80211_iftype=$3
+        vap_suffix=$4
+        vap_prefix=$5
+        shift 5
+
+        log_info "prov: $nl80211_phy_name: vap_index=$vap_index, vap_type=$vap_type, vap_nl80211_iftype=$vap_nl80211_iftype, vap_prefix=$vap_prefix, reason=$reason"
+        case "$vap_type" in
+            mld)
+                prov_mld "$nl80211_phy_name" "$vap_index" "$vap_nl80211_iftype" "$vap_suffix" "$vap_prefix" "$reason"
+                ;;
+            legacy)
+                prov_legacy "$nl80211_phy_name" "$vap_index" "$vap_nl80211_iftype" "$vap_suffix" "$vap_prefix" "$reason"
+                ;;
+        esac
+    done
+
+    for i in /sys/class/net/wifi*
+    do
+        wifi_netdev=$(basename "$i")
+
+        cfg80211tool "$wifi_netdev" dcs_enable 0
+        cfg80211tool "$wifi_netdev" dbdc_enable 0
+        cfg80211tool "$wifi_netdev" samessid_disable 1
+    done
+
+    touch /tmp/do_not_destroy_vaps
+}
+
+"$@"

@@ -1,0 +1,3 @@
+@include "base_qca"
+CONFIG_PLATFORM_QCA_QSDK130=y
+CONFIG_QCA_USE_DPP=y

@@ -180,7 +180,7 @@ prov_mld() {
 radio_suffix() {
     # $1 = phy#X
     iw $1 info \
-    | sed -n 's/* \([[:digit:]]\+\) MHz [[[:digit:]]\+] ([[:digit:]]\+.[[:digit:]] dBm)/\1/p' \
+    | sed -n 's/* \([[:digit:]]\+\)\(.0\)\? MHz \[[[:digit:]]\+\]\( \[[[:digit:]]\+\]\)* ([[:digit:]]\+.[[:digit:]]\+ dBm)/\1/p' \
     | awk '
         $1 >= 2412 && $1 <= 2600 { band_2g=1; }
         $1 >= 5180 && $1 <= 5320 { band_5gl=1; }
@@ -203,7 +203,7 @@ radio_suffix() {
 
 short_radio_suffix() {
     iw $1 info \
-    | sed -n 's/* \([[:digit:]]\+\) MHz [[[:digit:]]\+] ([[:digit:]]\+.[[:digit:]] dBm)/\1/p' \
+    | sed -n 's/* \([[:digit:]]\+\)\(.0\)\? MHz \[[[:digit:]]\+\]\( \[[[:digit:]]\+\]\)* ([[:digit:]]\+.[[:digit:]]\+ dBm)/\1/p' \
     | awk '
         $1 >= 2412 && $1 <= 2600 { band_2g=1; }
         $1 >= 5180 && $1 <= 5320 { band_5gl=1; }
@@ -256,6 +256,8 @@ create_vap() {
             cfg80211tool $name set_eht_dlofdma 0
             cfg80211tool $name set_eht_ulofdma 0
         fi
+        # Disable uapsd by default on interface
+        cfg80211tool $name uapsd 0
         vap_set_max_mode "$name"
     }
 }
@@ -270,6 +272,7 @@ prov_wifi() {
     phy="phy#$wiphy"
     suffix=$(radio_suffix $phy)
     suffix_short=$(short_radio_suffix_try $phy)
+    cfg80211tool $wifi rpt_max_phy 1
 
     log_info "prov: $wifi: $vap: provisioning, mode=$mode"
 
