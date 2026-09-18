@@ -354,6 +354,33 @@ osw_plat_qsdk11_4_fill_chan_states(const char *phy_name,
     }
 }
 
+static void
+osw_plat_qsdk11_4_fill_chan_max_tx_power(const char *phy_name,
+                                         const struct ieee80211req_chaninfo_full *chans,
+                                         struct osw_drv_phy_state *state)
+{
+    const struct ieee80211_ath_channel *arr = chans->req_chan_info.ic_chans;
+    size_t i;
+    for (i = 0; i < state->n_channel_states; i++) {
+        struct osw_channel_state *cs = &state->channel_states[i];
+        const struct osw_channel *c = &cs->channel;
+        const uint32_t freq = c->control_freq_mhz;
+        const int chan = osw_freq_to_chan(freq);
+        size_t j;
+        for (j = 0; j < chans->req_chan_info.ic_nchans; j++) {
+            const struct ieee80211_ath_channel *ac = &arr[j];
+            if (ac->ic_ieee != chan) continue;
+            const int new_max_tx_power_dbm = (int)ac->ic_maxregpower;
+            LOGD(LOG_PREFIX_PHY(phy_name, "fix: chan: %d: max_tx_power_dbm %d -> %d",
+                                chan, cs->max_tx_power_dbm,
+                                new_max_tx_power_dbm));
+            cs->max_tx_power_dbm = new_max_tx_power_dbm;
+            cs->max_tx_power_dbm_valid = true;
+            break;
+        }
+    }
+}
+
 typedef void
 osw_plat_qsdk11_4_cb_fn_t(void *priv);
 
@@ -1035,6 +1062,7 @@ struct osw_plat_qsdk11_4_vif {
     struct nl_cmd_task task_get_oce_retry_delay_sec;
     struct nl_cmd_task task_get_max_sta;
     struct nl_cmd_task task_survey;
+    struct nl_cmd_task task_set_tx_power_fixed_zero;
     struct rq_task task_netif_up;
     struct osw_plat_qsdk11_4_task param_set_dbdc_enable;
     struct osw_plat_qsdk11_4_task param_set_dbdc_samessiddisable;
@@ -1157,6 +1185,7 @@ struct osw_plat_qsdk11_4_vif {
     char country_prev[3];
 
     struct osw_timer tx_power_changed;
+    bool percent_100_applied;
 
     /* Survey stats are reported across multiple nl_msg
      * responses. The first one will be for home-channel,
@@ -2408,7 +2437,7 @@ osw_plat_qsdk11_4_pre_request_config_vif(struct osw_plat_qsdk11_4 *m,
                                          struct osw_drv_phy_config *phy_conf,
                                          struct osw_drv_vif_config *vif_conf)
 {
-    if (vif_conf->tx_power_dbm_changed) {
+    if (vif_conf->tx_power_changed) {
         /* The osw_drv_nl80211 itself is taking care of
          * setting the tx_power. However the kernel WLAN
          * driver updates the tx_power readouts with some
@@ -2570,6 +2599,22 @@ osw_plat_qsdk11_4_pre_request_config_cb(struct osw_drv_nl80211_hook *hook,
 }
 
 static void
+osw_plat_qsdk11_4_tx_power_fixed_zero_done_cb(struct rq_task *task, void *priv)
+{
+    (void)task;
+    struct osw_plat_qsdk11_4_vif *vif = priv;
+
+    /* The fixed-power-0 command completed. qca-wifi interprets value 0 as
+     * "restore max / unrestricted", which cannot be verified through a dBm
+     * readback (the driver silently pretends it applied it). Mark the
+     * unrestricted (percent=100) state as applied only now, on completion,
+     * rather than optimistically at request time, so the reported state does
+     * not claim percent=100 before the command has actually run.
+     */
+    vif->percent_100_applied = true;
+}
+
+static void
 osw_plat_qsdk11_4_post_request_config_cb(struct osw_drv_nl80211_hook *hook,
                                          struct osw_drv_conf *drv_conf,
                                          struct rq *q,
@@ -2579,6 +2624,7 @@ osw_plat_qsdk11_4_post_request_config_cb(struct osw_drv_nl80211_hook *hook,
     struct osw_drv_nl80211_ops *nl_ops = m->nl_ops;
     struct nl_80211_sub *sub = m->nl_sub;
     struct nl_80211 *nl = nl_ops->get_nl_80211_fn(nl_ops);
+    struct nl_conn *conn = nl_80211_get_conn(nl);
 
     size_t i;
     for (i = 0; i < drv_conf->n_phy_list; i++) {
@@ -2599,6 +2645,35 @@ osw_plat_qsdk11_4_post_request_config_cb(struct osw_drv_nl80211_hook *hook,
 
             rq_task_kill(&vif->task_netif_up);
             rq_add_task(q, &vif->task_netif_up);
+
+            if (vif_conf->tx_power_changed) {
+                /*
+                 * Setting fixed power 0 because the Qualcomm
+                 * driver treats power value 0 as a reset to the
+                 * max tx_power. Normally in nl80211, 0 is not
+                 * treated differently from any other value, but the
+                 * Qualcomm driver repurposes it as a "restore
+                 * default" trigger.
+                */
+                if (vif_conf->tx_power_percent == 100) {
+                    const uint32_t ifindex = vif_info->ifindex;
+                    struct nl_msg *msg = nl_80211_alloc_set_vif_power_fixed(nl, ifindex, 0);
+                    struct nl_cmd *cmd = nl_conn_alloc_cmd(conn);
+                    nl_cmd_set_name(cmd, strfmta(LOG_PREFIX_VIF(phy_conf->phy_name,
+                                                               vif_name,
+                                                               "set tx_power fixed 0")));
+                    nl_cmd_task_fini(&vif->task_set_tx_power_fixed_zero);
+                    nl_cmd_task_init(&vif->task_set_tx_power_fixed_zero, cmd, msg);
+                    vif->task_set_tx_power_fixed_zero.task.completed_fn =
+                        osw_plat_qsdk11_4_tx_power_fixed_zero_done_cb;
+                    vif->task_set_tx_power_fixed_zero.task.priv = vif;
+                    rq_add_task(q, &vif->task_set_tx_power_fixed_zero.task);
+                }
+                else {
+                    rq_task_kill(&vif->task_set_tx_power_fixed_zero.task);
+                    vif->percent_100_applied = false;
+                }
+            }
         }
     }
 }
@@ -5268,6 +5343,7 @@ osw_plat_qsdk11_4_vif_removed_cb(const struct nl_80211_vif *info,
     rq_kill(&vif->q_state);
     rq_fini(&vif->q_state);
     nl_cmd_task_fini(&vif->task_survey);
+    nl_cmd_task_fini(&vif->task_set_tx_power_fixed_zero);
     nl_cmd_task_fini(&vif->task_get_chanlist);
     nl_cmd_task_fini(&vif->task_get_mcast2ucast);
     nl_cmd_task_fini(&vif->task_get_mgmt_rate);
@@ -5758,6 +5834,7 @@ osw_plat_qsdk11_4_fix_phy_chan_states(struct osw_plat_qsdk11_4 *m,
     const struct ieee80211req_chaninfo_full *chans = &vif->chanlist_prev;
 
     osw_plat_qsdk11_4_fill_chan_states(phy_name, chans, state);
+    osw_plat_qsdk11_4_fill_chan_max_tx_power(phy_name, chans, state);
 
     /* This will result in possible double-call because if
      * the chanlist really changed it will generate another
@@ -6505,6 +6582,16 @@ osw_plat_qsdk_fix_vif_ap_multi_ap(struct osw_plat_qsdk11_4_vif *vif,
 }
 
 static void
+osw_plat_qsdk11_4_fix_tx_power(struct osw_plat_qsdk11_4_vif *vif,
+                                struct osw_drv_vif_state *state)
+{
+    if (vif == NULL) return;
+    if (!vif->percent_100_applied) return;
+
+    state->tx_power_percent = 100;
+}
+
+static void
 osw_plat_qsdk11_4_fix_vif_state_cb(struct osw_drv_nl80211_hook *hook,
                                    const char *phy_name,
                                    const char *vif_name,
@@ -6518,6 +6605,7 @@ osw_plat_qsdk11_4_fix_vif_state_cb(struct osw_drv_nl80211_hook *hook,
     const struct nl_80211_vif *vif_info = nl_80211_vif_by_name(nl, vif_name);
     struct osw_plat_qsdk11_4_vif *vif = nl_80211_sub_vif_get_priv(sub, vif_info);
 
+    osw_plat_qsdk11_4_fix_tx_power(vif, state);
     osw_plat_qsdk11_4_fix_mcast2ucast(vif, phy_name, vif_name, state);
     osw_plat_qsdk11_4_fix_rates(vif, phy_name, vif_name, state);
     osw_plat_qsdk11_4_fix_rrm(vif, phy_name, vif_name, state);

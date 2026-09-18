@@ -34,21 +34,81 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <stdint.h>
 
 #include "hw_acc.h"
+#include "hw_acc_helpers.h"
 #include "os.h"
 #include "log.h"
 #include "kconfig.h"
+#include "osn_types.h"
 
 #define MODULE_ID LOG_MODULE_ID_TARGET
 
 #define ECM_FRONT_END_SELECT "/sys/module/ecm/parameters/front_end_selection"
 
-bool hw_acc_flush(struct hw_acc_flush_flow_t *flow)
+bool hw_acc_flush_flow_per_tuple(struct hw_acc_flush_flow_t *flow)
 {
+    char cmd[256] = {0};
+
+    // Flush example:
+    // echo "ip_ver=4 sip=192.168.200.1 sport=5201 dip=192.168.200.10 dport=42438 protocol=6" > $CONFIG_QCA_HW_ACC_FLUSH_5TUPLE_FILE
+    if (flow->ip_version == 4) {
+        struct osn_ip_addr src_addr = {0};
+        struct osn_ip_addr dst_addr = {0};
+        src_addr.ia_prefix = -1;
+        dst_addr.ia_prefix = -1;
+
+        memcpy(&src_addr.ia_addr.s_addr, flow->src_ip, 4);
+        memcpy(&dst_addr.ia_addr.s_addr, flow->dst_ip, 4);
+
+        snprintf(cmd, sizeof(cmd), "ip_ver=%u sip="PRI_osn_ip_addr" sport=%hu dip="PRI_osn_ip_addr" dport=%hu protocol=%u\n",
+            flow->ip_version,
+            FMT_osn_ip_addr(src_addr), flow->src_port,
+            FMT_osn_ip_addr(dst_addr), flow->dst_port,
+            flow->protocol);
+    } else {
+        struct osn_ip6_addr src_addr = {0};
+        struct osn_ip6_addr dst_addr = {0};
+        src_addr.ia6_prefix = -1;
+        dst_addr.ia6_prefix = -1;
+
+        memcpy(src_addr.ia6_addr.s6_addr, flow->src_ip, 16);
+        memcpy(dst_addr.ia6_addr.s6_addr, flow->dst_ip, 16);
+
+        snprintf(cmd, sizeof(cmd), "ip_ver=%u sip="PRI_osn_ip6_addr" sport=%hu dip="PRI_osn_ip6_addr" dport=%hu protocol=%u\n",
+            flow->ip_version,
+            FMT_osn_ip6_addr(src_addr), flow->src_port,
+            FMT_osn_ip6_addr(dst_addr), flow->dst_port,
+            flow->protocol);
+    }
+
+    if (file_put(CONFIG_QCA_HW_ACC_FLUSH_5TUPLE_FILE, cmd) == -1)
+    {
+        LOGW("hw_acc: hw_acc_flush failed for cmd: '%s'", cmd);
+        return false;
+    }
+
     return true;
 }
 
-bool hw_acc_flush_flow_per_device(int devid)
+bool hw_acc_flush_flow_per_connection(struct hw_acc_flush_flow_t *flow)
 {
+    struct hw_acc_flush_flow_t original;
+    struct hw_acc_flush_flow_t reply;
+
+    if (hw_acc_lookup_ct_entry(flow, &original, &reply))
+    {
+        /* Flush using ct entry info */
+        hw_acc_flush_flow_per_tuple(&original);
+        hw_acc_flush_flow_per_tuple(&reply);
+    }
+    else
+    {
+        /* Naive flush (swap reply direction tuple) */
+        struct hw_acc_flush_flow_t reverse;
+        hw_acc_reverse_flush_flow(&reverse, flow);
+        hw_acc_flush_flow_per_tuple(flow);
+        hw_acc_flush_flow_per_tuple(&reverse);
+    }
+
     return true;
 }
 

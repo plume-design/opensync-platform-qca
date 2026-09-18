@@ -261,8 +261,7 @@ static struct nl_msg *osw_plat_qsdk_nl80211_msg_exttool_csa(
                       : c->width == OSW_CHANNEL_320MHZ ? osw_freq_to_chan(c->center_freq0_mhz)
                                                        : 0;
     const enum osw_band band = osw_freq_to_band(freq);
-    struct osw_channel ht40c;
-    memcpy(&ht40c, &c, sizeof(c));
+    struct osw_channel ht40c = *c;
     osw_channel_downgrade_to(&ht40c, OSW_CHANNEL_40MHZ);
     const enum osw_plat_qsdk_wifi_sec_chan_offset offset =
             ht40c.control_freq_mhz < ht40c.center_freq0_mhz   ? OSW_PLAT_QSDK_WIFI_SEC_CHAN_OFFSET_IS_PLUS
