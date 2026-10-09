@@ -272,7 +272,10 @@ prov_wifi() {
     phy="phy#$wiphy"
     suffix=$(radio_suffix $phy)
     suffix_short=$(short_radio_suffix_try $phy)
-    cfg80211tool $wifi rpt_max_phy 1
+
+    case "$(wifi_max_mode "$wifi")" in
+        *EHT*) cfg80211tool $wifi rpt_max_phy 1 ;;
+    esac
 
     log_info "prov: $wifi: $vap: provisioning, mode=$mode"
 

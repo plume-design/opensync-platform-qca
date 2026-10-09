@@ -96,7 +96,8 @@ static enum osw_plat_qsdk11_4_async_result osw_plat_qsdk_mode_upgrade_poll_cb(
     if (data->job_set_mode == NULL)
     {
         const int family_id = nl_80211_get_family_id(data->nl);
-        struct nl_msg *msg = osw_plat_qsdk_nl80211_msg_mode(family_id, data->ifindex, data->new_mode);
+        struct nl_msg *msg = osw_plat_qsdk_nl80211_msg_mode_noreset(family_id, data->ifindex, data->new_mode)
+                                     ?: osw_plat_qsdk_nl80211_msg_mode(family_id, data->ifindex, data->new_mode);
         const char *name = strfmta(LOG_PREFIX_VIF(data->phy_name, data->vif_name, "mode upgrade: set"));
         data->job_set_mode = osw_plat_qsdk_nlcmd_alloc(name, data->nl, msg);
         LOGI(LOG_PREFIX_VIF(
